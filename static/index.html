@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Screen Slickshift</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <h1>Screen Slickshift</h1>
+          <p id="connectionStatus">Disconnected</p>
+        </div>
+        <button id="lockoutButton" class="danger" type="button">Emergency Stop</button>
+      </header>
+
+      <section class="auth-panel" id="authPanel">
+        <label for="tokenInput">Pairing token</label>
+        <div class="auth-row">
+          <input id="tokenInput" type="password" autocomplete="off" placeholder="Enter token from Windows console" />
+          <button id="saveTokenButton" type="button">Connect</button>
+        </div>
+      </section>
+
+      <section class="grid">
+        <div class="panel touch-panel">
+          <div class="panel-header">
+            <h2>Touchpad</h2>
+            <button id="captureCursorButton" type="button">Capture Cursor</button>
+          </div>
+          <div id="touchpad" class="touchpad" aria-label="Touchpad area">
+            <span>Drag to move mouse</span>
+          </div>
+          <label class="slider-row" for="scrollSpeed">
+            <span>Scroll speed</span>
+            <input id="scrollSpeed" type="range" min="1" max="40" step="1" value="12" />
+            <output id="scrollSpeedValue">12x</output>
+          </label>
+          <div class="click-row">
+            <button id="leftClickButton" type="button">Left Click</button>
+            <button id="rightClickButton" type="button">Right Click</button>
+            <button id="middleClickButton" type="button">Middle Click</button>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>Text</h2>
+          <textarea id="textToSend" rows="5" placeholder="Type text here, then send it to the PC"></textarea>
+          <button id="sendTextButton" type="button">Send Text To PC</button>
+        </div>
+
+        <div class="panel">
+          <h2>Macros</h2>
+          <div id="macroList" class="macro-list"></div>
+        </div>
+
+        <div class="panel">
+          <h2>Clipboard</h2>
+          <textarea id="clipboardText" rows="5" placeholder="Clipboard text"></textarea>
+          <div class="click-row">
+            <button id="getClipboardButton" type="button">Get From PC</button>
+            <button id="setClipboardButton" type="button">Send To PC</button>
+          </div>
+        </div>
+
+        <div class="panel upload-panel">
+          <h2>File Drop</h2>
+          <div id="dropZone" class="drop-zone">
+            <input id="fileInput" type="file" />
+            <span>Drop file here or choose a file</span>
+          </div>
+          <button id="uploadButton" type="button">Upload</button>
+        </div>
+
+        <div class="panel log-panel">
+          <h2>Activity</h2>
+          <pre id="activityLog"></pre>
+        </div>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+config/pairing_token.txt
+config/trusted_devices.json
+config/device_identity.json
+logs/*.log
+uploads/*
+!uploads/.gitkeep

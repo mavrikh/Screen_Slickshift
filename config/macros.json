@@ -1,0 +1,22 @@
+{
+  "macros": [
+    {
+      "id": "open_notepad",
+      "label": "Notepad",
+      "description": "Open Windows Notepad",
+      "command": ["notepad.exe"]
+    },
+    {
+      "id": "lock_pc",
+      "label": "Lock PC",
+      "description": "Lock the Windows session",
+      "command": ["rundll32.exe", "user32.dll,LockWorkStation"]
+    },
+    {
+      "id": "open_calculator",
+      "label": "Calculator",
+      "description": "Open Calculator",
+      "command": ["explorer.exe", "shell:AppsFolder\\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"]
+    }
+  ]
+}
