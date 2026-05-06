@@ -18,6 +18,7 @@ DEFAULT_PERMISSIONS = {
     "clipboard_read": False,
     "clipboard_write": False,
     "file_receive": False,
+    "macros": False,
 }
 ALLOWED_IDLE_TIMEOUT_SECONDS = (60, 180, 300, 600, 1200, 1800)
 DEFAULT_IDLE_TIMEOUT_SECONDS = 600

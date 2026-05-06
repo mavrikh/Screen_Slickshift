@@ -97,7 +97,7 @@ Done when:
 
 ## Phase 3: Enforce Session-Scoped Permissions For Remote Control
 
-Status: in progress.
+Status: completed.
 
 Goal: use the existing session and permission model for real control actions.
 
@@ -117,6 +117,8 @@ Done when:
 - A guest/trusted client can be limited to specific permissions.
 - Emergency lockout revokes sessions and re-enable does not silently restore them.
 - Existing browser-control behavior is preserved for the local-owner token flow.
+
+Completed.
 
 ## Phase 4: Tighten File Transfer
 

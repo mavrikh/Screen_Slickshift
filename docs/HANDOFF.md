@@ -33,6 +33,7 @@ Current working shape:
 - Session-authenticated text and clipboard routes exist and enforce `keyboard`, `clipboard_read`, and `clipboard_write`.
 - Session-authenticated upload exists and enforces `file_receive`.
 - Uploads have a default 50 MB size limit.
+- LLM integration added: Local LLM support via OpenAI-compatible API (LM Studio). Configurable endpoint, centralized in `app/llm.py`. API route `/api/generate-text` for text generation.
 - Browser WebSocket auth now sends the token as the first message instead of putting it in the URL. Project run helpers disable Uvicorn access logs.
 
 Do not assume native cross-platform agents, edge handoff, TLS, discovery, screen capture, or trusted-device UI exist yet.
@@ -66,6 +67,7 @@ Known local environment note from 2026-05-06:
 - On this Mac, system Python is `/usr/bin/python3` at Python 3.9.6.
 - Plain `python` is available after activating `.venv`.
 - `requirements.txt` includes macOS Python 3.9 `pyobjc` pins so `pyautogui` dependencies install without building an incompatible yanked version.
+- LM Studio running locally at http://localhost:1234/v1 with Qwen coding model.
 
 ## Verification Commands
 
@@ -89,6 +91,7 @@ Phase 1 status:
 - Done for macOS-first development.
 - Windows verification deferred.
 - Phase 2 Security panel implementation is complete for the current browser UI.
+- Phase 3 session-scoped permissions enforcement is complete.
 
 For a syntax/import sanity check on macOS sandboxed environments:
 

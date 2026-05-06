@@ -27,6 +27,8 @@ class Settings:
     trusted_devices_file: Path = TRUSTED_DEVICES_FILE
     device_identity_file: Path = DEVICE_IDENTITY_FILE
     allowed_origins: tuple[str, ...] = ()
+    llm_base_url: str = "http://localhost:1234/v1"
+    llm_api_key: str = "not-needed"
 
 
 settings = Settings()
@@ -43,10 +45,10 @@ def get_or_create_pairing_token() -> str:
     ensure_directories()
     if TOKEN_FILE.exists():
         token = TOKEN_FILE.read_text(encoding="utf-8").strip()
-        if token:
+        if token and len(token) == 6 and token.isdigit():
             return token
 
-    token = secrets.token_urlsafe(24)
+    token = str(secrets.randbelow(1000000)).zfill(6)
     TOKEN_FILE.write_text(token + "\n", encoding="utf-8")
     return token
 

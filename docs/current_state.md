@@ -113,9 +113,11 @@ Working browser-control MVP:
 - Session-authenticated text route enforcing `keyboard` permission.
 - Session-authenticated clipboard read/write routes enforcing `clipboard_read` and `clipboard_write`.
 - Session-authenticated upload route enforcing `file_receive` permission.
+- Session-authenticated macro route enforcing `macros` permission.
 - Default 50 MB upload size limit.
 - Activity log in the browser UI.
 - Rotating server logs.
+- LLM text generation via `/api/generate-text` route, using local OpenAI-compatible API (LM Studio).
 
 Backend pairing/trust code implemented and tested:
 
@@ -176,7 +178,7 @@ Known security gaps or unclear areas:
 - No TLS or local certificate support is implemented.
 - No network discovery security model is implemented.
 - The UI does not yet show the upload size limit before file selection.
-- Trusted-device/session authorization is enforced for session-authenticated touchpad mouse actions, text, clipboard read/write, and upload, but not yet for macros.
+- Trusted-device/session authorization is enforced for session-authenticated touchpad mouse actions, text, clipboard read/write, upload, and macros.
 - The macOS receiver uses a temporary token but has no persistent trust model.
 
 ## 5. Platform-Specific Code

@@ -4,7 +4,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 from typing import Optional
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile, WebSocket
+from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Query, UploadFile, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -16,6 +16,7 @@ from app.config import LOG_DIR, STATIC_DIR, ensure_directories, get_or_create_pa
 from app.device_identity import get_or_create_device_identity
 from app.files import save_upload
 from app.input_control import send_text_to_pc
+from app.llm import generate_text
 from app.pairing import PairingCodeBook, PairingSessionBook, TrustedDeviceStore
 from app.security import token_is_valid, verify_token, verify_websocket_token
 from app.state import lockout_state
@@ -43,8 +44,8 @@ class SessionTextRequest(SessionRequest):
     text: str
 
 
-class SessionClipboardWriteRequest(SessionRequest):
-    text: str
+class SessionMacroRequest(SessionRequest):
+    id: str
 
 
 class LockoutRequest(BaseModel):
@@ -69,6 +70,11 @@ class TrustedDevicePermissionsRequest(BaseModel):
 
 class TrustReviewRequest(BaseModel):
     keep_trust: bool
+
+
+class LLMRequest(BaseModel):
+    prompt: str
+    max_tokens: int = 1000
 
 
 def configure_logging() -> None:
@@ -327,6 +333,17 @@ async def macros() -> dict:
     return {"macros": public_macro_list()}
 
 
+@app.post("/api/generate-text", dependencies=[Depends(verify_token)])
+async def generate_text_api(payload: LLMRequest) -> dict:
+    try:
+        generated = generate_text(payload.prompt, payload.max_tokens)
+        logger.info("Generated text with LLM (%s chars).", len(generated))
+        return {"ok": True, "generated": generated}
+    except Exception as exc:
+        logger.exception("Failed to generate text.")
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.post("/api/send-text", dependencies=[Depends(verify_token)])
 async def send_text(payload: TextRequest) -> dict:
     try:
@@ -339,16 +356,16 @@ async def send_text(payload: TextRequest) -> dict:
 
 
 @app.post("/api/session/send-text")
-async def session_send_text(payload: SessionTextRequest) -> dict:
+async def session_send_text(session_id: str = Body(...), session_token: str = Body(...), text: str = Body(...)) -> dict:
     verify_session_permission_or_403(
-        payload.session_id,
-        payload.session_token,
+        session_id,
+        session_token,
         "keyboard",
     )
     try:
-        send_text_to_pc(payload.text)
-        mark_session_active(payload.session_id, payload.session_token)
-        logger.info("Sent text to PC from session %s (%s chars).", payload.session_id, len(payload.text))
+        send_text_to_pc(text)
+        mark_session_active(session_id, session_token)
+        logger.info("Sent text to PC from session %s (%s chars).", session_id, len(text))
         return {"ok": True}
     except Exception as exc:
         logger.exception("Failed to send text from session.")
@@ -366,6 +383,23 @@ async def macro(payload: MacroRequest) -> dict:
         logger.exception("Failed to run macro.")
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+@app.post("/api/session/macro")
+async def session_macro(session_id: str = Body(...), session_token: str = Body(...), id: str = Body(...)) -> dict:
+    verify_session_permission_or_403(
+        session_id,
+        session_token,
+        "macros",
+    )
+    try:
+        result = run_macro(id)
+        mark_session_active(session_id, session_token)
+        logger.info("Ran macro from session %s: %s.", session_id, id)
+        return {"ok": True, "macro": result}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Failed to run macro from session.")
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 @app.get("/api/clipboard", dependencies=[Depends(verify_token)])
 async def get_clipboard() -> dict:
@@ -377,16 +411,16 @@ async def get_clipboard() -> dict:
 
 
 @app.post("/api/session/clipboard/read")
-async def session_get_clipboard(payload: SessionRequest) -> dict:
+async def session_get_clipboard(session_id: str = Body(...), session_token: str = Body(...)) -> dict:
     verify_session_permission_or_403(
-        payload.session_id,
-        payload.session_token,
+        session_id,
+        session_token,
         "clipboard_read",
     )
     try:
         text = clipboard_service.get_clipboard_text()
-        mark_session_active(payload.session_id, payload.session_token)
-        logger.info("Clipboard read from session %s (%s chars).", payload.session_id, len(text))
+        mark_session_active(session_id, session_token)
+        logger.info("Clipboard read from session %s (%s chars).", session_id, len(text))
         return {"text": text}
     except Exception as exc:
         logger.exception("Failed to get clipboard from session.")
@@ -405,16 +439,16 @@ async def set_clipboard(payload: ClipboardRequest) -> dict:
 
 
 @app.post("/api/session/clipboard/write")
-async def session_set_clipboard(payload: SessionClipboardWriteRequest) -> dict:
+async def session_set_clipboard(session_id: str = Body(...), session_token: str = Body(...), text: str = Body(...)) -> dict:
     verify_session_permission_or_403(
-        payload.session_id,
-        payload.session_token,
+        session_id,
+        session_token,
         "clipboard_write",
     )
     try:
-        clipboard_service.set_clipboard_text(payload.text)
-        mark_session_active(payload.session_id, payload.session_token)
-        logger.info("Clipboard updated from session %s (%s chars).", payload.session_id, len(payload.text))
+        clipboard_service.set_clipboard_text(text)
+        mark_session_active(session_id, session_token)
+        logger.info("Clipboard updated from session %s (%s chars).", session_id, len(text))
         return {"ok": True}
     except Exception as exc:
         logger.exception("Failed to set clipboard from session.")
