@@ -55,6 +55,34 @@ The Windows server still accepts the older MVP aliases during the transition:
 - `move` maps to `mouse_move`.
 - `click` maps to `mouse_button`.
 
+The current browser UI authenticates `/ws/touchpad` by opening the WebSocket and
+sending the pairing token as the first message, so the token is not placed in
+the WebSocket URL:
+
+```json
+{
+  "type": "auth",
+  "token": "pairing-token"
+}
+```
+
+The backend still accepts the older query-token WebSocket form for compatibility
+for now, but new clients should avoid putting credentials in URLs.
+
+Session-authenticated clients can authenticate the touchpad WebSocket with:
+
+```json
+{
+  "type": "session_auth",
+  "session_id": "session-id",
+  "session_token": "shown-once-session-token"
+}
+```
+
+After `session_auth`, `mouse_move`, `mouse_button`, and `scroll` require the
+session's `mouse` permission. Accepted mouse actions update `last_active_at`.
+Pings and rejected actions do not keep the session alive.
+
 ## Device Hello
 
 Each native agent should create a stable local device identity on first launch.
@@ -250,6 +278,23 @@ Text input:
 }
 ```
 
+The current HTTP session route for text input is:
+
+```text
+POST /api/session/send-text
+```
+
+```json
+{
+  "session_id": "session-id",
+  "session_token": "shown-once-session-token",
+  "text": "hello"
+}
+```
+
+This requires the `keyboard` permission and updates `last_active_at` only after
+accepted text input. Typed text should not be logged.
+
 ## Clipboard
 
 Clipboard should be permissioned separately from mouse/keyboard control.
@@ -272,6 +317,56 @@ Manual clipboard request:
   "format": "text/plain"
 }
 ```
+
+The current HTTP session routes for clipboard are:
+
+```text
+POST /api/session/clipboard/read
+POST /api/session/clipboard/write
+```
+
+Read request:
+
+```json
+{
+  "session_id": "session-id",
+  "session_token": "shown-once-session-token"
+}
+```
+
+Write request:
+
+```json
+{
+  "session_id": "session-id",
+  "session_token": "shown-once-session-token",
+  "text": "hello"
+}
+```
+
+Clipboard read requires `clipboard_read`. Clipboard write requires
+`clipboard_write`. Clipboard contents should not be logged.
+
+## File Receive
+
+The current HTTP session route for receiving files is:
+
+```text
+POST /api/session/upload
+```
+
+This is a multipart form request with these fields:
+
+```text
+session_id=session-id
+session_token=shown-once-session-token
+file=@local-file
+```
+
+Session uploads require `file_receive`. Accepted uploads update
+`last_active_at` only after the file is saved. Upload filenames are sanitized,
+saved under `uploads/`, and limited to 50 MB by default. File contents should
+not be logged or auto-opened.
 
 ## Emergency Stop
 

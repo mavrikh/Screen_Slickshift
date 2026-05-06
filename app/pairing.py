@@ -7,7 +7,7 @@ import secrets
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from app import config
 
@@ -30,7 +30,7 @@ class TrustedDevice:
     secret_hash: str
     permissions: dict[str, bool] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
-    last_seen_at: float | None = None
+    last_seen_at: Optional[float] = None
     review_required: bool = False
 
     def public_dict(self) -> dict[str, Any]:
@@ -53,7 +53,7 @@ class PairingCode:
 
 @dataclass(frozen=True)
 class PairingCodeConsumeResult:
-    pairing_code: PairingCode | None
+    pairing_code: Optional[PairingCode]
     rate_limited: bool = False
     regenerate_required: bool = False
 
@@ -122,7 +122,7 @@ class PairingCodeBook:
         self._codes[code] = pairing_code
         return pairing_code
 
-    def consume_code(self, code: str) -> PairingCode | None:
+    def consume_code(self, code: str) -> Optional[PairingCode]:
         result = self.consume_code_result(code)
         if result.rate_limited:
             return None
@@ -179,7 +179,7 @@ class PairingSessionBook:
         self,
         device_id: str,
         guest: bool,
-        permissions: dict[str, bool] | None = None,
+        permissions: Optional[dict[str, bool]] = None,
         idle_timeout_seconds: int = DEFAULT_IDLE_TIMEOUT_SECONDS,
     ) -> PairingSessionGrant:
         self.discard_expired()
@@ -199,7 +199,7 @@ class PairingSessionBook:
         self._sessions[session.session_id] = session
         return PairingSessionGrant(session=session, session_token=session_token)
 
-    def verify_session(self, session_id: str, session_token: str) -> PairingSession | None:
+    def verify_session(self, session_id: str, session_token: str) -> Optional[PairingSession]:
         session = self._sessions.get(session_id)
         if session is None:
             return None
@@ -217,7 +217,7 @@ class PairingSessionBook:
         session_id: str,
         session_token: str,
         permission: str,
-    ) -> PairingSession | None:
+    ) -> Optional[PairingSession]:
         if permission not in DEFAULT_PERMISSIONS:
             return None
 
@@ -228,7 +228,7 @@ class PairingSessionBook:
             return None
         return session
 
-    def mark_session_active(self, session_id: str, session_token: str) -> PairingSession | None:
+    def mark_session_active(self, session_id: str, session_token: str) -> Optional[PairingSession]:
         session = self.verify_session(session_id, session_token)
         if session is None:
             return None
@@ -286,20 +286,20 @@ class PairingSessionBook:
 
 
 class TrustedDeviceStore:
-    def __init__(self, path: Path | None = None) -> None:
+    def __init__(self, path: Optional[Path] = None) -> None:
         self.path = path or config.TRUSTED_DEVICES_FILE
 
     def list_devices(self) -> list[TrustedDevice]:
         return list(self._load().values())
 
-    def get_device(self, device_id: str) -> TrustedDevice | None:
+    def get_device(self, device_id: str) -> Optional[TrustedDevice]:
         return self._load().get(device_id)
 
     def trust_device(
         self,
         device_id: str,
         name: str,
-        permissions: dict[str, bool] | None = None,
+        permissions: Optional[dict[str, bool]] = None,
     ) -> PairingCredential:
         shared_secret = secrets.token_urlsafe(32)
         device = TrustedDevice(
@@ -324,7 +324,7 @@ class TrustedDeviceStore:
         actual = _hash_secret(shared_secret)
         return hmac.compare_digest(expected, actual)
 
-    def verify_and_mark_seen(self, device_id: str, shared_secret: str) -> TrustedDevice | None:
+    def verify_and_mark_seen(self, device_id: str, shared_secret: str) -> Optional[TrustedDevice]:
         devices = self._load()
         device = devices.get(device_id)
         if device is None:
@@ -354,7 +354,7 @@ class TrustedDeviceStore:
         self,
         device_id: str,
         permissions: dict[str, bool],
-    ) -> TrustedDevice | None:
+    ) -> Optional[TrustedDevice]:
         devices = self._load()
         device = devices.get(device_id)
         if device is None:
@@ -398,7 +398,7 @@ class TrustedDeviceStore:
             self._save(devices)
         return changed
 
-    def resolve_review(self, device_id: str, keep_trust: bool) -> TrustedDevice | None:
+    def resolve_review(self, device_id: str, keep_trust: bool) -> Optional[TrustedDevice]:
         devices = self._load()
         device = devices.get(device_id)
         if device is None:
@@ -472,7 +472,7 @@ def _hash_secret(secret: str) -> str:
     return hashlib.sha256(secret.encode("utf-8")).hexdigest()
 
 
-def _clean_permissions(permissions: dict[str, bool] | None) -> dict[str, bool]:
+def _clean_permissions(permissions: Optional[dict[str, bool]]) -> dict[str, bool]:
     clean = dict(DEFAULT_PERMISSIONS)
     if not permissions:
         return clean
@@ -489,7 +489,7 @@ def _clean_idle_timeout(value: int) -> int:
     return DEFAULT_IDLE_TIMEOUT_SECONDS
 
 
-def _trusted_device_from_dict(data: dict[str, Any]) -> TrustedDevice | None:
+def _trusted_device_from_dict(data: dict[str, Any]) -> Optional[TrustedDevice]:
     device_id = data.get("device_id")
     name = data.get("name")
     secret_hash = data.get("secret_hash")
@@ -534,7 +534,7 @@ def _float_or_default(value: Any, default: float) -> float:
         return default
 
 
-def _optional_float(value: Any) -> float | None:
+def _optional_float(value: Any) -> Optional[float]:
     if value is None:
         return None
     try:

@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import logging
 from logging.handlers import RotatingFileHandler
+from typing import Optional
 
-from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile, WebSocket
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -16,7 +17,7 @@ from app.device_identity import get_or_create_device_identity
 from app.files import save_upload
 from app.input_control import send_text_to_pc
 from app.pairing import PairingCodeBook, PairingSessionBook, TrustedDeviceStore
-from app.security import verify_token, verify_websocket_token
+from app.security import token_is_valid, verify_token, verify_websocket_token
 from app.state import lockout_state
 from app.websocket import handle_touchpad_socket
 
@@ -30,6 +31,19 @@ class MacroRequest(BaseModel):
 
 
 class ClipboardRequest(BaseModel):
+    text: str
+
+
+class SessionRequest(BaseModel):
+    session_id: str
+    session_token: str
+
+
+class SessionTextRequest(SessionRequest):
+    text: str
+
+
+class SessionClipboardWriteRequest(SessionRequest):
     text: str
 
 
@@ -90,6 +104,28 @@ app.add_middleware(
 )
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+def verify_session_permission_or_403(
+    session_id: str,
+    session_token: str,
+    permission: str,
+):
+    session = pairing_session_book.verify_session_permission(
+        session_id,
+        session_token,
+        permission,
+    )
+    if session is None:
+        raise HTTPException(
+            status_code=403,
+            detail="Missing, expired, or unauthorized session.",
+        )
+    return session
+
+
+def mark_session_active(session_id: str, session_token: str) -> None:
+    pairing_session_book.mark_session_active(session_id, session_token)
 
 
 @app.on_event("startup")
@@ -302,6 +338,23 @@ async def send_text(payload: TextRequest) -> dict:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.post("/api/session/send-text")
+async def session_send_text(payload: SessionTextRequest) -> dict:
+    verify_session_permission_or_403(
+        payload.session_id,
+        payload.session_token,
+        "keyboard",
+    )
+    try:
+        send_text_to_pc(payload.text)
+        mark_session_active(payload.session_id, payload.session_token)
+        logger.info("Sent text to PC from session %s (%s chars).", payload.session_id, len(payload.text))
+        return {"ok": True}
+    except Exception as exc:
+        logger.exception("Failed to send text from session.")
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.post("/api/macro", dependencies=[Depends(verify_token)])
 async def macro(payload: MacroRequest) -> dict:
     try:
@@ -323,6 +376,23 @@ async def get_clipboard() -> dict:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.post("/api/session/clipboard/read")
+async def session_get_clipboard(payload: SessionRequest) -> dict:
+    verify_session_permission_or_403(
+        payload.session_id,
+        payload.session_token,
+        "clipboard_read",
+    )
+    try:
+        text = clipboard_service.get_clipboard_text()
+        mark_session_active(payload.session_id, payload.session_token)
+        logger.info("Clipboard read from session %s (%s chars).", payload.session_id, len(text))
+        return {"text": text}
+    except Exception as exc:
+        logger.exception("Failed to get clipboard from session.")
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.post("/api/clipboard", dependencies=[Depends(verify_token)])
 async def set_clipboard(payload: ClipboardRequest) -> dict:
     try:
@@ -334,6 +404,23 @@ async def set_clipboard(payload: ClipboardRequest) -> dict:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.post("/api/session/clipboard/write")
+async def session_set_clipboard(payload: SessionClipboardWriteRequest) -> dict:
+    verify_session_permission_or_403(
+        payload.session_id,
+        payload.session_token,
+        "clipboard_write",
+    )
+    try:
+        clipboard_service.set_clipboard_text(payload.text)
+        mark_session_active(payload.session_id, payload.session_token)
+        logger.info("Clipboard updated from session %s (%s chars).", payload.session_id, len(payload.text))
+        return {"ok": True}
+    except Exception as exc:
+        logger.exception("Failed to set clipboard from session.")
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.post("/api/upload", dependencies=[Depends(verify_token)])
 async def upload(file: UploadFile = File(...)) -> dict:
     try:
@@ -342,6 +429,27 @@ async def upload(file: UploadFile = File(...)) -> dict:
         return {"ok": True, "file": result}
     except Exception as exc:
         logger.exception("Failed to save upload.")
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/session/upload")
+async def session_upload(
+    session_id: str = Form(...),
+    session_token: str = Form(...),
+    file: UploadFile = File(...),
+) -> dict:
+    verify_session_permission_or_403(
+        session_id,
+        session_token,
+        "file_receive",
+    )
+    try:
+        result = await save_upload(file)
+        mark_session_active(session_id, session_token)
+        logger.info("Saved upload from session %s: %s (%s bytes).", session_id, result["filename"], result["bytes"])
+        return {"ok": True, "file": result}
+    except Exception as exc:
+        logger.exception("Failed to save upload from session.")
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
@@ -372,7 +480,48 @@ async def set_lockout(payload: LockoutRequest) -> dict:
 
 
 @app.websocket("/ws/touchpad")
-async def touchpad(websocket: WebSocket, token: str | None = Query(default=None)) -> None:
-    if not await verify_websocket_token(websocket, token):
+async def touchpad(websocket: WebSocket, token: Optional[str] = Query(default=None)) -> None:
+    if token is not None:
+        if not await verify_websocket_token(websocket, token):
+            return
+        await handle_touchpad_socket(websocket)
         return
-    await handle_touchpad_socket(websocket)
+
+    await websocket.accept()
+    try:
+        message = await websocket.receive_json()
+    except Exception:
+        await websocket.close(code=1008, reason="Missing or invalid pairing token.")
+        return
+
+    if message.get("type") != "auth" or not token_is_valid(message.get("token")):
+        if message.get("type") != "session_auth":
+            await websocket.close(code=1008, reason="Missing or invalid pairing token.")
+            return
+
+        session_id = message.get("session_id")
+        session_token = message.get("session_token")
+        if not isinstance(session_id, str) or not isinstance(session_token, str):
+            await websocket.close(code=1008, reason="Missing or invalid session credentials.")
+            return
+        if pairing_session_book.verify_session(session_id, session_token) is None:
+            await websocket.close(code=1008, reason="Missing or invalid session credentials.")
+            return
+
+        await handle_touchpad_socket(
+            websocket,
+            accepted=True,
+            authorize_mouse=lambda: pairing_session_book.verify_session_permission(
+                session_id,
+                session_token,
+                "mouse",
+            )
+            is not None,
+            mark_session_active=lambda: pairing_session_book.mark_session_active(
+                session_id,
+                session_token,
+            ),
+        )
+        return
+
+    await handle_touchpad_socket(websocket, accepted=True)

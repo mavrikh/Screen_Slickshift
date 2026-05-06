@@ -127,6 +127,25 @@ temporary sessions so old permissions cannot continue running.
 Removing a trusted device should also revoke that device's active temporary
 sessions.
 
+The touchpad WebSocket now supports session authentication for guest/trusted
+clients. Session-authenticated touchpad input verifies `mouse` permission for
+movement, clicking, and scrolling. Accepted mouse actions refresh
+`last_active_at`; pings and rejected actions do not.
+
+Session-authenticated text input verifies `keyboard`. Session-authenticated
+clipboard routes verify `clipboard_read` and `clipboard_write` separately. Text
+and clipboard contents must not be logged; logs should only include metadata
+such as accepted action type, session id, and character counts.
+
+Session-authenticated uploads verify `file_receive`. Upload filenames are
+sanitized and saved only under `uploads/`. Uploads have a default 50 MB limit,
+and rejected or oversized uploads should not leave partial files behind.
+
+The browser UI sends the owner pairing token as the first WebSocket message
+rather than in the WebSocket URL. The backend still accepts the older query-token
+form temporarily for compatibility. Project run helpers disable Uvicorn access
+logs by default to reduce the chance of credentials appearing in request logs.
+
 ## Network Exposure
 
 The app should bind to local interfaces intentionally.
@@ -217,8 +236,8 @@ If enabled:
 - Save to a dedicated folder.
 - Sanitize filenames.
 - Avoid auto-opening files.
-- Consider per-device permission.
-- Consider size limits.
+- Require per-session `file_receive` permission for session-authenticated clients.
+- Enforce size limits.
 
 ## Macros
 

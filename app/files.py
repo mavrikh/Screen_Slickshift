@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Optional
 
 from fastapi import UploadFile
 
@@ -34,20 +35,27 @@ def unique_upload_path(filename: str) -> Path:
         counter += 1
 
 
-async def save_upload(file: UploadFile) -> dict:
+async def save_upload(file: UploadFile, max_bytes: Optional[int] = None) -> dict:
     if lockout_state.is_disabled():
         raise RuntimeError("File upload is disabled by emergency lockout.")
 
     settings.upload_dir.mkdir(parents=True, exist_ok=True)
     target = unique_upload_path(file.filename or "upload.bin")
+    byte_limit = settings.max_upload_bytes if max_bytes is None else max_bytes
 
     total = 0
-    with target.open("wb") as output:
-        while True:
-            chunk = await file.read(1024 * 1024)
-            if not chunk:
-                break
-            total += len(chunk)
-            output.write(chunk)
+    try:
+        with target.open("wb") as output:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > byte_limit:
+                    raise RuntimeError(f"File upload exceeds the {byte_limit} byte limit.")
+                output.write(chunk)
+    except Exception:
+        target.unlink(missing_ok=True)
+        raise
 
     return {"filename": target.name, "bytes": total, "path": str(target)}

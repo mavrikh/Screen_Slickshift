@@ -5,7 +5,6 @@ import logging
 import secrets
 from dataclasses import dataclass
 
-import pyautogui
 import uvicorn
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 
@@ -13,9 +12,6 @@ from app.protocol import parse_event
 
 
 logger = logging.getLogger("macos_receiver")
-
-pyautogui.FAILSAFE = True
-pyautogui.PAUSE = 0
 
 
 @dataclass
@@ -26,6 +22,7 @@ class ReceiverState:
 
 state = ReceiverState(token="")
 app = FastAPI(title="Screen Slickshift macOS Receiver")
+_pyautogui_backend = None
 
 
 @app.get("/")
@@ -75,10 +72,13 @@ async def input_socket(websocket: WebSocket, token: str = Query(default="")) -> 
                 continue
 
             if event.type == "mouse_move":
+                pyautogui = _pyautogui()
                 pyautogui.moveRel(int(event.dx), int(event.dy), duration=0)
             elif event.type == "mouse_button" and event.down:
+                pyautogui = _pyautogui()
                 pyautogui.click(button=event.button)
             elif event.type == "scroll":
+                pyautogui = _pyautogui()
                 pyautogui.scroll(event.amount)
             elif event.type == "ping":
                 continue
@@ -111,6 +111,25 @@ def main() -> None:
     print("")
 
     uvicorn.run(app, host=args.host, port=args.port)
+
+
+def _pyautogui():
+    global _pyautogui_backend
+    if _pyautogui_backend is not None:
+        return _pyautogui_backend
+
+    try:
+        import pyautogui
+    except Exception as exc:
+        logger.exception("Desktop input backend is unavailable.")
+        raise RuntimeError(
+            "Desktop input backend is unavailable. Install pyautogui and grant Accessibility permission."
+        ) from exc
+
+    pyautogui.FAILSAFE = True
+    pyautogui.PAUSE = 0
+    _pyautogui_backend = pyautogui
+    return _pyautogui_backend
 
 
 if __name__ == "__main__":

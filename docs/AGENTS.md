@@ -65,7 +65,7 @@ Screen Recording should not be needed. Do not grant Screen Recording for this pr
 On the Mac receiver:
 
 ```bash
-cd /path/to/screen_slickshift
+cd /path/to/Screen_Slickshift
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
@@ -77,7 +77,7 @@ The receiver prints a pairing token.
 On the sender machine:
 
 ```powershell
-cd C:\Users\mavri\Documents\Codex\2026-05-05\you-are-gpt-codex-acting-as\screen_slickshift
+cd C:\path\to\Screen_Slickshift
 .\.venv\Scripts\Activate.ps1
 python -m agents.send_test_input --host MAC_IP --port 8770 --token TOKEN --action wiggle
 ```

@@ -1,203 +1,235 @@
-# Screen Slickshift Roadmap
+# Roadmap
 
-This project started as a Steam Deck browser control panel for a Windows PC. The long-term goal is a local-only, cross-platform input sharing app for Windows, macOS, and Linux/SteamOS.
+This roadmap is grounded in the current repository state. It separates implemented behavior from cautious next steps.
 
-The project should move slowly, with each phase producing something testable.
+## Current Baseline
 
-## Current MVP
+Implemented today:
 
-The current app is a Windows FastAPI server with a Steam Deck-friendly browser UI.
-
-It supports:
-
-- Token-protected browser access.
-- Pointer/touchpad movement.
+- FastAPI server that can be started from a prepared Python environment on macOS or Windows.
+- Steam Deck-friendly browser UI.
+- Token-protected browser control.
+- Mouse/touchpad movement.
 - Mouse clicks.
 - Scroll forwarding.
 - Text sending.
 - Clipboard get/set.
-- Approved macros.
-- File uploads to a safe folder.
+- Approved local macros.
+- File uploads to `uploads/`.
 - Emergency lockout.
+- Protocol parser for mouse movement, mouse button, scroll, and ping.
+- Backend device identity, pairing-code, trusted-device, permission, and session primitives.
+- Experimental macOS receiver and sender test scripts.
+- Lazy loading for desktop input and clipboard backends.
+- Platform filtering for configured macros.
+- Security panel for trusted devices, sessions, pairing codes, trust review, and permission toggles.
+- Session-authenticated touchpad WebSocket input with `mouse` permission enforcement.
+- Session-authenticated text, clipboard, and upload routes with permission enforcement.
+- Default 50 MB upload size limit.
 
-This remains useful as the first controller surface, but it is not enough for full cross-platform mouse sharing.
+Not implemented today:
 
-## Long-Term Goal
+- Native Windows sender.
+- Native Linux/SteamOS agent.
+- Packaged macOS app.
+- Edge-of-screen handoff.
+- Global keyboard/mouse capture.
+- Session-scoped authorization for macros.
+- TLS/local certificates.
+- mDNS discovery.
+- Upload size limit display in the UI.
+- Screen capture or remote desktop preview.
 
-Run an agent on each device so one device can control another over the local network.
+## Development Principles
 
-Target platforms:
+- Keep the Windows browser-control MVP working.
+- Preserve protocol compatibility unless deliberately migrating.
+- Keep security behavior visible.
+- Prefer small, testable changes.
+- Keep clipboard and file transfer separately permissioned.
+- Do not add screen capture, screenshots, OCR, or video features without an explicit future request.
+- Avoid admin/root assumptions unless a platform feature genuinely needs them and the user accepts that tradeoff.
 
-- Windows.
-- macOS.
-- Linux, especially SteamOS/Wayland where practical.
+## Phase 1: Document And Stabilize Current State
 
-Desired behavior:
+Status: done for the current macOS-first development baseline.
 
-- Pair devices on the local network.
-- Share mouse and keyboard control.
-- Eventually move control by crossing the edge of a screen.
-- Optionally sync clipboard.
-- Keep file transfer optional and permission-controlled.
-- Avoid cloud services, accounts, telemetry, and remote servers.
+Windows verification is deferred until a Windows machine with Python is available. That is acceptable for now because the immediate target is mac-to-mac development, while the Windows browser-control MVP remains preserved in code and docs.
 
-## Phase 1: Polish Current Browser Controller
+Goals:
 
-Improve the existing Windows server and Steam Deck browser UI.
+- Keep `README.md`, `AGENTS.md`, `docs/current_state.md`, and this roadmap accurate.
+- Make clear which pairing/session pieces are active versus scaffolded.
+- Keep the existing tests passing.
+- Keep Python setup and server startup usable on macOS.
+- Keep Windows setup documented and avoid breaking the existing Windows path.
 
-Possible next features:
+Done when:
 
-- Mouse sensitivity slider.
-- Scroll direction toggle.
-- Keyboard shortcut panel.
-- Saved browser preferences.
-- Better connection status.
-- Better emergency stop state.
-- Gamepad API experiments for Steam Deck controls.
+- A new contributor can run the server and tests from the docs on macOS.
+- The docs do not imply unimplemented native-agent behavior exists.
+- Deferred work is explicitly marked rather than treated as unknown.
 
-## Phase 2: Shared Protocol
+## Phase 2: Surface Pairing And Session State In The UI
 
-Define the local message format used by agents and browser clients.
+Status: in progress.
 
-The protocol should support:
+Goal: make the existing backend trust/session model visible before using it for more control.
 
-- Device hello/status.
-- Pairing.
-- Mouse move.
-- Mouse button down/up.
-- Scroll.
-- Key down/up.
-- Text input.
-- Clipboard get/set.
-- Emergency stop.
-- Permission negotiation.
+Possible work:
 
-The protocol should stay simple and readable at first.
+- Show the local device identity. Done.
+- Show trusted devices. Done.
+- Show active pairing sessions. Done.
+- Generate trusted and guest pairing codes. Done.
+- Allow revoking one session. Done.
+- Allow revoking all sessions. Done.
+- Show `review_required` state for trusted devices. Done.
+- Add trust-review actions for keep/remove. Done.
+- Add trusted-device permission toggles. Done.
+- Browser-test the panel on the current macOS baseline.
 
-## Phase 3: Windows Sender Agent
+Done when:
 
-Build a Windows agent that can send input events to another paired device.
+- The browser UI can inspect and manage the backend trust/session state already present in code.
+- Session and trusted-device secrets remain hidden from UI responses and logs.
+- Permission enforcement remains deferred until state management is stable.
 
-First version:
+## Phase 3: Enforce Session-Scoped Permissions For Remote Control
 
-- Manual start/stop.
+Status: in progress.
+
+Goal: use the existing session and permission model for real control actions.
+
+Possible work:
+
+- Keep `X-Pairing-Token` as local-owner/admin authorization. Done.
+- Add a separate session credential path for guest/trusted remote clients. Done for touchpad WebSocket.
+- Require `mouse` permission for touchpad movement, clicks, and scroll. Done for session-authenticated touchpad WebSocket.
+- Require `keyboard` permission for text or future keyboard input. Done for session-authenticated text send route.
+- Require `clipboard_read` and `clipboard_write` for clipboard actions. Done for session-authenticated clipboard read/write routes.
+- Require `file_receive` for uploads. Done for session-authenticated upload route.
+- Update `last_active_at` only after accepted permissioned actions. Done for touchpad WebSocket mouse actions, session text, session clipboard, and session upload.
+- Ensure pings and rejected actions do not keep sessions alive. Done for touchpad WebSocket session auth.
+
+Done when:
+
+- A guest/trusted client can be limited to specific permissions.
+- Emergency lockout revokes sessions and re-enable does not silently restore them.
+- Existing browser-control behavior is preserved for the local-owner token flow.
+
+## Phase 4: Tighten File Transfer
+
+Goal: keep file transfer optional and bounded.
+
+Possible work:
+
+- Add a configurable upload size limit.
+- Report rejected uploads clearly. Done at the API level; UI preflight/display remains.
+- Keep uploads in the dedicated `uploads/` directory.
+- Avoid auto-opening uploaded files.
+- Consider per-device file receive permission once session auth is active. Done for session-authenticated upload route.
+
+Done when:
+
+- Upload behavior is permissioned and has a clear maximum size.
+
+## Phase 5: Improve Protocol Without Breaking Existing Clients
+
+Goal: evolve the protocol from simple mouse messages toward cross-device input sharing.
+
+Possible work:
+
+- Version messages.
+- Define session-authenticated message envelopes.
+- Add keyboard event parsing only when a sender/receiver path needs it.
+- Keep legacy `move` and `click` aliases until there is an intentional migration.
+- Document which message types are implemented versus draft-only.
+
+Done when:
+
+- Browser UI, Windows server, and experimental receiver can share the same implemented protocol subset.
+
+## Phase 6: Build A Manual Windows Sender Prototype
+
+Goal: prove a native sender path without edge handoff.
+
+Possible work:
+
+- Manual start/stop control mode.
 - Select one receiver.
 - Send relative mouse movement.
 - Send basic mouse buttons.
-- Send basic keyboard events.
-- Include a panic hotkey or emergency stop.
+- Send basic keyboard events only if a safe capture method is chosen.
+- Include a local panic hotkey if global capture is introduced.
 
-No edge-of-screen handoff yet.
+Done when:
 
-The panic hotkey should be configurable later, but the first implementation can
-use a conservative default while the safety behavior is proven.
+- A Windows sender can manually control a paired receiver over the LAN without screen capture or cloud services.
 
-## Phase 4: macOS Receiver Agent
+## Phase 7: Continue macOS Receiver Prototype
 
-Build a macOS receiver that accepts paired input events and injects them into macOS.
+Goal: move from the experimental script toward a safer receiver.
 
-Expected macOS permissions:
+Possible work:
 
-- Accessibility permission for input injection.
-- Input Monitoring may be needed later for capture.
-- Local Network permission may appear depending on packaging.
+- Reuse the session/permission model.
+- Keep Accessibility permission explanations clear.
+- Keep Screen Recording out of scope.
+- Add clearer emergency stop behavior.
+- Add tests around receiver protocol handling where practical.
 
-First milestone:
+Done when:
 
-```text
-Windows controls macOS mouse and keyboard over LAN.
-```
+- A paired sender can control macOS mouse input through an explicit, permissioned session.
 
-Current experimental scaffold:
+## Phase 8: Research Linux / SteamOS Native Options
 
-- `agents/macos_receiver.py`
-- `agents/send_test_input.py`
+Goal: decide what is realistic on Linux and SteamOS before writing native code.
 
-This scaffold proves protocol input injection without global input capture, edge handoff, screen capture, clipboard sync, or file transfer.
+Known context:
 
-## Phase 5: Pairing And Security
+- The current Steam Deck path is browser-based.
+- Wayland restricts global input capture and injection.
+- No native Linux/SteamOS agent exists in the repo.
 
-Before this becomes a regular tool, add a stronger pairing model.
+Possible research areas:
 
-Features:
+- Browser Gamepad API for Steam Deck controls.
+- KDE/Wayland portals.
+- `uinput` where appropriate.
+- X11 support only when the user chooses an X11 session.
 
-- Device identity.
-- Trusted-device allow-list.
-- Pairing token or short code.
-- Session tokens.
-- Permission toggles per device.
-- Clear logs.
-- Visible control-enabled state.
-- Emergency disable from either side where possible.
+Done when:
 
-## Phase 6: Clipboard
+- The repo has a documented, security-conscious implementation choice for Linux/SteamOS.
 
-Add clipboard sharing as a separate permission.
+## Phase 9: Edge Handoff
 
-Preferred path:
+Goal: support cursor handoff only after manual sender/receiver control is reliable.
 
-- Text-only first.
-- Manual sync first.
-- Automatic sync only if the user enables it.
-- Clear indication when clipboard sharing is active.
-
-## Phase 7: Edge Handoff
-
-After manual control works reliably:
+Possible work:
 
 - Configure screen arrangement.
-- Detect when the controller cursor reaches an edge.
-- Hand off relative input to the target device.
-- Return control when moving back across the opposite edge or pressing a hotkey.
+- Detect controller cursor at a screen edge.
+- Hand off relative input to a target device.
+- Provide a hotkey/manual escape path.
+- Keep emergency stop always reachable.
 
-## Phase 8: Linux / SteamOS
+Done when:
 
-SteamOS mostly means Wayland, which is intentionally restrictive for global input capture and injection.
+- Handoff can be tested reliably without trapping the user or hiding control state.
 
-Possible paths to investigate later:
+## Phase 10: Packaging Decision
 
-- Keep browser mode for Steam Deck as the main controller.
-- Use Gamepad API inside the browser.
-- Explore KDE/Wayland portals.
-- Explore `uinput` for virtual input where appropriate.
-- Support X11 if the user chooses an X11 session.
+Goal: decide how this should become a regular app after the behavior is proven.
 
-Wayland support should be researched carefully before committing to a native Linux agent design.
+Options to evaluate later:
 
-## Future Exploration: Game Controllers And Android
-
-After the core desktop app is working, investigate game controller sharing
-between trusted devices.
-
-Goals to keep in mind:
-
-- Let a paired controller follow the trusted device relationship where possible.
-- Avoid forcing the user to re-sync or re-pair the controller every time they
-  switch target devices.
-- Keep controller access permissioned separately from mouse and keyboard input.
-- Make disconnect, emergency stop, and local control state visible.
-
-Possible Android support should also be researched later. Treat it as a separate
-platform effort, not an assumption in the first Windows/macOS/Linux prototype.
-
-Open questions:
-
-- Which platforms allow virtual game controller injection without elevated
-  privileges or kernel drivers?
-- Whether controller forwarding should use native APIs, virtual HID devices, or
-  a different approach per platform.
-- Whether Android is a controller source, receiver, or both.
-- How Bluetooth pairing and local-network trusted-device pairing should relate
-  without surprising the user.
-
-## Phase 9: Desktop App Packaging
-
-Once behavior is proven, decide whether to keep Python or move to a polished app stack.
-
-Possible app stacks:
-
-- Python prototype with packaging.
-- Tauri plus Rust for a lighter native desktop app.
+- Keep Python and package it.
+- Tauri plus Rust/native helpers.
 - Electron plus native helpers.
 
-The decision should happen after the protocol and first cross-device prototype are proven.
+Done when:
+
+- The protocol and first cross-device prototype are stable enough that packaging tradeoffs are meaningful.

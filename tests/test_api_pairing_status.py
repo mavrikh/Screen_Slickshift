@@ -1,10 +1,17 @@
+import io
 from pathlib import Path
+import time
 
+import pytest
 from fastapi.testclient import TestClient
+from starlette.datastructures import UploadFile
+from starlette.websockets import WebSocketDisconnect
 
 from app import config
+from app import files as files_module
 from app.main import app
 from app import main
+from app import websocket as websocket_module
 from app.pairing import PairingCodeBook, PairingSessionBook, TrustedDeviceStore
 
 
@@ -29,6 +36,128 @@ def test_device_endpoint_returns_local_identity(tmp_path, monkeypatch) -> None:
     assert device["os"]
     assert "token" not in device
     assert "secret" not in device
+
+
+def test_touchpad_websocket_accepts_first_message_auth(tmp_path, monkeypatch) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+    token = config.get_or_create_pairing_token()
+
+    with TestClient(app).websocket_connect("/ws/touchpad") as websocket:
+        websocket.send_json({"type": "auth", "token": token})
+        websocket.send_json({"type": "ping"})
+
+
+def test_touchpad_websocket_keeps_query_token_compatibility(tmp_path, monkeypatch) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+    token = config.get_or_create_pairing_token()
+
+    with TestClient(app).websocket_connect(f"/ws/touchpad?token={token}") as websocket:
+        websocket.send_json({"type": "ping"})
+
+
+def test_touchpad_websocket_accepts_session_auth_with_mouse_permission(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+    moves = []
+    monkeypatch.setattr(websocket_module, "move_mouse", lambda dx, dy: moves.append((dx, dy)))
+    grant = main.pairing_session_book.create_session(
+        "macbook-1",
+        guest=False,
+        permissions={"mouse": True},
+    )
+    original_last_active_at = grant.session.last_active_at
+    time.sleep(0.001)
+
+    with TestClient(app).websocket_connect("/ws/touchpad") as websocket:
+        websocket.send_json(
+            {
+                "type": "session_auth",
+                "session_id": grant.session.session_id,
+                "session_token": grant.session_token,
+            }
+        )
+        websocket.send_json({"type": "mouse_move", "dx": 4, "dy": -2})
+
+    updated_session = main.pairing_session_book.verify_session(
+        grant.session.session_id,
+        grant.session_token,
+    )
+    assert moves == [(4, -2)]
+    assert updated_session is not None
+    assert updated_session.last_active_at > original_last_active_at
+
+
+def test_touchpad_websocket_rejects_session_without_mouse_permission(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+    moves = []
+    monkeypatch.setattr(websocket_module, "move_mouse", lambda dx, dy: moves.append((dx, dy)))
+    grant = main.pairing_session_book.create_session(
+        "macbook-1",
+        guest=False,
+        permissions={"mouse": False},
+    )
+
+    with TestClient(app).websocket_connect("/ws/touchpad") as websocket:
+        websocket.send_json(
+            {
+                "type": "session_auth",
+                "session_id": grant.session.session_id,
+                "session_token": grant.session_token,
+            }
+        )
+        websocket.send_json({"type": "mouse_move", "dx": 4, "dy": -2})
+        with pytest.raises(WebSocketDisconnect):
+            websocket.receive_json()
+
+    assert moves == []
+
+
+def test_touchpad_websocket_ping_does_not_keep_session_active(tmp_path, monkeypatch) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+    grant = main.pairing_session_book.create_session(
+        "macbook-1",
+        guest=False,
+        permissions={"mouse": True},
+    )
+    original_last_active_at = grant.session.last_active_at
+    time.sleep(0.001)
+
+    with TestClient(app).websocket_connect("/ws/touchpad") as websocket:
+        websocket.send_json(
+            {
+                "type": "session_auth",
+                "session_id": grant.session.session_id,
+                "session_token": grant.session_token,
+            }
+        )
+        websocket.send_json({"type": "ping"})
+
+    unchanged_session = main.pairing_session_book.verify_session(
+        grant.session.session_id,
+        grant.session_token,
+    )
+    assert unchanged_session is not None
+    assert unchanged_session.last_active_at == original_last_active_at
+
+
+def test_touchpad_websocket_rejects_invalid_session_auth(tmp_path, monkeypatch) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+
+    with TestClient(app).websocket_connect("/ws/touchpad") as websocket:
+        websocket.send_json(
+            {
+                "type": "session_auth",
+                "session_id": "missing",
+                "session_token": "wrong",
+            }
+        )
+        with pytest.raises(WebSocketDisconnect):
+            websocket.receive_json()
 
 
 def test_trusted_devices_endpoint_hides_secret_hash(tmp_path, monkeypatch) -> None:
@@ -712,6 +841,220 @@ def test_resolve_trust_review_unknown_device_returns_404(tmp_path, monkeypatch) 
     )
 
     assert response.status_code == 404
+
+
+def test_session_send_text_requires_keyboard_permission(tmp_path, monkeypatch) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+    sent_text = []
+    monkeypatch.setattr(main, "send_text_to_pc", lambda text: sent_text.append(text))
+    grant = main.pairing_session_book.create_session(
+        "macbook-1",
+        guest=False,
+        permissions={"keyboard": True},
+    )
+    original_last_active_at = grant.session.last_active_at
+    time.sleep(0.001)
+
+    response = TestClient(app).post(
+        "/api/session/send-text",
+        json={
+            "session_id": grant.session.session_id,
+            "session_token": grant.session_token,
+            "text": "hello",
+        },
+    )
+
+    updated_session = main.pairing_session_book.verify_session(
+        grant.session.session_id,
+        grant.session_token,
+    )
+    assert response.status_code == 200
+    assert sent_text == ["hello"]
+    assert updated_session is not None
+    assert updated_session.last_active_at > original_last_active_at
+
+
+def test_session_send_text_rejects_missing_keyboard_permission(tmp_path, monkeypatch) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+    sent_text = []
+    monkeypatch.setattr(main, "send_text_to_pc", lambda text: sent_text.append(text))
+    grant = main.pairing_session_book.create_session("macbook-1", guest=False)
+
+    response = TestClient(app).post(
+        "/api/session/send-text",
+        json={
+            "session_id": grant.session.session_id,
+            "session_token": grant.session_token,
+            "text": "hello",
+        },
+    )
+
+    assert response.status_code == 403
+    assert sent_text == []
+
+
+def test_session_clipboard_read_requires_clipboard_read_permission(tmp_path, monkeypatch) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+    monkeypatch.setattr(main.clipboard_service, "get_clipboard_text", lambda: "clipboard text")
+    grant = main.pairing_session_book.create_session(
+        "macbook-1",
+        guest=False,
+        permissions={"clipboard_read": True},
+    )
+    original_last_active_at = grant.session.last_active_at
+    time.sleep(0.001)
+
+    response = TestClient(app).post(
+        "/api/session/clipboard/read",
+        json={
+            "session_id": grant.session.session_id,
+            "session_token": grant.session_token,
+        },
+    )
+
+    updated_session = main.pairing_session_book.verify_session(
+        grant.session.session_id,
+        grant.session_token,
+    )
+    assert response.status_code == 200
+    assert response.json() == {"text": "clipboard text"}
+    assert updated_session is not None
+    assert updated_session.last_active_at > original_last_active_at
+
+
+def test_session_clipboard_read_rejects_missing_permission(tmp_path, monkeypatch) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+    read_attempts = []
+    monkeypatch.setattr(main.clipboard_service, "get_clipboard_text", lambda: read_attempts.append(True))
+    grant = main.pairing_session_book.create_session("macbook-1", guest=False)
+
+    response = TestClient(app).post(
+        "/api/session/clipboard/read",
+        json={
+            "session_id": grant.session.session_id,
+            "session_token": grant.session_token,
+        },
+    )
+
+    assert response.status_code == 403
+    assert read_attempts == []
+
+
+def test_session_clipboard_write_requires_clipboard_write_permission(tmp_path, monkeypatch) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+    written_text = []
+    monkeypatch.setattr(main.clipboard_service, "set_clipboard_text", lambda text: written_text.append(text))
+    grant = main.pairing_session_book.create_session(
+        "macbook-1",
+        guest=False,
+        permissions={"clipboard_write": True},
+    )
+
+    response = TestClient(app).post(
+        "/api/session/clipboard/write",
+        json={
+            "session_id": grant.session.session_id,
+            "session_token": grant.session_token,
+            "text": "new clipboard",
+        },
+    )
+
+    assert response.status_code == 200
+    assert written_text == ["new clipboard"]
+
+
+def test_session_clipboard_write_rejects_missing_permission(tmp_path, monkeypatch) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+    written_text = []
+    monkeypatch.setattr(main.clipboard_service, "set_clipboard_text", lambda text: written_text.append(text))
+    grant = main.pairing_session_book.create_session("macbook-1", guest=False)
+
+    response = TestClient(app).post(
+        "/api/session/clipboard/write",
+        json={
+            "session_id": grant.session.session_id,
+            "session_token": grant.session_token,
+            "text": "new clipboard",
+        },
+    )
+
+    assert response.status_code == 403
+    assert written_text == []
+
+
+def test_session_upload_requires_file_receive_permission(tmp_path, monkeypatch) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+    saved_files = []
+
+    async def fake_save_upload(file):
+        saved_files.append(file.filename)
+        return {"filename": file.filename, "bytes": 5, "path": str(tmp_path / file.filename)}
+
+    monkeypatch.setattr(main, "save_upload", fake_save_upload)
+    grant = main.pairing_session_book.create_session(
+        "macbook-1",
+        guest=False,
+        permissions={"file_receive": True},
+    )
+    original_last_active_at = grant.session.last_active_at
+    time.sleep(0.001)
+
+    response = TestClient(app).post(
+        "/api/session/upload",
+        data={
+            "session_id": grant.session.session_id,
+            "session_token": grant.session_token,
+        },
+        files={"file": ("note.txt", b"hello", "text/plain")},
+    )
+
+    updated_session = main.pairing_session_book.verify_session(
+        grant.session.session_id,
+        grant.session_token,
+    )
+    assert response.status_code == 200
+    assert saved_files == ["note.txt"]
+    assert updated_session is not None
+    assert updated_session.last_active_at > original_last_active_at
+
+
+def test_session_upload_rejects_missing_file_receive_permission(tmp_path, monkeypatch) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+    saved_files = []
+
+    async def fake_save_upload(file):
+        saved_files.append(file.filename)
+        return {"filename": file.filename, "bytes": 5, "path": str(tmp_path / file.filename)}
+
+    monkeypatch.setattr(main, "save_upload", fake_save_upload)
+    grant = main.pairing_session_book.create_session("macbook-1", guest=False)
+
+    response = TestClient(app).post(
+        "/api/session/upload",
+        data={
+            "session_id": grant.session.session_id,
+            "session_token": grant.session_token,
+        },
+        files={"file": ("note.txt", b"hello", "text/plain")},
+    )
+
+    assert response.status_code == 403
+    assert saved_files == []
+
+
+@pytest.mark.anyio
+async def test_save_upload_enforces_size_limit_and_removes_partial_file(tmp_path, monkeypatch) -> None:
+    original_upload_dir = files_module.settings.upload_dir
+    object.__setattr__(files_module.settings, "upload_dir", tmp_path)
+    try:
+        upload = UploadFile(file=io.BytesIO(b"abcdef"), filename="too-large.txt")
+
+        with pytest.raises(RuntimeError):
+            await files_module.save_upload(upload, max_bytes=3)
+
+        assert list(tmp_path.iterdir()) == []
+    finally:
+        object.__setattr__(files_module.settings, "upload_dir", original_upload_dir)
 
 
 def _create_code(client: TestClient, token: str, guest: bool) -> str:

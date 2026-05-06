@@ -27,4 +27,4 @@ Write-Host "Starting Screen Slickshift on http://$HostAddress`:$Port"
 Write-Host "Use Ctrl+C to stop the server."
 Write-Host ""
 
-python -m uvicorn app.main:app --host $HostAddress --port $Port
+python -m uvicorn app.main:app --host $HostAddress --port $Port --no-access-log

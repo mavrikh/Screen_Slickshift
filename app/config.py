@@ -21,6 +21,7 @@ DEVICE_IDENTITY_FILE = CONFIG_DIR / "device_identity.json"
 class Settings:
     app_name: str = "Screen Slickshift"
     upload_dir: Path = UPLOAD_DIR
+    max_upload_bytes: int = 50 * 1024 * 1024
     macros_file: Path = MACROS_FILE
     token_file: Path = TOKEN_FILE
     trusted_devices_file: Path = TRUSTED_DEVICES_FILE

@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import json
-import platform
 import secrets
 import socket
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from app import config
+from app.platform_support import current_os_key
 
 
 @dataclass(frozen=True)
@@ -29,7 +29,7 @@ class DeviceIdentity:
 
 
 class DeviceIdentityStore:
-    def __init__(self, path: Path | None = None) -> None:
+    def __init__(self, path: Optional[Path] = None) -> None:
         self.path = path or config.DEVICE_IDENTITY_FILE
 
     def get_or_create(self) -> DeviceIdentity:
@@ -46,7 +46,7 @@ class DeviceIdentityStore:
         self.save(identity)
         return identity
 
-    def load(self) -> DeviceIdentity | None:
+    def load(self) -> Optional[DeviceIdentity]:
         if not self.path.exists():
             return None
 
@@ -80,15 +80,10 @@ def _default_device_name() -> str:
 
 
 def _current_os_name() -> str:
-    system = platform.system().strip().lower()
-    if system == "darwin":
-        return "macos"
-    if system:
-        return system
-    return "unknown"
+    return current_os_key()
 
 
-def _identity_from_dict(data: dict[str, Any]) -> DeviceIdentity | None:
+def _identity_from_dict(data: dict[str, Any]) -> Optional[DeviceIdentity]:
     device_id = data.get("device_id")
     name = data.get("name")
     os_name = data.get("os")

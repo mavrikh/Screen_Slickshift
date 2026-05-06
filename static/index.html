@@ -74,6 +74,42 @@
           <button id="uploadButton" type="button">Upload</button>
         </div>
 
+        <div class="panel security-panel">
+          <div class="panel-header">
+            <h2>Security</h2>
+            <button id="refreshSecurityButton" class="secondary compact-button" type="button">Refresh</button>
+          </div>
+
+          <div class="security-section">
+            <h3>Local Device</h3>
+            <div id="localDevice" class="state-list"></div>
+          </div>
+
+          <div class="security-section">
+            <div class="section-header">
+              <h3>Pairing Code</h3>
+              <div class="button-pair">
+                <button id="trustedCodeButton" class="secondary compact-button" type="button">Trusted</button>
+                <button id="guestCodeButton" class="secondary compact-button" type="button">Guest</button>
+              </div>
+            </div>
+            <div id="pairingCodeDisplay" class="pairing-code-display">No active code</div>
+          </div>
+
+          <div class="security-section">
+            <h3>Trusted Devices</h3>
+            <div id="trustedDevices" class="state-list"></div>
+          </div>
+
+          <div class="security-section">
+            <div class="section-header">
+              <h3>Active Sessions</h3>
+              <button id="revokeAllSessionsButton" class="secondary compact-button" type="button">Revoke All</button>
+            </div>
+            <div id="pairingSessions" class="state-list"></div>
+          </div>
+        </div>
+
         <div class="panel log-panel">
           <h2>Activity</h2>
           <pre id="activityLog"></pre>

@@ -1,83 +1,65 @@
 # Screen Slickshift
 
-A local-only Windows 11 companion server with a Steam Deck-friendly browser UI.
+Screen Slickshift is a local-only LAN input sharing prototype.
 
-This is an MVP control panel, not a full KVM. It lets a Steam Deck browser send touchpad movement, clicks, text, approved macros, clipboard text, and file uploads to a Windows PC over your local LAN.
+The current app is a FastAPI server with a browser control UI that is usable from a Steam Deck or another device on the same LAN. The most complete control target is still Windows, but the code is structured so backend tests and server startup can work on macOS and Windows. It is not a full KVM, remote desktop, screen sharing tool, or finished native cross-platform agent.
 
-## Folder Guide
+The repository also contains an experimental macOS receiver and a small sender test tool for protocol experiments.
 
-- `app/main.py`: FastAPI app, API routes, static UI serving, startup logging.
-- `app/config.py`: Project paths, directory creation, pairing token creation, macro config loading.
-- `app/security.py`: Shared-token checks for HTTP and WebSocket access.
-- `app/input_control.py`: Windows mouse movement, clicking, scrolling, and text typing through `pyautogui`.
-- `app/commands.py`: Loads and runs only pre-approved macros from `config/macros.json`.
-- `app/clipboard.py`: Clipboard get/set helpers through `pyperclip`.
-- `app/files.py`: Upload saving with filename sanitization and unique names.
-- `app/websocket.py`: Live touchpad WebSocket event handler.
-- `static/index.html`: Browser UI served to the Steam Deck.
-- `static/app.js`: Browser-side token handling, API calls, touchpad events, upload logic.
-- `static/style.css`: Steam Deck-friendly responsive styling.
-- `config/macros.json`: Local allow-list of commands the browser may run.
-- `uploads/`: Dedicated safe folder for uploaded files.
-- `logs/`: Rotating server logs.
-- `requirements.txt`: Python dependencies.
-- `run.ps1`: Windows setup and run helper.
+## What Exists
 
-## Security Model
+- `app/`: FastAPI backend and local control helpers.
+- `static/`: Browser UI served by the FastAPI app.
+- `agents/`: Experimental macOS receiver and protocol sender test tool.
+- `config/macros.json`: Local allow-list of macro commands.
+- `tests/`: Pytest coverage for protocol parsing, pairing/session primitives, device identity, startup logging, and pairing APIs.
+- `docs/`: Project docs for protocol, security, design, agents, roadmap, and current state.
+- `run.ps1`: Windows PowerShell helper that creates a virtual environment, installs requirements, and starts Uvicorn.
+- `run.py`: Cross-platform server runner for an already prepared Python environment.
 
-- Local LAN only. No cloud services, accounts, or telemetry.
-- Browser requests require the pairing token printed in the Windows console on startup.
-- The browser cannot send arbitrary shell commands.
-- Macros are loaded only from `config/macros.json`.
-- Commands run with `shell=False`.
-- Upload filenames are sanitized and saved only under `uploads/`.
-- CORS is closed by default because the UI is served from the same FastAPI origin.
-- No admin privileges are required for the MVP.
-- Emergency Stop disables input, clipboard, file upload, and macro actions until re-enabled.
+Runtime-created local files are ignored by git:
 
-Anyone on your LAN who has the token can control your PC. Keep the token private.
+- `config/pairing_token.txt`
+- `config/trusted_devices.json`
+- `config/device_identity.json`
+- `logs/server.log`
+- `uploads/`
 
-## Setup On Windows 11
+## Architecture
 
-Install Python 3.10 or newer from [python.org](https://www.python.org/downloads/windows/) or the Microsoft Store. During install, enable the option to add Python to PATH if you see it.
+The working browser-control MVP is a single FastAPI process:
 
-Open PowerShell in this folder:
+- `app/main.py` defines API routes, WebSocket routes, static file serving, CORS configuration, startup logging, and emergency lockout behavior.
+- `app/security.py` checks the shared pairing token and reusable token validation helpers.
+- `app/websocket.py` receives touchpad events over `/ws/touchpad`.
+- `app/protocol.py` parses simple JSON input events: `mouse_move`, `mouse_button`, `scroll`, and `ping`. It also accepts legacy `move` and `click` aliases.
+- `app/input_control.py` lazily loads `pyautogui` for relative mouse movement, clicks, scrolling, and text typing.
+- `app/clipboard.py` lazily loads `pyperclip` for clipboard get/set.
+- `app/commands.py` runs only locally configured macro command arrays from `config/macros.json` and hides macros whose `platforms` list does not match the current OS.
+- `app/files.py` saves uploaded files into `uploads/` with sanitized, unique filenames and a configurable size limit.
+- `app/pairing.py` contains short pairing-code, trusted-device, and temporary-session primitives.
+- `app/device_identity.py` creates a local random device identity.
+- `app/state.py` contains the in-memory emergency lockout flag.
 
-```powershell
-cd C:\Users\mavri\Documents\Codex\2026-05-05\you-are-gpt-codex-acting-as\screen_slickshift
-py -3 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-```
+The static UI in `static/index.html`, `static/app.js`, and `static/style.css` stores the token in browser local storage, calls the token-protected HTTP APIs, and opens the touchpad WebSocket. The WebSocket sends the token as the first message instead of putting it in the URL.
 
-If `py` is not available, use:
+Trusted-device/session code is present in backend APIs and tests. Session-authenticated touchpad WebSocket clients can use session credentials with `mouse` permission, while the current browser UI still uses the global pairing token as the local-owner/admin path.
 
-```powershell
-python -m venv .venv
-```
+## Setup
 
-If PowerShell blocks script activation, run this once for your user:
+Install Python 3.9 or newer.
 
-```powershell
-Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
-```
-
-## Run
-
-For Steam Deck access over your LAN:
+On Windows, open PowerShell in the repository root and run:
 
 ```powershell
 .\run.ps1
 ```
 
-By default, this starts:
+The script creates `.venv` if needed, installs `requirements.txt`, and starts:
 
 ```text
 http://0.0.0.0:8765
 ```
-
-`0.0.0.0` means the server listens on your PC's network interfaces. The Deck will use your PC's LAN IP address, not `0.0.0.0`.
 
 For local-only PC testing:
 
@@ -85,154 +67,144 @@ For local-only PC testing:
 .\run.ps1 -HostAddress 127.0.0.1 -Port 8765
 ```
 
-## Find Your Windows PC LAN IP
-
-In PowerShell:
+Manual setup is also possible:
 
 ```powershell
-ipconfig
+py -3 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8765 --no-access-log
 ```
 
-Look for your active Wi-Fi or Ethernet adapter and copy the `IPv4 Address`, often something like:
+On macOS or Linux:
 
-```text
-192.168.1.42
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python run.py --host 127.0.0.1 --port 8765
 ```
 
-You can also use:
+Use `--host 0.0.0.0` only when you intentionally want LAN access.
 
-```powershell
-Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.IPAddress -like "192.168.*" -or $_.IPAddress -like "10.*" -or $_.IPAddress -like "172.*"}
-```
-
-## Steam Deck URL
-
-On the Steam Deck, open a browser to:
+On a Steam Deck or another LAN device, open:
 
 ```text
 http://YOUR_WINDOWS_PC_IP:8765
 ```
 
-Example:
+Enter the pairing token printed in the server console. The token is intentionally printed to the local console and not written to logs.
 
-```text
-http://192.168.1.42:8765
+## Implemented Browser-Control Features
+
+- Token-protected status/auth checks.
+- Browser touchpad over WebSocket.
+- Relative mouse movement.
+- Left, right, and middle click.
+- Scroll forwarding with a UI speed slider.
+- Pointer capture support in browsers that allow pointer lock.
+- Text sending through `pyautogui.write`.
+- Clipboard read/write through `pyperclip`.
+- Local allow-listed macros from `config/macros.json`; the default checked-in macros are Windows-only.
+- File uploads into `uploads/`, with a default 50 MB limit.
+- Emergency lockout that blocks input, clipboard, file upload, and macro actions.
+- Security panel showing local device identity, trusted devices, active pairing sessions, and pairing-code generation.
+- Trusted-device removal, trust-review actions, single-session revoke, and revoke-all sessions from the browser UI.
+- Trusted-device permission toggles for the existing backend permission model.
+- Session-authenticated touchpad WebSocket mode that enforces `mouse` permission.
+- Session-authenticated text and clipboard routes enforcing `keyboard`, `clipboard_read`, and `clipboard_write`.
+- Session-authenticated upload route enforcing `file_receive`.
+- Rotating server log file at `logs/server.log`.
+
+## Implemented Pairing/Trust APIs
+
+Backend code and tests currently cover:
+
+- Random local device identity saved in `config/device_identity.json`.
+- Trusted-device storage in `config/trusted_devices.json`.
+- One-time 6-digit pairing codes.
+- Guest pairing sessions.
+- Trusted pairing sessions with returned shared secrets.
+- Session token hashing.
+- Session expiration and idle timeout validation.
+- Permission records for `mouse`, `keyboard`, `clipboard_read`, `clipboard_write`, and `file_receive`.
+- Trusted-device removal and permission updates revoking active sessions.
+- Emergency lockout revoking active pairing sessions and marking trusted devices for review.
+- Session-authenticated touchpad WebSocket input with `mouse` permission checks and `last_active_at` updates only after accepted mouse actions.
+- Session-authenticated text input and clipboard read/write with separate permission checks.
+- Session-authenticated upload with `file_receive` permission checks.
+
+The Security panel uses these APIs for local-owner management. Session-authenticated clients can use existing session credentials for mouse input, text input, clipboard read/write, and upload. Macro actions still use the local-owner token path.
+
+## Experimental macOS Tools
+
+`agents/macos_receiver.py` runs a small FastAPI receiver with:
+
+- `GET /api/status`
+- `POST /api/lockout`
+- `ws://HOST:8770/ws/input?token=TOKEN`
+
+It accepts `mouse_move`, `mouse_button`, `scroll`, and `ping` protocol messages and injects mouse input through `pyautogui`.
+
+`agents/send_test_input.py` sends simple test actions to a receiver:
+
+- `wiggle`
+- `click`
+- `right-click`
+- `scroll`
+
+These tools do not implement global input capture, edge handoff, clipboard sync, file transfer, screen capture, persistence, TLS, packaging, or a native UI.
+
+## Security Notes
+
+The current protections visible in code are:
+
+- Local-only design; no cloud services, accounts, or telemetry.
+- Shared pairing token required for browser HTTP APIs and `/ws/touchpad`.
+- Token is saved locally and printed to console, but startup logging avoids logging it.
+- Project run helpers disable Uvicorn access logs so WebSocket URLs and request paths are not recorded by default.
+- CORS is closed by default because the UI is served from the same origin.
+- Remote clients cannot submit arbitrary shell commands.
+- Macros are local allow-list entries and run with `shell=False`.
+- Upload filenames are sanitized and path-stripped before saving.
+- Emergency lockout is visible in the UI and checked by input, clipboard, upload, and macro helpers.
+- Trusted-device shared secrets and session tokens are hashed at rest/in memory where applicable.
+- Pairing code guesses are rate-limited in the pairing code book.
+- Logs avoid token values, pairing codes, shared secrets, clipboard contents, file contents, and full typed text.
+
+Known gaps:
+
+- The browser-control route still grants broad control to anyone with the global token.
+- No TLS/local certificate support is implemented.
+- No mDNS discovery or firewall guidance is implemented in code.
+- File uploads have a default 50 MB size limit. The UI does not yet display that limit before selecting a file.
+- Legacy WebSocket query-token compatibility still exists for now, but the browser UI no longer uses it.
+- The trusted-device/session model is not yet used to authorize macro actions.
+- Desktop input and clipboard actions require OS support, installed optional backends, and any permissions required by that OS.
+
+## Tests
+
+Run:
+
+```bash
+python -m pytest
 ```
 
-Enter the pairing token printed in the Windows PowerShell console.
+The tests are focused on backend primitives and APIs. There are no browser automation tests or end-to-end input injection tests in the repository.
 
-## Test The MVP Features
+## Current Safest Next Step
 
-1. Token access
-   - Start the server.
-   - Open the URL on the PC or Steam Deck.
-   - Enter the printed pairing token and click Connect.
-   - The activity log should say the touchpad connected.
+The safest next development step is to continue wiring the existing pairing/session permission model into real control paths without breaking the current browser-control MVP.
 
-2. Touchpad movement
-   - Drag inside the Touchpad area.
-   - The Windows mouse pointer should move.
+A conservative milestone would be:
 
-3. Mouse clicks
-   - Tap the touchpad area or press Left Click.
-   - Press Right Click to open a context menu on Windows.
+1. Keep the existing token flow as local-owner/admin access.
+2. Keep the Security panel as the owner/admin management surface.
+3. Decide whether macros should remain owner-token-only or get a separate explicit permission.
+4. Keep emergency lockout revocation behavior visible and tested.
 
-4. Send text
-   - Open Notepad on Windows.
-   - Click inside Notepad.
-   - Type text in the web UI and press Send Text To PC.
+See `docs/current_state.md` and `docs/roadmap.md` for the current source-of-truth snapshot.
 
-5. Macros
-   - Press Notepad, Calculator, or Lock PC.
-   - These are loaded from `config/macros.json`.
-   - Add new macros only by editing that file on the Windows PC.
-
-6. Clipboard
-   - Put text in the web UI Clipboard box and press Send To PC.
-   - Paste on Windows with Ctrl+V.
-   - Copy text on Windows, then press Get From PC.
-
-7. File upload
-   - Choose or drop a file in the File Drop panel.
-   - Press Upload.
-   - Confirm it appears in the `uploads/` folder.
-
-8. Emergency Stop
-   - Press Emergency Stop.
-   - Input, clipboard, macro, and upload actions should be blocked.
-   - Press Re-enable Control to resume.
-
-## Editing Macros
-
-Edit `config/macros.json`. Each macro must have an `id`, `label`, and `command` array:
-
-```json
-{
-  "macros": [
-    {
-      "id": "open_notepad",
-      "label": "Notepad",
-      "description": "Open Windows Notepad",
-      "command": ["notepad.exe"]
-    },
-    {
-      "id": "open_calculator",
-      "label": "Calculator",
-      "description": "Open Calculator",
-      "command": ["explorer.exe", "shell:AppsFolder\\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"]
-    }
-  ]
-}
-```
-
-Do not put user-provided text into `command`. Keep macros explicit and boring.
-
-## Logs
-
-Server logs are written to:
-
-```text
-logs/server.log
-```
-
-The console also prints startup information and errors.
-
-## Troubleshooting
-
-- Deck cannot open the page:
-  - Make sure PC and Deck are on the same LAN.
-  - Confirm the Windows IP with `ipconfig`.
-  - Check Windows Defender Firewall. Allow Python on private networks if prompted.
-  - Try opening `http://127.0.0.1:8765` on the Windows PC first.
-
-- Token rejected:
-  - Use the token printed by the current server run.
-  - The saved token is in `config/pairing_token.txt`.
-  - Delete that file and restart to generate a new token.
-
-- Mouse does not move:
-  - Make sure the server is running on the Windows desktop session you want to control.
-  - Some elevated/admin windows may ignore non-admin input from a normal process.
-  - Move the mouse to a screen corner to trigger `pyautogui` failsafe if needed.
-
-- Text typing is weird:
-  - `pyautogui.write` is simple keyboard simulation and works best with plain ASCII text.
-  - For rich Unicode text, use the clipboard feature instead.
-
-- Upload fails:
-  - Check that the `uploads/` folder exists and is writable.
-  - Try a small file first.
-
-- Macro does not run:
-  - Check `config/macros.json` for valid JSON.
-  - Use a full executable path if Windows cannot find the program.
-  - Check `logs/server.log` for the error.
-
-## Next Practical Improvements
-
-- Add HTTPS with a local certificate.
-- Add QR-code pairing.
-- Add per-session token rotation.
-- Add keyboard shortcut buttons using pre-approved actions.
-- Add drag sensitivity controls.
-- Add download browsing for the upload folder.
+For moving work between Codex, a local Ollama model, or a plain terminal workflow, start with `docs/HANDOFF.md`.

@@ -3,18 +3,14 @@ from __future__ import annotations
 import logging
 import time
 
-import pyautogui
-
 from app.state import lockout_state
 
 
 logger = logging.getLogger(__name__)
 
-pyautogui.FAILSAFE = True
-pyautogui.PAUSE = 0
-
 _last_move_at = 0.0
 _min_move_interval = 0.004
+_pyautogui_backend = None
 
 
 def _ensure_enabled() -> None:
@@ -25,6 +21,7 @@ def _ensure_enabled() -> None:
 def move_mouse(dx: float, dy: float) -> None:
     global _last_move_at
     _ensure_enabled()
+    pyautogui = _pyautogui()
 
     now = time.monotonic()
     if now - _last_move_at < _min_move_interval:
@@ -36,6 +33,7 @@ def move_mouse(dx: float, dy: float) -> None:
 
 def click_mouse(button: str = "left") -> None:
     _ensure_enabled()
+    pyautogui = _pyautogui()
     if button not in {"left", "right", "middle"}:
         button = "left"
     pyautogui.click(button=button)
@@ -43,6 +41,7 @@ def click_mouse(button: str = "left") -> None:
 
 def scroll_mouse(amount: int) -> None:
     _ensure_enabled()
+    pyautogui = _pyautogui()
     pyautogui.scroll(int(amount))
 
 
@@ -50,4 +49,25 @@ def send_text_to_pc(text: str) -> None:
     _ensure_enabled()
     if not text:
         return
+    pyautogui = _pyautogui()
     pyautogui.write(text, interval=0.001)
+
+
+def _pyautogui():
+    global _pyautogui_backend
+    if _pyautogui_backend is not None:
+        return _pyautogui_backend
+
+    try:
+        import pyautogui
+    except Exception as exc:
+        logger.exception("Desktop input backend is unavailable.")
+        raise RuntimeError(
+            "Desktop input backend is unavailable. Install pyautogui and run from a desktop session "
+            "with the required OS permissions."
+        ) from exc
+
+    pyautogui.FAILSAFE = True
+    pyautogui.PAUSE = 0
+    _pyautogui_backend = pyautogui
+    return _pyautogui_backend
