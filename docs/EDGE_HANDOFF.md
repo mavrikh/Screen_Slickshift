@@ -16,6 +16,17 @@ The first browser simulation surface exists at `/handoff`. It lets the user drag
 
 The same `/handoff` page now includes a manual remote mouse test panel. It can connect to another running Screen Slickshift app by host/IP, port, and remote token, then send movement, click, and scroll events through `/api/handoff/remote/*`. This is a manual proof path, not automatic edge detection.
 
+Current Mac-Windows verification path:
+
+1. Run the main app on both machines with `python run.py --host 0.0.0.0 --port 8765`.
+2. Open `/handoff` on the sender machine.
+3. Enter the sender machine's local token at the top of the page.
+4. In Remote Mouse, enter the target machine LAN IP, port `8765`, and the target machine token.
+5. Click Connect Remote.
+6. Click Wiggle or drag inside Remote touchpad.
+
+Expected result: the target machine mouse moves. This has been physically verified from Mac to Windows. Windows to Mac and Mac to Mac still need physical verification.
+
 ## Goal
 
 Let one computer intentionally hand mouse control to another paired device when the pointer crosses a configured screen edge.
@@ -222,7 +233,8 @@ When coding starts, keep the first slice small:
 - Prototype screen dragging blocks overlapping monitor tiles.
 - Prototype remote mouse bridge exists in `app/handoff_remote.py`.
 - `/handoff` can connect to another receiver and manually send mouse movement/click/scroll through a remote touchpad.
-- The immediate physical verification target is Mac-Windows with both machines running the main app.
+- Mac to Windows remote mouse movement has been physically verified with both machines running the main app.
+- Windows to Mac and Mac to Mac remote mouse movement are expected to use the same path but still need physical verification.
 - Automatic edge detection and global input capture are still not implemented.
 - Prototype screen dragging snaps nearby sides edge-to-edge.
 - Prototype screen release forces snapping to the nearest valid side unless Freeform mode is enabled.

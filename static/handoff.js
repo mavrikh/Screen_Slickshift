@@ -29,6 +29,7 @@ const handoffState = {
   dragging: null,
   panning: null,
   remoteConnected: false,
+  remoteTargetLabel: "",
   remoteDragging: false,
   lastRemoteMoveAt: 0,
   viewport: { x: 0, y: 0, scale: 1 },
@@ -67,6 +68,8 @@ const remoteTokenInput = document.getElementById("remoteTokenInput");
 const remoteConnectButton = document.getElementById("remoteConnectButton");
 const remoteDisconnectButton = document.getElementById("remoteDisconnectButton");
 const remoteMousePad = document.getElementById("remoteMousePad");
+const remoteStatusText = document.getElementById("remoteStatusText");
+const remoteWiggleButton = document.getElementById("remoteWiggleButton");
 const remoteLeftClickButton = document.getElementById("remoteLeftClickButton");
 const remoteRightClickButton = document.getElementById("remoteRightClickButton");
 
@@ -167,8 +170,12 @@ function renderState() {
   simulateEdgeButton.disabled = handoffState.mode !== "armed";
   freeformButton.textContent = handoffState.freeformScreens ? "Freeform On" : "Freeform Off";
   remoteMousePad.dataset.active = handoffState.remoteConnected ? "true" : "false";
+  remoteStatusText.textContent = handoffState.remoteConnected
+    ? `connected ${handoffState.remoteTargetLabel}`
+    : "disconnected";
   remoteConnectButton.disabled = !handoffState.token || handoffState.remoteConnected;
   remoteDisconnectButton.disabled = !handoffState.remoteConnected;
+  remoteWiggleButton.disabled = !handoffState.remoteConnected;
   remoteLeftClickButton.disabled = !handoffState.remoteConnected;
   remoteRightClickButton.disabled = !handoffState.remoteConnected;
 }
@@ -705,9 +712,11 @@ async function startRemoteControl() {
       body: JSON.stringify({ host, port, token, path: "/ws/touchpad" }),
     });
     handoffState.remoteConnected = true;
+    handoffState.remoteTargetLabel = `${host}:${port}`;
     setNotice(`Connected to remote mouse receiver at ${host}:${port}.`);
   } catch (error) {
     handoffState.remoteConnected = false;
+    handoffState.remoteTargetLabel = "";
     setNotice(error.message);
   }
   renderState();
@@ -721,6 +730,7 @@ async function stopRemoteControl(options = {}) {
     if (!options.quiet) setNotice(error.message);
   }
   handoffState.remoteConnected = false;
+  handoffState.remoteTargetLabel = "";
   handoffState.remoteDragging = false;
   if (!options.quiet) setNotice("Remote mouse disconnected.");
   renderState();
@@ -770,6 +780,20 @@ function clickRemoteMouse(button) {
   sendRemoteEvent({ type: "mouse_button", button, down: true });
 }
 
+async function wiggleRemoteMouse() {
+  const moves = [
+    { dx: 80, dy: 0 },
+    { dx: 0, dy: 80 },
+    { dx: -80, dy: 0 },
+    { dx: 0, dy: -80 },
+  ];
+  for (const move of moves) {
+    await sendRemoteEvent({ type: "mouse_move", ...move });
+    await new Promise((resolve) => setTimeout(resolve, 90));
+  }
+  setNotice("Remote wiggle test sent.");
+}
+
 handoffConnectButton.addEventListener("click", async () => {
   handoffState.token = handoffTokenInput.value.trim();
   localStorage.setItem("wdcToken", handoffState.token);
@@ -792,6 +816,7 @@ confirmHandoffButton.addEventListener("click", confirmHandoff);
 handoffStopButton.addEventListener("click", stopHandoff);
 remoteConnectButton.addEventListener("click", startRemoteControl);
 remoteDisconnectButton.addEventListener("click", () => stopRemoteControl());
+remoteWiggleButton.addEventListener("click", wiggleRemoteMouse);
 remoteMousePad.addEventListener("pointerdown", startRemotePad);
 remoteMousePad.addEventListener("pointermove", moveRemotePad);
 remoteMousePad.addEventListener("pointerup", endRemotePad);

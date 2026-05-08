@@ -331,6 +331,10 @@ button.text-danger:hover {
   margin: 0;
 }
 
+.remote-state {
+  min-height: 40px;
+}
+
 .remote-mouse-pad {
   min-height: 132px;
   display: grid;
