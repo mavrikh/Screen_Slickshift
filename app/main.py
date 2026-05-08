@@ -17,7 +17,7 @@ from app.device_identity import get_or_create_device_identity
 from app.files import save_upload
 from app.handoff import make_handoff_layout, make_layout_screen
 from app.handoff_remote import RemoteHandoffBridge, RemoteTarget
-from app.input_control import send_text_to_pc
+from app.input_control import input_control_status, send_text_to_pc
 from app.llm import generate_text
 from app.pairing import PairingCodeBook, PairingSessionBook, TrustedDeviceStore
 from app.protocol import parse_message, protocol_capabilities
@@ -223,6 +223,11 @@ async def status() -> dict:
 @app.get("/api/auth/check", dependencies=[Depends(verify_token)])
 async def auth_check() -> dict:
     return {"ok": True}
+
+
+@app.get("/api/input/status", dependencies=[Depends(verify_token)])
+async def input_status(check_backend: bool = Query(default=False)) -> dict:
+    return input_control_status(check_backend=check_backend)
 
 
 @app.get("/api/file-transfer/settings", dependencies=[Depends(verify_token)])

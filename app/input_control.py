@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 import time
 
 from app.state import lockout_state
@@ -51,6 +52,32 @@ def send_text_to_pc(text: str) -> None:
         return
     pyautogui = _pyautogui()
     pyautogui.write(text, interval=0.001)
+
+
+def input_control_status(check_backend: bool = False) -> dict:
+    status = {
+        "backend": "pyautogui",
+        "available": None,
+        "disabled": lockout_state.is_disabled(),
+        "input_allowed": not lockout_state.is_disabled(),
+        "platform": sys.platform,
+        "accessibility_required": sys.platform == "darwin",
+        "screen_recording_required": False,
+        "error": "",
+    }
+    if not check_backend:
+        return status
+
+    try:
+        _pyautogui()
+    except RuntimeError as exc:
+        status["available"] = False
+        status["input_allowed"] = False
+        status["error"] = str(exc)
+        return status
+
+    status["available"] = True
+    return status
 
 
 def _pyautogui():

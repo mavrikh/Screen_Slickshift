@@ -45,6 +45,7 @@ Current working shape:
 - Phase 9 edge-handoff planning is documented in `docs/EDGE_HANDOFF.md`; pure config/state and monitor layout geometry code exists in `app/handoff.py`, and `/handoff` provides a browser simulation page.
 - The first app-integrated remote mouse bridge exists in `app/handoff_remote.py` and `/api/handoff/remote/*`. It connects to another running Screen Slickshift receiver and sends only mouse/ping protocol events.
 - `/handoff` now has remote host/IP, port, token fields, and a manual remote touchpad. This is the current Mac-Windows test path.
+- `/api/input/status` reports local receiver input state and can check whether the desktop input backend loads. Remote handoff start uses it when the target supports it.
 - No pointer-edge detector, automatic handoff loop, global capture code, packaging, TLS, or discovery exists yet.
 
 Do not assume native cross-platform agents, edge handoff, TLS, discovery, screen capture, or trusted-device UI exist yet.
@@ -90,10 +91,10 @@ source .venv/bin/activate
 python -m pytest
 ```
 
-Expected as of the remote mouse bridge:
+Expected as of the receiver status preflight:
 
 ```text
-270 passed, 2 warnings
+275 passed, 2 warnings
 ```
 
 Focused remote handoff check:
@@ -107,7 +108,7 @@ node --check static/handoff.js
 Expected:
 
 ```text
-92 passed, 2 warnings
+97 passed, 2 warnings
 ```
 
 The two warnings are FastAPI `on_event` deprecation warnings. They are known and intentionally deferred.
@@ -118,7 +119,7 @@ Phase 1 status:
 - Windows verification deferred.
 - Phase 2 Security panel implementation is complete for the current browser UI.
 - Phase 3 session-scoped permissions enforcement is complete.
-- Phase 9 remote mouse bridge has started and needs physical Mac-Windows verification.
+- Phase 9 remote mouse bridge has started. Mac-to-Windows remote mouse has been physically verified. Windows-to-Mac still needs physical verification.
 
 For a syntax/import sanity check on macOS sandboxed environments:
 

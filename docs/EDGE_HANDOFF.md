@@ -27,6 +27,10 @@ Current Mac-Windows verification path:
 
 Expected result: the target machine mouse moves. This has been physically verified from Mac to Windows. Windows to Mac and Mac to Mac still need physical verification.
 
+The remote bridge now validates the target token over HTTP before opening the
+remote WebSocket. When the target supports `/api/input/status`, the bridge also
+checks that the target input backend is allowed and loadable before connecting.
+
 ## Goal
 
 Let one computer intentionally hand mouse control to another paired device when the pointer crosses a configured screen edge.
@@ -233,6 +237,7 @@ When coding starts, keep the first slice small:
 - Prototype screen dragging blocks overlapping monitor tiles.
 - Prototype remote mouse bridge exists in `app/handoff_remote.py`.
 - `/handoff` can connect to another receiver and manually send mouse movement/click/scroll through a remote touchpad.
+- Target receiver diagnostics exist at `/api/input/status`, and remote handoff uses them when available.
 - Mac to Windows remote mouse movement has been physically verified with both machines running the main app.
 - Windows to Mac and Mac to Mac remote mouse movement are expected to use the same path but still need physical verification.
 - Automatic edge detection and global input capture are still not implemented.

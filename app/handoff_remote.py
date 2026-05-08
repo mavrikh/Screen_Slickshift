@@ -57,6 +57,10 @@ class RemoteTarget:
         return f"http://{self.host}:{self.port}/api/auth/check"
 
     @property
+    def input_status_url(self) -> str:
+        return f"http://{self.host}:{self.port}/api/input/status?check_backend=true"
+
+    @property
     def websocket_url(self) -> str:
         return f"ws://{self.host}:{self.port}{self.path}"
 
@@ -76,6 +80,10 @@ class RemoteHandoffBridge:
             return status
         if not await asyncio.to_thread(remote_token_is_valid, target, token):
             raise ValueError("Remote token was rejected.")
+        input_status = await asyncio.to_thread(get_remote_input_status, target, token)
+        if input_status and not input_status.get("input_allowed", False):
+            error = input_status.get("error") or "Remote input is not currently allowed."
+            raise ValueError(str(error))
 
         async with self._lock:
             await self._close_locked()
@@ -190,6 +198,16 @@ def remote_token_is_valid(target: RemoteTarget, token: str, timeout: float = 2.0
             return 200 <= response.status < 300
     except (HTTPError, OSError, URLError):
         return False
+
+
+def get_remote_input_status(target: RemoteTarget, token: str, timeout: float = 2.0) -> dict[str, Any]:
+    request = Request(target.input_status_url, headers={"X-Pairing-Token": token}, method="GET")
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (HTTPError, OSError, URLError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def should_connect(status: RemoteStatus) -> bool:

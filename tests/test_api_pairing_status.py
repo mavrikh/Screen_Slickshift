@@ -52,6 +52,48 @@ def test_status_endpoint_reports_protocol_capabilities(tmp_path, monkeypatch) ->
     }
 
 
+def test_input_status_requires_token(tmp_path, monkeypatch) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+
+    response = TestClient(app).get("/api/input/status")
+
+    assert response.status_code == 401
+
+
+def test_input_status_reports_receiver_state(tmp_path, monkeypatch) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+    token = config.get_or_create_pairing_token()
+    main.lockout_state.set_disabled(False)
+
+    response = TestClient(app).get(
+        "/api/input/status",
+        headers={"X-Pairing-Token": token},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["backend"] == "pyautogui"
+    assert data["disabled"] is False
+    assert data["input_allowed"] is True
+    assert data["screen_recording_required"] is False
+    assert data["error"] == ""
+
+
+def test_input_status_reports_lockout_disabled(tmp_path, monkeypatch) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+    token = config.get_or_create_pairing_token()
+    main.lockout_state.set_disabled(True)
+
+    response = TestClient(app).get(
+        "/api/input/status",
+        headers={"X-Pairing-Token": token},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["disabled"] is True
+    assert response.json()["input_allowed"] is False
+
+
 def test_file_transfer_page_serves_static_window(tmp_path, monkeypatch) -> None:
     _use_temp_config(tmp_path, monkeypatch)
 
@@ -1674,4 +1716,5 @@ def _use_temp_config(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(config, "RECEIVE_DIR_FILE", config_dir / "receive_dir.txt")
     monkeypatch.setattr(main, "pairing_code_book", PairingCodeBook())
     monkeypatch.setattr(main, "pairing_session_book", PairingSessionBook())
+    main.lockout_state.set_disabled(False)
     main.transfer_history.clear()

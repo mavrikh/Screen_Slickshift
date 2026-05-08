@@ -1,6 +1,6 @@
 # Current State
 
-Last reviewed from repository contents on 2026-05-06.
+Last reviewed from repository contents on 2026-05-08.
 
 This document describes what is present in the codebase. It does not claim features that are only future intent.
 
@@ -71,10 +71,7 @@ python -m pytest
 Expected on the current macOS baseline:
 
 ```text
-Expected on the current macOS baseline:
-
-```text
-270 passed, 2 warnings
+275 passed, 2 warnings
 ```
 
 The warnings are FastAPI `on_event` deprecation warnings and are intentionally deferred.
@@ -157,6 +154,7 @@ Working browser-control MVP:
 - Handoff layout page supports draggable monitor tiles, no-overlap placement, nearest-side snapping, Freeform mode, monitor edge-disable toggles, multiple monitors per device, up to five simulated devices, zoom, pan, and Reset View fit-to-layout.
 - Handoff layout page can connect to a remote Screen Slickshift receiver by host/IP, port, and remote token, then send mouse movement, clicks, and scroll through a manual remote touchpad.
 - Owner-token-protected remote handoff APIs: `/api/handoff/remote/status`, `/api/handoff/remote/start`, `/api/handoff/remote/event`, and `/api/handoff/remote/stop`.
+- Owner-token-protected input status API: `/api/input/status`, with optional backend import check for receiver diagnostics.
 - Rotating server logs.
 - LLM text generation via `/api/generate-text` route, using local OpenAI-compatible API (LM Studio).
 
@@ -224,6 +222,8 @@ Known security gaps or unclear areas:
 - Trusted-device/session authorization is enforced for session-authenticated touchpad mouse actions, text, clipboard read/write, upload, and macros.
 - The macOS receiver uses a temporary token but has no persistent trust model.
 - Remote handoff start is owner-token protected, preflights the target `/api/status`, refuses emergency-disabled receivers, and only sends mouse/ping protocol events.
+- Remote handoff start validates the target token through `/api/auth/check` before opening the remote WebSocket.
+- Remote handoff start checks target `/api/input/status?check_backend=true` when available and refuses targets that report input is blocked.
 - Remote handoff target tokens are not logged by the app and are not returned from API responses.
 
 ## 5. Platform-Specific Code

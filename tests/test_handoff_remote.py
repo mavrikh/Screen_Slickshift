@@ -22,6 +22,7 @@ def test_remote_target_normalizes_values() -> None:
     assert target.path == "/ws/touchpad"
     assert target.status_url == "http://192.168.1.25:8765/api/status"
     assert target.auth_check_url == "http://192.168.1.25:8765/api/auth/check"
+    assert target.input_status_url == "http://192.168.1.25:8765/api/input/status?check_backend=true"
     assert target.websocket_url == "ws://192.168.1.25:8765/ws/touchpad"
 
 
