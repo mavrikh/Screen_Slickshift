@@ -360,8 +360,12 @@ button.text-danger:hover {
 }
 
 .route-item {
-  grid-template-columns: 1fr auto;
+  grid-template-columns: 1fr auto auto;
   align-items: center;
+}
+
+.route-arm-button {
+  min-height: 32px;
 }
 
 .slider-row {

@@ -192,10 +192,22 @@ function renderRoutes() {
         <div class="state-item route-item">
           <span>${escapeHtml(`${route.from_screen_id} ${route.exit_edge} -> ${route.to_screen_id} ${route.enter_edge}`)}</span>
           <strong>${escapeHtml(`${route.overlap_px}px`)}</strong>
+          <button
+            class="secondary compact-button route-arm-button"
+            type="button"
+            data-to-device-id="${escapeHtml(route.to_device_id)}"
+            data-exit-edge="${escapeHtml(route.exit_edge)}"
+          >Arm</button>
         </div>
       `;
     })
     .join("");
+
+  routeList.querySelectorAll(".route-arm-button").forEach((button) => {
+    button.addEventListener("click", () => {
+      armRoute(button.dataset.toDeviceId, button.dataset.exitEdge);
+    });
+  });
 }
 
 async function previewRoutes() {
@@ -650,6 +662,20 @@ function armHandoff() {
   handoffState.activeTargetId = targetId;
   handoffState.activeEdge = edge;
   setNotice("Handoff armed.");
+}
+
+function armRoute(targetId, edge) {
+  if (!targetId || !edge) {
+    setNotice("Route is missing target or edge data.");
+    return;
+  }
+  handoffState.mode = "armed";
+  handoffState.activeTargetId = targetId;
+  handoffState.activeEdge = edge;
+  targetSelect.value = targetId;
+  edgeSelect.value = edge;
+  setNotice(`Handoff armed for ${targetId} on ${edge} edge.`);
+  renderState();
 }
 
 function disarmHandoff() {
