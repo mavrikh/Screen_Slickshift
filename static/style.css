@@ -364,6 +364,36 @@ button.text-danger:hover {
   font-size: 0.86rem;
 }
 
+.active-handoff-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  align-items: start;
+  justify-items: center;
+  padding: 18px;
+  background: rgba(17, 20, 24, 0.62);
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.active-handoff-layer[hidden] {
+  display: none;
+}
+
+.active-handoff-bar {
+  width: min(760px, 100%);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #111820;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.35);
+}
+
 .route-item {
   grid-template-columns: 1fr auto auto;
   align-items: center;

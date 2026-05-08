@@ -31,6 +31,7 @@ const handoffState = {
   remoteConnected: false,
   remoteTargetLabel: "",
   remoteDragging: false,
+  activeLayerDragging: false,
   lastRemoteMoveAt: 0,
   viewport: { x: 0, y: 0, scale: 1 },
 };
@@ -72,6 +73,11 @@ const remoteStatusText = document.getElementById("remoteStatusText");
 const remoteWiggleButton = document.getElementById("remoteWiggleButton");
 const remoteLeftClickButton = document.getElementById("remoteLeftClickButton");
 const remoteRightClickButton = document.getElementById("remoteRightClickButton");
+const activeHandoffLayer = document.getElementById("activeHandoffLayer");
+const activeHandoffStatus = document.getElementById("activeHandoffStatus");
+const activeLayerLeftClickButton = document.getElementById("activeLayerLeftClickButton");
+const activeLayerRightClickButton = document.getElementById("activeLayerRightClickButton");
+const activeLayerStopButton = document.getElementById("activeLayerStopButton");
 
 handoffTokenInput.value = handoffState.token;
 
@@ -178,6 +184,10 @@ function renderState() {
   remoteWiggleButton.disabled = !handoffState.remoteConnected;
   remoteLeftClickButton.disabled = !handoffState.remoteConnected;
   remoteRightClickButton.disabled = !handoffState.remoteConnected;
+  activeHandoffLayer.hidden = handoffState.mode !== "active_remote";
+  activeHandoffStatus.textContent = handoffState.remoteTargetLabel
+    ? `Remote handoff active: ${handoffState.remoteTargetLabel}`
+    : "Remote handoff active";
 }
 
 function renderRoutes() {
@@ -708,9 +718,9 @@ function confirmHandoff() {
     return;
   }
   handoffState.mode = "active_remote";
-  remoteMousePad.focus();
-  setNotice("Remote handoff active. Drag inside the remote touchpad to move the target mouse.");
+  setNotice("Remote handoff active.");
   renderState();
+  activeHandoffLayer.focus();
 }
 
 async function stopHandoff() {
@@ -760,6 +770,7 @@ async function stopRemoteControl(options = {}) {
   handoffState.remoteConnected = false;
   handoffState.remoteTargetLabel = "";
   handoffState.remoteDragging = false;
+  handoffState.activeLayerDragging = false;
   if (!options.quiet) setNotice("Remote mouse disconnected.");
   renderState();
 }
@@ -802,6 +813,28 @@ function moveRemotePad(event) {
 
 function endRemotePad() {
   handoffState.remoteDragging = false;
+}
+
+function startActiveLayer(event) {
+  if (event.target.closest("button")) return;
+  if (handoffState.mode !== "active_remote" || !handoffState.remoteConnected) return;
+  handoffState.activeLayerDragging = true;
+  activeHandoffLayer.setPointerCapture(event.pointerId);
+}
+
+function moveActiveLayer(event) {
+  if (handoffState.mode !== "active_remote" || !handoffState.remoteConnected || !handoffState.activeLayerDragging) return;
+  const now = performance.now();
+  if (now - handoffState.lastRemoteMoveAt < 12) return;
+  handoffState.lastRemoteMoveAt = now;
+  const dx = event.movementX || 0;
+  const dy = event.movementY || 0;
+  if (dx === 0 && dy === 0) return;
+  sendRemoteEvent({ type: "mouse_move", dx: dx * 1.3, dy: dy * 1.3 });
+}
+
+function endActiveLayer() {
+  handoffState.activeLayerDragging = false;
 }
 
 function clickRemoteMouse(button) {
@@ -855,6 +888,17 @@ remoteMousePad.addEventListener("wheel", (event) => {
 });
 remoteLeftClickButton.addEventListener("click", () => clickRemoteMouse("left"));
 remoteRightClickButton.addEventListener("click", () => clickRemoteMouse("right"));
+activeLayerLeftClickButton.addEventListener("click", () => clickRemoteMouse("left"));
+activeLayerRightClickButton.addEventListener("click", () => clickRemoteMouse("right"));
+activeLayerStopButton.addEventListener("click", stopHandoff);
+activeHandoffLayer.addEventListener("pointerdown", startActiveLayer);
+activeHandoffLayer.addEventListener("pointermove", moveActiveLayer);
+activeHandoffLayer.addEventListener("pointerup", endActiveLayer);
+activeHandoffLayer.addEventListener("pointercancel", endActiveLayer);
+activeHandoffLayer.addEventListener("wheel", (event) => {
+  event.preventDefault();
+  sendRemoteEvent({ type: "scroll", amount: event.deltaY > 0 ? -8 : 8 });
+});
 targetSelect.addEventListener("change", () => {
   handoffState.activeTargetId = targetSelect.value;
   renderState();

@@ -24,6 +24,11 @@ Confirming a pending handoff now requires an active remote connection. When it
 succeeds, the browser focuses the remote touchpad so the active remote surface
 is visually and interactively clear.
 
+Active remote mode now opens a full-window browser handoff layer. Dragging on
+that layer sends remote mouse movement, wheel scrolling sends remote scroll,
+and the layer includes click and stop controls. This is still browser-contained
+and does not perform OS-level global input capture.
+
 Current Mac-Windows verification path:
 
 1. Run the main app on both machines with `python run.py --host 0.0.0.0 --port 8765`.
@@ -248,6 +253,7 @@ When coding starts, keep the first slice small:
 - Target receiver diagnostics exist at `/api/input/status`, and remote handoff uses them when available.
 - Derived routes in `/handoff` can arm the handoff state directly.
 - Confirming a pending handoff requires a connected remote target and focuses the remote touchpad.
+- Active remote mode uses a full-window browser layer for manual remote movement, clicks, scroll, and stop.
 - Mac to Windows remote mouse movement has been physically verified with both machines running the main app.
 - Windows to Mac remote mouse movement has been physically verified with both machines running the main app.
 - Mac to Mac remote mouse movement is expected to use the same path but still needs physical verification.
