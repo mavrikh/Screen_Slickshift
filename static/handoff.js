@@ -35,6 +35,7 @@ const handoffState = {
   remoteTargetLabel: "",
   remoteDragging: false,
   activeLayerDragging: false,
+  pointerLocked: false,
   lastRemoteMoveAt: 0,
   viewport: { x: 0, y: 0, scale: 1 },
 };
@@ -78,6 +79,7 @@ const remoteLeftClickButton = document.getElementById("remoteLeftClickButton");
 const remoteRightClickButton = document.getElementById("remoteRightClickButton");
 const activeHandoffLayer = document.getElementById("activeHandoffLayer");
 const activeHandoffStatus = document.getElementById("activeHandoffStatus");
+const activeLayerCaptureButton = document.getElementById("activeLayerCaptureButton");
 const activeLayerLeftClickButton = document.getElementById("activeLayerLeftClickButton");
 const activeLayerRightClickButton = document.getElementById("activeLayerRightClickButton");
 const activeLayerStopButton = document.getElementById("activeLayerStopButton");
@@ -194,6 +196,7 @@ function renderState() {
   activeHandoffStatus.textContent = handoffState.remoteTargetLabel
     ? `Remote handoff active: ${handoffState.remoteTargetLabel}`
     : "Remote handoff active";
+  activeLayerCaptureButton.textContent = handoffState.pointerLocked ? "Release Cursor" : "Capture Cursor";
 }
 
 function renderRoutes() {
@@ -730,6 +733,7 @@ function confirmHandoff() {
 }
 
 async function stopHandoff() {
+  releaseActivePointerLock();
   await stopRemoteControl({ quiet: true });
   handoffState.mode = "idle";
   handoffState.activeTargetId = null;
@@ -787,6 +791,7 @@ async function stopRemoteControl(options = {}) {
   handoffState.remoteTargetLabel = "";
   handoffState.remoteDragging = false;
   handoffState.activeLayerDragging = false;
+  handoffState.pointerLocked = false;
   if (!options.quiet) setNotice("Remote mouse disconnected.");
   renderState();
 }
@@ -839,7 +844,12 @@ function startActiveLayer(event) {
 }
 
 function moveActiveLayer(event) {
-  if (handoffState.mode !== "active_remote" || !handoffState.remoteConnected || !handoffState.activeLayerDragging) return;
+  if (handoffState.mode !== "active_remote" || !handoffState.remoteConnected) return;
+  if (!handoffState.activeLayerDragging && !handoffState.pointerLocked) return;
+  sendActiveLayerMovement(event);
+}
+
+function sendActiveLayerMovement(event) {
   const now = performance.now();
   if (now - handoffState.lastRemoteMoveAt < 12) return;
   handoffState.lastRemoteMoveAt = now;
@@ -851,6 +861,32 @@ function moveActiveLayer(event) {
 
 function endActiveLayer() {
   handoffState.activeLayerDragging = false;
+}
+
+function toggleActivePointerLock() {
+  if (document.pointerLockElement === activeHandoffLayer) {
+    releaseActivePointerLock();
+    return;
+  }
+  if (handoffState.mode !== "active_remote" || !handoffState.remoteConnected) {
+    setNotice("Activate remote handoff before capturing the cursor.");
+    return;
+  }
+  activeHandoffLayer.requestPointerLock();
+}
+
+function releaseActivePointerLock() {
+  if (document.pointerLockElement === activeHandoffLayer) {
+    document.exitPointerLock();
+  }
+}
+
+function updateActivePointerLock() {
+  handoffState.pointerLocked = document.pointerLockElement === activeHandoffLayer;
+  if (handoffState.pointerLocked) {
+    setNotice("Cursor captured for browser handoff. Press Escape to release/stop.");
+  }
+  renderState();
 }
 
 function clickRemoteMouse(button) {
@@ -906,6 +942,7 @@ remoteLeftClickButton.addEventListener("click", () => clickRemoteMouse("left"));
 remoteRightClickButton.addEventListener("click", () => clickRemoteMouse("right"));
 activeLayerLeftClickButton.addEventListener("click", () => clickRemoteMouse("left"));
 activeLayerRightClickButton.addEventListener("click", () => clickRemoteMouse("right"));
+activeLayerCaptureButton.addEventListener("click", toggleActivePointerLock);
 activeLayerStopButton.addEventListener("click", stopHandoff);
 activeHandoffLayer.addEventListener("pointerdown", startActiveLayer);
 activeHandoffLayer.addEventListener("pointermove", moveActiveLayer);
@@ -914,6 +951,11 @@ activeHandoffLayer.addEventListener("pointercancel", endActiveLayer);
 activeHandoffLayer.addEventListener("wheel", (event) => {
   event.preventDefault();
   sendRemoteEvent({ type: "scroll", amount: event.deltaY > 0 ? -8 : 8 });
+});
+document.addEventListener("pointerlockchange", updateActivePointerLock);
+document.addEventListener("mousemove", (event) => {
+  if (document.pointerLockElement !== activeHandoffLayer) return;
+  sendActiveLayerMovement(event);
 });
 targetSelect.addEventListener("change", () => {
   handoffState.activeTargetId = targetSelect.value;

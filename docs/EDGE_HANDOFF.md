@@ -33,6 +33,10 @@ that layer sends remote mouse movement, wheel scrolling sends remote scroll,
 and the layer includes click and stop controls. This is still browser-contained
 and does not perform OS-level global input capture.
 
+The active layer also has an explicit Capture Cursor button. This uses browser
+Pointer Lock after a user click, so movement can continue without hitting the
+browser window edge. Escape remains the release/stop path.
+
 Current Mac-Windows verification path:
 
 1. Run the main app on both machines with `python run.py --host 0.0.0.0 --port 8765`.
@@ -258,6 +262,7 @@ When coding starts, keep the first slice small:
 - Derived routes in `/handoff` can arm the handoff state directly.
 - Confirming a pending handoff requires a connected remote target and focuses the remote touchpad.
 - Active remote mode uses a full-window browser layer for manual remote movement, clicks, scroll, and stop.
+- Active remote mode can explicitly capture the cursor through browser Pointer Lock after the user clicks Capture Cursor.
 - `/handoff` remembers the last remote host, port, and token in browser local storage for current testing convenience.
 - Mac to Windows remote mouse movement has been physically verified with both machines running the main app.
 - Windows to Mac remote mouse movement has been physically verified with both machines running the main app.
