@@ -353,6 +353,12 @@ button.text-danger:hover {
   color: var(--text);
 }
 
+.remote-stop-hint {
+  min-height: 18px;
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
 .route-item {
   grid-template-columns: 1fr auto;
   align-items: center;

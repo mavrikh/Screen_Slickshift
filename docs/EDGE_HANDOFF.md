@@ -25,7 +25,7 @@ Current Mac-Windows verification path:
 5. Click Connect Remote.
 6. Click Wiggle or drag inside Remote touchpad.
 
-Expected result: the target machine mouse moves. This has been physically verified from Mac to Windows. Windows to Mac and Mac to Mac still need physical verification.
+Expected result: the target machine mouse moves. This has been physically verified from Mac to Windows and Windows to Mac. Mac to Mac still needs physical verification.
 
 The remote bridge now validates the target token over HTTP before opening the
 remote WebSocket. When the target supports `/api/input/status`, the bridge also
@@ -239,7 +239,9 @@ When coding starts, keep the first slice small:
 - `/handoff` can connect to another receiver and manually send mouse movement/click/scroll through a remote touchpad.
 - Target receiver diagnostics exist at `/api/input/status`, and remote handoff uses them when available.
 - Mac to Windows remote mouse movement has been physically verified with both machines running the main app.
-- Windows to Mac and Mac to Mac remote mouse movement are expected to use the same path but still need physical verification.
+- Windows to Mac remote mouse movement has been physically verified with both machines running the main app.
+- Mac to Mac remote mouse movement is expected to use the same path but still needs physical verification.
+- `/handoff` has a Stop button and an Escape key local stop path for the visible browser handoff flow.
 - Automatic edge detection and global input capture are still not implemented.
 - Prototype screen dragging snaps nearby sides edge-to-edge.
 - Prototype screen release forces snapping to the nearest valid side unless Freeform mode is enabled.

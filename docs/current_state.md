@@ -6,7 +6,7 @@ This document describes what is present in the codebase. It does not claim featu
 
 For switching between GPT/Codex, Ollama, another local LLM, or a plain terminal workflow, use `docs/HANDOFF.md` as the quick continuity file.
 
-Phase 1 stabilization is complete for the current baseline. Phase 9 is now moving toward a Mac-Windows remote-mouse test path with both machines running the same Python/FastAPI app.
+Phase 1 stabilization is complete for the current baseline. Phase 9 has a bidirectional Mac-Windows remote-mouse test path with both machines running the same Python/FastAPI app.
 
 ## 1. App Architecture
 
@@ -234,7 +234,7 @@ Windows-oriented code:
 - `config/macros.json` contains Windows commands: `notepad.exe`, `rundll32.exe user32.dll,LockWorkStation`, and a Windows Calculator shell target.
 - `app/commands.py` uses Windows creation flags when `os.name == "nt"`.
 - `app/input_control.py` is not Windows-only by code. It lazily loads `pyautogui` when input actions are used.
-- The main app's `/ws/touchpad` receiver path is intended to run on Windows as the remote mouse target when Python dependencies are installed and the app is running in a desktop session. Physical Windows verification is still required.
+- The main app's `/ws/touchpad` receiver path runs on Windows as the remote mouse target when Python dependencies are installed and the app is running in a desktop session. Mac-to-Windows remote mouse has been physically verified.
 
 macOS-specific or macOS-oriented code:
 
@@ -249,7 +249,7 @@ macOS-specific or macOS-oriented code:
 - Receiver `/ws/input` accepts `session_auth` with `mouse` permission and updates session activity only after accepted mouse input.
 - Receiver `/api/lockout` accepts `X-Pairing-Token` and still accepts query-token auth for compatibility.
 - Receiver status/index payloads advertise supported WebSocket and HTTP auth modes without exposing the token.
-- The main app's `/ws/touchpad` receiver path is intended to run on macOS as the remote mouse target when Accessibility permission is granted. Physical Mac-to-Mac verification is still required.
+- The main app's `/ws/touchpad` receiver path runs on macOS as the remote mouse target when Accessibility permission is granted. Windows-to-Mac remote mouse has been physically verified. Physical Mac-to-Mac verification is still pending.
 - Receiver emergency-disabled state blocks mouse/click/scroll while allowing ping.
 - `app/device_identity.py` maps `platform.system() == "Darwin"` to `macos`.
 

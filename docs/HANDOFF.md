@@ -119,7 +119,7 @@ Phase 1 status:
 - Windows verification deferred.
 - Phase 2 Security panel implementation is complete for the current browser UI.
 - Phase 3 session-scoped permissions enforcement is complete.
-- Phase 9 remote mouse bridge has started. Mac-to-Windows remote mouse has been physically verified. Windows-to-Mac still needs physical verification.
+- Phase 9 remote mouse bridge has started. Mac-to-Windows and Windows-to-Mac remote mouse have been physically verified. Mac-to-Mac still needs physical verification.
 
 For a syntax/import sanity check on macOS sandboxed environments:
 

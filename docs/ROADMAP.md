@@ -307,13 +307,13 @@ Current status:
 - Prototype Add Machine/Add Monitor use non-overlap placement.
 - Prototype remote handoff APIs can connect this app to another Screen Slickshift receiver and send mouse movement, click, scroll, or ping events.
 - Prototype `/handoff` page has remote host/IP, port, and token fields plus a manual remote touchpad for real mouse testing against another running app.
-- Mac-Windows verification is the next physical test target now that a Windows machine with Python is expected to be available.
+- Mac-to-Windows and Windows-to-Mac remote mouse movement are physically verified with both machines running the main app.
 - No global input capture code exists.
 - No pointer-edge detector exists.
 - No automatic handoff network sender loop exists.
 - Manual remote touchpad and the internal CLI manual sender remain the proving tools.
 - Keyboard capture remains deferred.
-- The next implementation slice should run a real Mac-Windows remote-mouse test, then decide whether to add edge detection or improve Linux/SteamOS options.
+- The next implementation slice should move toward visible/manual handoff activation and return behavior before adding OS-level edge detection or global capture.
 
 ## Phase 10: Packaging Decision
 

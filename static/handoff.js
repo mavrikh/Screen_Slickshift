@@ -835,6 +835,12 @@ edgeSelect.addEventListener("change", () => {
   handoffState.activeEdge = edgeSelect.value;
   renderState();
 });
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  if (!handoffState.remoteConnected && handoffState.mode === "idle") return;
+  event.preventDefault();
+  stopHandoff();
+});
 layoutCanvas.addEventListener("pointerdown", startPan);
 layoutCanvas.addEventListener("pointermove", handleDrag);
 layoutCanvas.addEventListener("pointermove", handlePan);
