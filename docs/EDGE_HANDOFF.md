@@ -20,6 +20,10 @@ The route preview can arm a derived route directly. This keeps the manual
 handoff flow tied to the visible screen layout instead of requiring the target
 and edge controls to be set separately.
 
+Confirming a pending handoff now requires an active remote connection. When it
+succeeds, the browser focuses the remote touchpad so the active remote surface
+is visually and interactively clear.
+
 Current Mac-Windows verification path:
 
 1. Run the main app on both machines with `python run.py --host 0.0.0.0 --port 8765`.
@@ -243,6 +247,7 @@ When coding starts, keep the first slice small:
 - `/handoff` can connect to another receiver and manually send mouse movement/click/scroll through a remote touchpad.
 - Target receiver diagnostics exist at `/api/input/status`, and remote handoff uses them when available.
 - Derived routes in `/handoff` can arm the handoff state directly.
+- Confirming a pending handoff requires a connected remote target and focuses the remote touchpad.
 - Mac to Windows remote mouse movement has been physically verified with both machines running the main app.
 - Windows to Mac remote mouse movement has been physically verified with both machines running the main app.
 - Mac to Mac remote mouse movement is expected to use the same path but still needs physical verification.

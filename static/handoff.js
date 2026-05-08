@@ -703,12 +703,14 @@ function confirmHandoff() {
     setNotice("No pending handoff to confirm.");
     return;
   }
+  if (!handoffState.remoteConnected) {
+    setNotice("Connect a remote target before confirming handoff.");
+    return;
+  }
   handoffState.mode = "active_remote";
-  setNotice(
-    handoffState.remoteConnected
-      ? "Remote handoff active. Drag inside the remote touchpad to move the target mouse."
-      : "Handoff active. Connect a remote target before sending mouse input."
-  );
+  remoteMousePad.focus();
+  setNotice("Remote handoff active. Drag inside the remote touchpad to move the target mouse.");
+  renderState();
 }
 
 async function stopHandoff() {

@@ -353,6 +353,11 @@ button.text-danger:hover {
   color: var(--text);
 }
 
+.remote-mouse-pad:focus-visible {
+  outline: 3px solid rgba(56, 189, 248, 0.45);
+  outline-offset: 3px;
+}
+
 .remote-stop-hint {
   min-height: 18px;
   color: var(--muted);
