@@ -128,6 +128,10 @@ def configure_logging() -> None:
             RotatingFileHandler(log_file, maxBytes=1_000_000, backupCount=3, encoding="utf-8"),
         ],
     )
+    logging.getLogger("websockets.server").setLevel(logging.WARNING)
+    logging.getLogger("websockets.client").setLevel(logging.WARNING)
+    logging.getLogger("websockets.legacy.server").setLevel(logging.WARNING)
+    logging.getLogger("websockets.legacy.client").setLevel(logging.WARNING)
 
 
 configure_logging()
