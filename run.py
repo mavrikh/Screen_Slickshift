@@ -19,7 +19,14 @@ def main() -> None:
     except ImportError as exc:
         raise SystemExit("Missing dependencies. Run: python -m pip install -r requirements.txt") from exc
 
-    uvicorn.run("app.main:app", host=args.host, port=args.port, reload=args.reload, access_log=False)
+    uvicorn.run(
+        "app.main:app",
+        host=args.host,
+        port=args.port,
+        reload=args.reload,
+        access_log=False,
+        log_level="warning",
+    )
 
 
 if __name__ == "__main__":
