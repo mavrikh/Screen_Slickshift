@@ -2,6 +2,7 @@ const state = {
   token: localStorage.getItem("wdcToken") || "",
   socket: null,
   reconnectTimer: null,
+  reconnectAttempts: 0,
   heartbeatTimer: null,
   manualSocketClose: false,
   pointerLocked: false,
@@ -408,6 +409,7 @@ function connectSocket() {
   state.socket = new WebSocket(url);
 
   state.socket.addEventListener("open", () => {
+    state.reconnectAttempts = 0;
     sendSocket({ type: "auth", token: state.token });
     setStatus("Connected");
     log("Touchpad connected.");
@@ -418,6 +420,10 @@ function connectSocket() {
     stopHeartbeat();
     setStatus("Disconnected");
     if (!state.manualSocketClose && state.token) {
+      if (state.reconnectAttempts >= 5) {
+        log("Touchpad disconnected. Reconnect paused; press Save / Connect to try again.");
+        return;
+      }
       log("Touchpad disconnected. Reconnecting...");
       scheduleReconnect();
     } else {
@@ -433,10 +439,12 @@ function connectSocket() {
 
 function scheduleReconnect() {
   clearTimeout(state.reconnectTimer);
+  const delay = Math.min(15000, 1200 * 2 ** state.reconnectAttempts);
+  state.reconnectAttempts += 1;
   state.reconnectTimer = setTimeout(() => {
     state.socket = null;
     connectSocket();
-  }, 1200);
+  }, delay);
 }
 
 function startHeartbeat() {
@@ -453,6 +461,7 @@ function stopHeartbeat() {
 
 function resetSocket() {
   clearTimeout(state.reconnectTimer);
+  state.reconnectAttempts = 0;
   state.manualSocketClose = true;
   stopHeartbeat();
   if (state.socket) {
