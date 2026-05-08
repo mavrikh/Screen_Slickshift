@@ -6,7 +6,7 @@ from typing import Optional
 
 from fastapi import UploadFile
 
-from app.config import settings
+from app.config import get_receive_dir, settings
 from app.state import lockout_state
 
 
@@ -19,9 +19,9 @@ def sanitize_filename(filename: str) -> str:
     return name or "upload.bin"
 
 
-def unique_upload_path(filename: str) -> Path:
+def unique_upload_path(filename: str, upload_dir: Path) -> Path:
     safe_name = sanitize_filename(filename)
-    target = settings.upload_dir / safe_name
+    target = upload_dir / safe_name
     if not target.exists():
         return target
 
@@ -29,7 +29,7 @@ def unique_upload_path(filename: str) -> Path:
     suffix = target.suffix
     counter = 1
     while True:
-        candidate = settings.upload_dir / f"{stem}_{counter}{suffix}"
+        candidate = upload_dir / f"{stem}_{counter}{suffix}"
         if not candidate.exists():
             return candidate
         counter += 1
@@ -39,8 +39,9 @@ async def save_upload(file: UploadFile, max_bytes: Optional[int] = None) -> dict
     if lockout_state.is_disabled():
         raise RuntimeError("File upload is disabled by emergency lockout.")
 
-    settings.upload_dir.mkdir(parents=True, exist_ok=True)
-    target = unique_upload_path(file.filename or "upload.bin")
+    receive_dir = get_receive_dir()
+    receive_dir.mkdir(parents=True, exist_ok=True)
+    target = unique_upload_path(file.filename or "upload.bin", receive_dir)
     byte_limit = settings.max_upload_bytes if max_bytes is None else max_bytes
 
     total = 0

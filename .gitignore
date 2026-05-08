@@ -5,6 +5,7 @@ __pycache__/
 config/pairing_token.txt
 config/trusted_devices.json
 config/device_identity.json
+config/receive_dir.txt
 logs/*.log
 uploads/*
 !uploads/.gitkeep

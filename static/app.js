@@ -12,6 +12,9 @@ const state = {
   trustedDevices: [],
   pairingSessions: [],
   pairingCode: null,
+  maxUploadBytes: null,
+  receiveDir: "",
+  transfers: [],
 };
 
 const tokenInput = document.getElementById("tokenInput");
@@ -28,6 +31,12 @@ const setClipboardButton = document.getElementById("setClipboardButton");
 const fileInput = document.getElementById("fileInput");
 const uploadButton = document.getElementById("uploadButton");
 const dropZone = document.getElementById("dropZone");
+const uploadLimitText = document.getElementById("uploadLimitText");
+const uploadStatus = document.getElementById("uploadStatus");
+const receiveDirInput = document.getElementById("receiveDirInput");
+const saveReceiveDirButton = document.getElementById("saveReceiveDirButton");
+const transferList = document.getElementById("transferList");
+const clearTransfersButton = document.getElementById("clearTransfersButton");
 const lockoutButton = document.getElementById("lockoutButton");
 const captureCursorButton = document.getElementById("captureCursorButton");
 const scrollSpeed = document.getElementById("scrollSpeed");
@@ -90,6 +99,104 @@ function formatTime(seconds) {
   if (!seconds) return "never";
   const date = new Date(seconds * 1000);
   return date.toLocaleString();
+}
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes)) return "unknown size";
+  const units = ["bytes", "KB", "MB", "GB"];
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  if (unitIndex === 0) return `${value} ${units[unitIndex]}`;
+  return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unitIndex]}`;
+}
+
+function selectedFileIsTooLarge() {
+  return (
+    state.selectedFile &&
+    Number.isFinite(state.maxUploadBytes) &&
+    state.selectedFile.size > state.maxUploadBytes
+  );
+}
+
+function renderUploadState() {
+  const limitText = Number.isFinite(state.maxUploadBytes)
+    ? `Upload limit: ${formatBytes(state.maxUploadBytes)}`
+    : "Upload limit unavailable";
+  const folderText = state.receiveDir ? `Receive folder: ${state.receiveDir}` : "Receive folder unavailable";
+  const fileText = state.selectedFile
+    ? `Selected: ${state.selectedFile.name} (${formatBytes(state.selectedFile.size)})`
+    : "No file selected";
+  const tooLarge = selectedFileIsTooLarge();
+
+  uploadLimitText.textContent = tooLarge
+    ? `${fileText}. Exceeds ${formatBytes(state.maxUploadBytes)} limit.`
+    : `${limitText}. ${fileText}. ${folderText}.`;
+  uploadLimitText.classList.toggle("warning", Boolean(tooLarge));
+  uploadButton.disabled = Boolean(tooLarge);
+  if (tooLarge) {
+    setUploadStatus(`File exceeds the ${formatBytes(state.maxUploadBytes)} upload limit.`, "error");
+  }
+}
+
+function setUploadStatus(message, type = "neutral") {
+  uploadStatus.textContent = message;
+  uploadStatus.classList.toggle("success", type === "success");
+  uploadStatus.classList.toggle("error", type === "error");
+}
+
+function recordTransfer({ name, bytes, status, detail }) {
+  state.transfers.unshift({
+    name,
+    bytes,
+    status,
+    detail,
+    time: new Date(),
+  });
+  state.transfers = state.transfers.slice(0, 6);
+  renderTransfers();
+}
+
+function setServerTransfers(transfers = []) {
+  state.transfers = transfers.map((transfer) => ({
+    name: transfer.filename,
+    bytes: transfer.bytes,
+    status: transfer.status || "received",
+    detail: transfer.detail || transfer.path || transfer.source || "",
+    time: new Date(transfer.created_at * 1000),
+  }));
+  renderTransfers();
+}
+
+function renderTransfers() {
+  if (!state.transfers.length) {
+    transferList.innerHTML = '<div class="empty-state">No recent transfers.</div>';
+    clearTransfersButton.disabled = true;
+    return;
+  }
+
+  clearTransfersButton.disabled = false;
+  transferList.innerHTML = state.transfers
+    .map((transfer) => {
+      const statusClass = transfer.status === "received" ? "success" : "error";
+      return `
+        <div class="transfer-item">
+          <div class="item-title">
+            <span>${escapeHtml(transfer.name)}</span>
+            <span class="pill ${statusClass === "success" ? "enabled" : "warning"}">${escapeHtml(transfer.status)}</span>
+          </div>
+          <div class="item-meta">
+            <span>${escapeHtml(formatBytes(transfer.bytes))}</span>
+            <span>${escapeHtml(transfer.time.toLocaleTimeString())}</span>
+            <span>${escapeHtml(transfer.detail || "")}</span>
+          </div>
+        </div>
+      `;
+    })
+    .join("");
 }
 
 function formatPermissions(permissions = {}) {
@@ -251,6 +358,28 @@ async function loadSecurityState() {
   state.trustedDevices = trustedData.devices || [];
   state.pairingSessions = sessionData.sessions || [];
   renderSecurityState();
+}
+
+async function loadStatus() {
+  const response = await fetch("/api/status");
+  const data = await response.json();
+  state.lockout = Boolean(data.disabled);
+  state.maxUploadBytes = data.max_upload_bytes;
+  lockoutButton.textContent = state.lockout ? "Re-enable Control" : "Emergency Stop";
+  renderUploadState();
+}
+
+async function loadFileTransferSettings() {
+  if (!requireToken()) return;
+  const [settingsData, transferData] = await Promise.all([
+    api("/api/file-transfer/settings"),
+    api("/api/file-transfer/transfers"),
+  ]);
+  state.maxUploadBytes = settingsData.max_upload_bytes;
+  state.receiveDir = settingsData.receive_dir || "";
+  receiveDirInput.value = state.receiveDir;
+  setServerTransfers(transferData.transfers || []);
+  renderUploadState();
 }
 
 async function refreshSecurityState(message = "") {
@@ -486,6 +615,7 @@ saveTokenButton.addEventListener("click", async () => {
     await api("/api/auth/check");
     log("Pairing token accepted.");
     await loadMacros();
+    await loadFileTransferSettings();
     await loadSecurityState();
     connectSocket();
   } catch (error) {
@@ -507,6 +637,43 @@ guestCodeButton.addEventListener("click", () => {
 
 revokeAllSessionsButton.addEventListener("click", () => {
   revokeAllPairingSessions();
+});
+
+clearTransfersButton.addEventListener("click", async () => {
+  if (!requireToken()) return;
+  try {
+    const data = await api("/api/file-transfer/transfers", {
+      method: "DELETE",
+    });
+    state.transfers = [];
+    renderTransfers();
+    const message = `Cleared ${data.removed} transfer record(s).`;
+    setUploadStatus(message, "success");
+    log(message);
+  } catch (error) {
+    setUploadStatus(error.message, "error");
+    log(error.message);
+  }
+});
+
+saveReceiveDirButton.addEventListener("click", async () => {
+  if (!requireToken()) return;
+  try {
+    const data = await api("/api/file-transfer/settings", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: receiveDirInput.value.trim() }),
+    });
+    state.receiveDir = data.receive_dir || "";
+    state.maxUploadBytes = data.max_upload_bytes;
+    receiveDirInput.value = state.receiveDir;
+    renderUploadState();
+    setUploadStatus("Updated receive folder.", "success");
+    log("Updated receive folder.");
+  } catch (error) {
+    setUploadStatus(error.message, "error");
+    log(error.message);
+  }
 });
 
 trustedDevices.addEventListener("click", (event) => {
@@ -650,6 +817,8 @@ setClipboardButton.addEventListener("click", async () => {
 
 fileInput.addEventListener("change", () => {
   state.selectedFile = fileInput.files[0] || null;
+  renderUploadState();
+  if (state.selectedFile) log(`Selected ${state.selectedFile.name} (${formatBytes(state.selectedFile.size)}).`);
 });
 
 dropZone.addEventListener("dragover", (event) => {
@@ -665,7 +834,8 @@ dropZone.addEventListener("drop", (event) => {
   event.preventDefault();
   dropZone.classList.remove("drag-over");
   state.selectedFile = event.dataTransfer.files[0] || null;
-  if (state.selectedFile) log(`Selected ${state.selectedFile.name}`);
+  renderUploadState();
+  if (state.selectedFile) log(`Selected ${state.selectedFile.name} (${formatBytes(state.selectedFile.size)}).`);
 });
 
 uploadButton.addEventListener("click", async () => {
@@ -673,7 +843,21 @@ uploadButton.addEventListener("click", async () => {
     state.selectedFile = fileInput.files[0];
   }
   if (!state.selectedFile) {
-    log("Choose a file first.");
+    const message = "Choose a file first.";
+    setUploadStatus(message, "error");
+    log(message);
+    return;
+  }
+  if (selectedFileIsTooLarge()) {
+    const message = `File exceeds the ${formatBytes(state.maxUploadBytes)} upload limit.`;
+    setUploadStatus(message, "error");
+    recordTransfer({
+      name: state.selectedFile.name,
+      bytes: state.selectedFile.size,
+      status: "rejected",
+      detail: "Too large",
+    });
+    log(message);
     return;
   }
 
@@ -681,9 +865,25 @@ uploadButton.addEventListener("click", async () => {
   form.append("file", state.selectedFile);
 
   try {
+    setUploadStatus("Uploading...", "neutral");
     const data = await api("/api/upload", { method: "POST", body: form });
-    log(`Uploaded ${data.file.filename} (${data.file.bytes} bytes).`);
+    const message = `Uploaded ${data.file.filename} (${formatBytes(data.file.bytes)}).`;
+    setUploadStatus(message, "success");
+    recordTransfer({
+      name: data.file.filename,
+      bytes: data.file.bytes,
+      status: "received",
+      detail: state.receiveDir,
+    });
+    log(message);
   } catch (error) {
+    setUploadStatus(error.message, "error");
+    recordTransfer({
+      name: state.selectedFile.name,
+      bytes: state.selectedFile.size,
+      status: "rejected",
+      detail: error.message,
+    });
     log(error.message);
   }
 });
@@ -704,9 +904,16 @@ lockoutButton.addEventListener("click", async () => {
   }
 });
 
+loadStatus().catch((error) => {
+  renderUploadState();
+  log(`Could not load server status: ${error.message}`);
+});
+renderTransfers();
+
 if (state.token) {
   connectSocket();
   loadMacros().catch((error) => log(error.message));
+  loadFileTransferSettings().catch((error) => log(error.message));
   loadSecurityState().catch((error) => log(error.message));
 } else {
   renderSecurityState();

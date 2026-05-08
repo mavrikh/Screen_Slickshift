@@ -112,6 +112,7 @@ def test_trusted_device_permissions_default_to_safe_values(tmp_path) -> None:
     assert permissions["clipboard_read"] is False
     assert permissions["clipboard_write"] is False
     assert permissions["file_receive"] is True
+    assert permissions["macros"] is False
 
 
 def test_trusted_device_public_dict_excludes_secret_hash(tmp_path) -> None:

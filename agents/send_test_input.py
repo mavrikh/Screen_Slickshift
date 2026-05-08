@@ -15,6 +15,16 @@ async def send_messages(url: str, messages: Iterable[dict], delay: float) -> Non
             await asyncio.sleep(delay)
 
 
+def envelope_messages(messages: Iterable[dict]) -> list[dict]:
+    return [
+        {
+            "version": 1,
+            "payload": message,
+        }
+        for message in messages
+    ]
+
+
 def wiggle_messages(distance: int) -> list[dict]:
     return [
         {"type": "mouse_move", "dx": distance, "dy": 0},
@@ -41,6 +51,7 @@ def main() -> None:
     parser.add_argument("--distance", default=120, type=int, help="Wiggle distance in pixels.")
     parser.add_argument("--scroll", default=-20, type=int, help="Scroll amount for the scroll action.")
     parser.add_argument("--delay", default=0.15, type=float, help="Delay between messages.")
+    parser.add_argument("--envelope", action="store_true", help="Send protocol v1 payload envelopes.")
     args = parser.parse_args()
 
     url = f"ws://{args.host}:{args.port}/ws/input?token={args.token}"
@@ -53,6 +64,8 @@ def main() -> None:
         messages = click_messages("right")
     else:
         messages = scroll_messages(args.scroll)
+    if args.envelope:
+        messages = envelope_messages(messages)
 
     asyncio.run(send_messages(url, messages, args.delay))
     print(f"Sent {args.action} test input to {args.host}:{args.port}.")

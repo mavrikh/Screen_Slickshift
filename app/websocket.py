@@ -50,7 +50,7 @@ async def handle_touchpad_socket(
             elif event.type == "ping":
                 continue
             else:
-                logger.warning("Ignoring unknown WebSocket event: %s", message)
+                logger.warning("Ignoring unknown WebSocket event type: %s", event.raw_type)
     except WebSocketDisconnect as exc:
         logger.info("Touchpad WebSocket disconnected: %s", exc)
     except Exception as exc:

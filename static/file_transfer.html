@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Screen Slickshift File Transfers</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <main class="shell file-transfer-shell">
+      <header class="topbar">
+        <div>
+          <h1>File Transfers</h1>
+          <p id="fileTransferStatus">Disconnected</p>
+        </div>
+        <a class="button-link secondary" href="/">Main Controls</a>
+      </header>
+
+      <section class="auth-panel">
+        <label for="tokenInput">Pairing token</label>
+        <div class="auth-row">
+          <input id="tokenInput" type="password" autocomplete="off" placeholder="Enter token from server console" />
+          <button id="connectButton" type="button">Connect</button>
+        </div>
+      </section>
+
+      <section class="file-transfer-grid">
+        <div class="panel upload-panel">
+          <h2>Receive Files</h2>
+          <label for="receiveDirInput">Receive folder</label>
+          <div class="auth-row">
+            <input id="receiveDirInput" type="text" autocomplete="off" placeholder="Connect to load receive folder" />
+            <button id="saveReceiveDirButton" class="secondary" type="button">Save</button>
+          </div>
+          <div id="dropZone" class="drop-zone">
+            <input id="fileInput" type="file" />
+            <span>Drop file here or choose a file</span>
+          </div>
+          <div id="uploadLimitText" class="upload-meta">Upload limit loading...</div>
+          <div id="uploadStatus" class="upload-status" role="status">No transfer yet.</div>
+          <button id="uploadButton" type="button">Upload</button>
+        </div>
+
+        <div class="panel">
+          <div class="section-header">
+            <h2>Recent Transfers</h2>
+            <button id="clearTransfersButton" class="secondary compact-button" type="button">Clear</button>
+          </div>
+          <div id="transferList" class="transfer-list"></div>
+        </div>
+
+        <div class="panel">
+          <div class="section-header">
+            <h2>Trusted Recipients</h2>
+            <button id="refreshTargetsButton" class="secondary compact-button" type="button">Refresh</button>
+          </div>
+          <div id="targetList" class="state-list"></div>
+        </div>
+      </section>
+    </main>
+
+    <script src="/static/file_transfer.js"></script>
+  </body>
+</html>

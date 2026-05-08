@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Screen Slickshift Handoff</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <main class="shell handoff-shell">
+      <header class="topbar">
+        <div>
+          <h1>Handoff</h1>
+          <p id="handoffStatus">Simulation idle</p>
+        </div>
+        <div class="topbar-actions">
+          <a class="button-link secondary" href="/" rel="noopener">Main</a>
+          <button id="handoffStopButton" class="danger" type="button">Stop</button>
+        </div>
+      </header>
+
+      <section class="auth-panel" id="handoffAuthPanel">
+        <label for="handoffTokenInput">Pairing token</label>
+        <div class="auth-row">
+          <input id="handoffTokenInput" type="password" autocomplete="off" placeholder="Enter token from server console" />
+          <button id="handoffConnectButton" type="button">Connect</button>
+        </div>
+      </section>
+
+      <section class="handoff-grid">
+        <div class="panel handoff-layout-panel">
+          <div class="panel-header">
+            <h2>Layout</h2>
+            <div class="button-pair">
+              <button id="zoomOutButton" class="secondary compact-button" type="button">Zoom Out</button>
+              <button id="zoomInButton" class="secondary compact-button" type="button">Zoom In</button>
+              <button id="resetViewButton" class="secondary compact-button" type="button">Reset View</button>
+              <button id="freeformButton" class="secondary compact-button" type="button">Freeform Off</button>
+              <button id="resetLayoutButton" class="secondary compact-button" type="button">Reset</button>
+            </div>
+          </div>
+          <div id="layoutCanvas" class="layout-canvas" aria-label="Screen layout simulation">
+            <div id="layoutWorld" class="layout-world"></div>
+          </div>
+        </div>
+
+        <div class="panel handoff-control-panel">
+          <h2>State</h2>
+          <div class="state-list">
+            <div class="state-item">
+              <span>Selected Monitor</span>
+              <strong id="selectedScreenText">none</strong>
+            </div>
+            <div class="state-item">
+              <span>Mode</span>
+              <strong id="handoffModeText">idle</strong>
+            </div>
+            <div class="state-item">
+              <span>Target</span>
+              <strong id="handoffTargetText">none</strong>
+            </div>
+            <div class="state-item">
+              <span>Edge</span>
+              <strong id="handoffEdgeText">none</strong>
+            </div>
+          </div>
+
+          <label for="targetSelect">Target</label>
+          <select id="targetSelect"></select>
+
+          <label for="edgeSelect">Edge</label>
+          <select id="edgeSelect">
+            <option value="left">Left</option>
+            <option value="right">Right</option>
+            <option value="top">Top</option>
+            <option value="bottom">Bottom</option>
+          </select>
+
+          <div class="click-row">
+            <button id="armHandoffButton" type="button">Arm</button>
+            <button id="disarmHandoffButton" class="secondary" type="button">Disarm</button>
+          </div>
+          <div class="click-row">
+            <button id="addMachineButton" class="secondary" type="button">Add Machine</button>
+            <button id="addMonitorButton" class="secondary" type="button">Add Monitor</button>
+          </div>
+          <button id="toggleEdgeButton" class="secondary" type="button">Toggle Monitor Edges</button>
+          <div class="click-row">
+            <button id="simulateEdgeButton" class="secondary" type="button">Simulate Edge</button>
+            <button id="confirmHandoffButton" class="secondary" type="button">Confirm</button>
+          </div>
+
+          <div class="remote-control-block">
+            <h2>Remote Mouse</h2>
+            <label for="remoteHostInput">Host or IP</label>
+            <input id="remoteHostInput" type="text" autocomplete="off" placeholder="192.168.1.25" />
+
+            <label for="remotePortInput">Port</label>
+            <input id="remotePortInput" type="number" min="1" max="65535" value="8765" />
+
+            <label for="remoteTokenInput">Remote token</label>
+            <input id="remoteTokenInput" type="password" autocomplete="off" placeholder="Token shown on target machine" />
+
+            <div class="click-row">
+              <button id="remoteConnectButton" type="button">Connect Remote</button>
+              <button id="remoteDisconnectButton" class="secondary" type="button">Disconnect</button>
+            </div>
+            <div id="remoteMousePad" class="remote-mouse-pad" role="button" tabindex="0">
+              <span>Remote touchpad</span>
+            </div>
+            <div class="click-row">
+              <button id="remoteLeftClickButton" class="secondary" type="button">Left Click</button>
+              <button id="remoteRightClickButton" class="secondary" type="button">Right Click</button>
+            </div>
+          </div>
+
+          <div class="handoff-status-box" id="handoffNotice">Handoff is idle.</div>
+        </div>
+
+        <div class="panel handoff-routes-panel">
+          <div class="panel-header">
+            <h2>Routes</h2>
+            <button id="refreshRoutesButton" class="secondary compact-button" type="button">Preview</button>
+          </div>
+          <div id="routeList" class="state-list"></div>
+        </div>
+      </section>
+    </main>
+
+    <script src="/static/handoff.js"></script>
+  </body>
+</html>

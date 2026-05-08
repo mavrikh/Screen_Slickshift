@@ -27,19 +27,30 @@ Later options:
 
 ## Common Message Fields
 
-Every message should eventually include:
+The implemented WebSocket input parser currently supports protocol version 1.
+Flat v1 messages are still accepted:
 
 ```json
 {
   "version": 1,
-  "type": "message_type",
-  "device_id": "device-id",
-  "session_id": "session-id",
-  "time": 1760000000.0
+  "type": "message_type"
 }
 ```
 
-The current MVP can stay simpler until the first two-agent prototype exists.
+The parser also accepts the v1 payload envelope:
+
+```json
+{
+  "version": 1,
+  "payload": {
+    "type": "message_type"
+  }
+}
+```
+
+Unsupported protocol versions fail closed. Future native-agent messages may add
+fields such as `device_id`, `session_id`, and `time`, but those fields are not
+required by the current mouse-input subset.
 
 ## Current MVP Compatibility
 
@@ -68,14 +79,92 @@ the WebSocket URL:
 
 The backend still accepts the older query-token WebSocket form for compatibility
 for now, but new clients should avoid putting credentials in URLs.
+The experimental macOS receiver accepts the same first-message owner-token auth
+shape on `/ws/input`, while keeping its older query-token form for compatibility
+with simple test tools.
+It also accepts `session_auth` with a valid session id/token that has `mouse`
+permission. Session-authenticated receiver input rechecks `mouse` permission
+for each non-ping event and refreshes session activity only after accepted mouse
+input.
+For `/api/lockout`, the receiver accepts `X-Pairing-Token` and keeps the older
+query-token form for compatibility. New clients should prefer the header.
+The receiver also exposes non-secret macOS guidance at `GET /api/permissions`,
+including that Accessibility is required for mouse control and Screen Recording
+is not needed or implemented in the current prototype.
+Its status and index payloads include an `auth` self-description:
 
-Session-authenticated clients can authenticate the touchpad WebSocket with:
+```json
+{
+  "websocket": {
+    "preferred": "first-message",
+    "supported": ["first-message", "query-token"]
+  },
+  "http": {
+    "preferred": "x-pairing-token-header",
+    "supported": ["x-pairing-token-header", "query-token"]
+  },
+  "token_exposed": false
+}
+```
+
+Receivers expose the currently implemented protocol subset through their status
+responses. The main FastAPI server reports this at `GET /api/status`, and the
+experimental macOS receiver reports it at `GET /api/status`:
+
+```json
+{
+  "protocol": {
+    "version": 1,
+    "input_events": ["mouse_move", "mouse_button", "scroll", "ping"],
+    "legacy_aliases": ["move", "click"],
+    "envelope": "v1-payload",
+    "limits": {
+      "max_mouse_delta": 5000,
+      "max_scroll_amount": 1000
+    }
+  }
+}
+```
+
+The experimental macOS receiver also reports `input_allowed`, which is the
+inverse of `disabled`, on status, index, and lockout responses.
+
+It also reports a prototype `capabilities` object on status and index responses:
+
+```json
+{
+  "receive_input": true,
+  "mouse": true,
+  "keyboard": false,
+  "clipboard": false,
+  "file_transfer": false,
+  "screen_capture": false,
+  "requires_accessibility_permission": true,
+  "requires_screen_recording_permission": false
+}
+```
+
+This is receiver self-description only. It is not a trusted permission grant.
+
+Session-authenticated clients can authenticate the touchpad WebSocket with the
+same flat or v1 payload-envelope shape:
 
 ```json
 {
   "type": "session_auth",
   "session_id": "session-id",
   "session_token": "shown-once-session-token"
+}
+```
+
+```json
+{
+  "version": 1,
+  "payload": {
+    "type": "session_auth",
+    "session_id": "session-id",
+    "session_token": "shown-once-session-token"
+  }
 }
 ```
 
@@ -208,12 +297,13 @@ trusted-device permission set is:
   "keyboard": false,
   "clipboard_read": false,
   "clipboard_write": false,
-  "file_receive": false
+  "file_receive": false,
+  "macros": false
 }
 ```
 
-Session-authenticated input, clipboard, or file routes should verify both the
-temporary session credential and the specific permission required for the
+Session-authenticated input, clipboard, file, or macro routes should verify both
+the temporary session credential and the specific permission required for the
 requested action. Unknown permission names should fail closed.
 
 Changing trusted-device permissions or removing a trusted device should revoke
@@ -228,6 +318,26 @@ the receiver should invalidate active pairing codes and require the local user
 to generate a new code.
 
 ## Input Events
+
+Implemented over the WebSocket input path:
+
+- `mouse_move`
+- `mouse_button`
+- `scroll`
+- `ping`
+- Legacy aliases: `move`, `click`
+
+Draft-only in this document:
+
+- `key`
+- `text` over WebSocket
+- Clipboard messages over WebSocket
+
+Text, clipboard, file transfer, and macro actions currently use HTTP API routes
+rather than the WebSocket input protocol.
+
+The parser clamps per-message mouse movement to +/-5000 and scroll amounts to
++/-1000. Non-finite mouse deltas such as `NaN` or `Infinity` are treated as `0`.
 
 Relative mouse movement:
 
@@ -365,8 +475,30 @@ file=@local-file
 
 Session uploads require `file_receive`. Accepted uploads update
 `last_active_at` only after the file is saved. Upload filenames are sanitized,
-saved under `uploads/`, and limited to 50 MB by default. File contents should
-not be logged or auto-opened.
+saved under the receiver's configured receive folder, and limited to 50 MB by
+default. The current default receive folder is the user's Downloads folder. File
+contents should not be logged or auto-opened.
+
+## Macros
+
+The current HTTP session route for approved local macros is:
+
+```text
+POST /api/session/macro
+```
+
+```json
+{
+  "session_id": "session-id",
+  "session_token": "shown-once-session-token",
+  "id": "macro-id"
+}
+```
+
+Session macros require `macros`. Accepted macro actions update
+`last_active_at` only after the local allow-listed macro runs. Remote clients
+cannot provide arbitrary command strings; they can only request macro ids already
+defined on the receiver.
 
 ## Emergency Stop
 

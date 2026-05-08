@@ -138,8 +138,18 @@ and clipboard contents must not be logged; logs should only include metadata
 such as accepted action type, session id, and character counts.
 
 Session-authenticated uploads verify `file_receive`. Upload filenames are
-sanitized and saved only under `uploads/`. Uploads have a default 50 MB limit,
+sanitized and saved only under the receiver's configured receive folder. That
+folder defaults to the user's Downloads folder and can be changed only through
+the owner-token-protected settings route. Uploads have a default 50 MB limit,
 and rejected or oversized uploads should not leave partial files behind.
+
+Session-authenticated macros verify `macros`. Remote clients cannot provide
+arbitrary command strings; they can only request macro ids from the receiver's
+local allow-list.
+
+The current owner/admin pairing token is intentionally short for prototype
+testing. The final trust design should use a short human-entered pairing code
+only to establish hidden shared secrets and temporary session credentials.
 
 The browser UI sends the owner pairing token as the first WebSocket message
 rather than in the WebSocket URL. The backend still accepts the older query-token
@@ -227,6 +237,13 @@ Wayland intentionally restricts global input capture and injection.
 
 The project should not bypass platform security casually. Any Linux native agent should be researched carefully and should explain what permissions or system services it needs.
 
+Current Phase 8 decision is documented in `docs/LINUX_STEAMOS.md`:
+
+- Keep Steam Deck support browser-based for now.
+- Test XDG Desktop Portal RemoteDesktop first for future Linux receiver work.
+- Treat `uinput`/libevdev as an explicit advanced fallback, not the default.
+- Treat XTEST as X11-only compatibility mode.
+
 ## File Transfer
 
 File transfer should remain optional.
@@ -234,6 +251,8 @@ File transfer should remain optional.
 If enabled:
 
 - Save to a dedicated folder.
+- Default to Downloads for user visibility.
+- Allow the local owner to change the receive folder.
 - Sanitize filenames.
 - Avoid auto-opening files.
 - Require per-session `file_receive` permission for session-authenticated clients.

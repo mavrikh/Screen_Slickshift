@@ -8,9 +8,11 @@ Read these files in this order:
 
 1. `AGENTS.md`
 2. `docs/current_state.md`
-3. `docs/roadmap.md`
+3. `docs/ROADMAP.md`
 4. `docs/SECURITY.md`
 5. `docs/PROTOCOL.md`
+6. `docs/LINUX_STEAMOS.md`
+7. `docs/EDGE_HANDOFF.md`
 
 Then inspect the code rather than relying on chat history.
 
@@ -22,19 +24,28 @@ Current working shape:
 
 - FastAPI server in `app/`.
 - Browser UI in `static/`.
-- The current development target is mac-to-mac first.
-- Windows remains the most complete legacy browser-control target, but Windows verification is deferred until a Windows machine with Python is available.
+- The current development target is Mac-Windows remote mouse first, with both machines able to run the main app as a host/receiver.
+- Windows verification is now expected to happen on a Windows machine with Python available.
 - macOS can run backend tests and server startup from `.venv`.
 - Experimental macOS receiver exists in `agents/macos_receiver.py`.
+- macOS receiver event dispatch is covered by helper-level tests that avoid real OS input.
+- macOS receiver exposes `/api/permissions` with non-secret permission guidance: Accessibility required for mouse control, Screen Recording not implemented, and emergency stop paths.
+- macOS receiver `/ws/input` accepts owner-token auth, compatibility query-token auth, and `session_auth` with `mouse` permission.
 - Pairing/trusted-device/session code exists and is tested.
 - Browser UI now surfaces local device identity, trusted devices, active sessions, pairing-code generation, trust review, permission toggles, and session revocation.
 - Browser UI still uses the global pairing token as the local-owner/admin path.
 - Session-authenticated touchpad WebSocket input exists for guest/trusted clients and enforces `mouse` permission.
 - Session-authenticated text and clipboard routes exist and enforce `keyboard`, `clipboard_read`, and `clipboard_write`.
 - Session-authenticated upload exists and enforces `file_receive`.
+- Session-authenticated macro execution exists and enforces `macros`; macros are still local allow-list entries only.
 - Uploads have a default 50 MB size limit.
 - LLM integration added: Local LLM support via OpenAI-compatible API (LM Studio). Configurable endpoint, centralized in `app/llm.py`. API route `/api/generate-text` for text generation.
 - Browser WebSocket auth now sends the token as the first message instead of putting it in the URL. Project run helpers disable Uvicorn access logs.
+- Phase 8 Linux/SteamOS research is documented in `docs/LINUX_STEAMOS.md`; no native Linux agent exists yet.
+- Phase 9 edge-handoff planning is documented in `docs/EDGE_HANDOFF.md`; pure config/state and monitor layout geometry code exists in `app/handoff.py`, and `/handoff` provides a browser simulation page.
+- The first app-integrated remote mouse bridge exists in `app/handoff_remote.py` and `/api/handoff/remote/*`. It connects to another running Screen Slickshift receiver and sends only mouse/ping protocol events.
+- `/handoff` now has remote host/IP, port, token fields, and a manual remote touchpad. This is the current Mac-Windows test path.
+- No pointer-edge detector, automatic handoff loop, global capture code, packaging, TLS, or discovery exists yet.
 
 Do not assume native cross-platform agents, edge handoff, TLS, discovery, screen capture, or trusted-device UI exist yet.
 
@@ -68,6 +79,7 @@ Known local environment note from 2026-05-06:
 - Plain `python` is available after activating `.venv`.
 - `requirements.txt` includes macOS Python 3.9 `pyobjc` pins so `pyautogui` dependencies install without building an incompatible yanked version.
 - LM Studio running locally at http://localhost:1234/v1 with Qwen coding model.
+- The owner/admin token is intentionally 6 digits for current prototype testing. Final pairing should use the short code only to establish hidden shared secrets and temporary session credentials.
 
 ## Verification Commands
 
@@ -78,10 +90,24 @@ source .venv/bin/activate
 python -m pytest
 ```
 
-Expected as of 2026-05-06:
+Expected as of the remote mouse bridge:
 
 ```text
-109 passed, 2 warnings
+270 passed, 2 warnings
+```
+
+Focused remote handoff check:
+
+```bash
+source .venv/bin/activate
+python -m pytest tests/test_handoff_remote.py tests/test_api_pairing_status.py -q
+node --check static/handoff.js
+```
+
+Expected:
+
+```text
+92 passed, 2 warnings
 ```
 
 The two warnings are FastAPI `on_event` deprecation warnings. They are known and intentionally deferred.
@@ -92,6 +118,7 @@ Phase 1 status:
 - Windows verification deferred.
 - Phase 2 Security panel implementation is complete for the current browser UI.
 - Phase 3 session-scoped permissions enforcement is complete.
+- Phase 9 remote mouse bridge has started and needs physical Mac-Windows verification.
 
 For a syntax/import sanity check on macOS sandboxed environments:
 
@@ -116,16 +143,15 @@ Implemented and tested:
 
 Still not fully integrated:
 
-- Session-scoped authorization for macros.
-- UI display/preflight for the upload size limit.
+- Nearby trusted-device send/broadcast flow.
 - TLS/local certificates.
 - Removing old WebSocket query-token compatibility.
 
 Safest next security step:
 
-1. Keep the global pairing token as local-owner/admin access.
-2. Decide whether macros stay owner-token-only or require a new explicit permission.
-3. Decide whether the UI should show the upload limit before file selection.
+1. Keep the global pairing token as local-owner/admin access for the current prototype.
+2. Continue Phase 5 protocol tightening.
+3. Design the nearby trusted-device send/broadcast flow.
 4. Preserve local-owner token routes while session clients mature.
 
 ## Hard Rules For Any Assistant
@@ -155,4 +181,4 @@ Also update:
 - `README.md` for user-facing setup and feature status.
 - `AGENTS.md` for assistant/project constraints.
 - `docs/current_state.md` for implemented reality.
-- `docs/roadmap.md` for next work.
+- `docs/ROADMAP.md` for next work.

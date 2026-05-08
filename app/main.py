@@ -12,14 +12,18 @@ from pydantic import BaseModel
 
 from app import clipboard as clipboard_service
 from app.commands import public_macro_list, run_macro
-from app.config import LOG_DIR, STATIC_DIR, ensure_directories, get_or_create_pairing_token, settings
+from app.config import LOG_DIR, STATIC_DIR, ensure_directories, get_or_create_pairing_token, get_receive_dir, set_receive_dir, settings
 from app.device_identity import get_or_create_device_identity
 from app.files import save_upload
+from app.handoff import make_handoff_layout, make_layout_screen
+from app.handoff_remote import RemoteHandoffBridge, RemoteTarget
 from app.input_control import send_text_to_pc
 from app.llm import generate_text
 from app.pairing import PairingCodeBook, PairingSessionBook, TrustedDeviceStore
+from app.protocol import parse_message, protocol_capabilities
 from app.security import token_is_valid, verify_token, verify_websocket_token
 from app.state import lockout_state
+from app.transfer_history import TransferHistory
 from app.websocket import handle_touchpad_socket
 
 
@@ -77,6 +81,41 @@ class LLMRequest(BaseModel):
     max_tokens: int = 1000
 
 
+class ReceiveDirectoryRequest(BaseModel):
+    path: str
+
+
+class HandoffScreenRequest(BaseModel):
+    screen_id: str
+    device_id: str
+    name: str
+    rect: dict
+    primary: bool = False
+    edge_enabled: bool = True
+
+
+class HandoffLayoutPreviewRequest(BaseModel):
+    screens: list[HandoffScreenRequest]
+    snap_tolerance_px: int = 24
+    min_overlap_px: int = 80
+
+
+class RemoteHandoffStartRequest(BaseModel):
+    host: str
+    port: int = 8765
+    token: str
+    path: str = "/ws/touchpad"
+
+
+class RemoteHandoffEventRequest(BaseModel):
+    type: str
+    dx: float = 0
+    dy: float = 0
+    button: str = "left"
+    down: bool = True
+    amount: int = 0
+
+
 def configure_logging() -> None:
     ensure_directories()
     log_file = LOG_DIR / "server.log"
@@ -97,6 +136,8 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title=settings.app_name)
 pairing_code_book = PairingCodeBook()
 pairing_session_book = PairingSessionBook()
+transfer_history = TransferHistory()
+remote_handoff_bridge = RemoteHandoffBridge()
 
 # Safe default: the frontend is served by this same app, so no cross-origin browser
 # access is needed. If you later split the frontend onto another host, add only that
@@ -154,18 +195,162 @@ async def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
 
 
+@app.get("/file-transfer")
+async def file_transfer_page() -> FileResponse:
+    return FileResponse(STATIC_DIR / "file_transfer.html")
+
+
+@app.get("/handoff")
+async def handoff_page() -> FileResponse:
+    return FileResponse(STATIC_DIR / "handoff.html")
+
+
 @app.get("/api/status")
 async def status() -> dict:
     return {
         "app": settings.app_name,
         "disabled": lockout_state.is_disabled(),
         "auth": "token-required",
+        "max_upload_bytes": settings.max_upload_bytes,
+        "protocol": protocol_capabilities(),
     }
 
 
 @app.get("/api/auth/check", dependencies=[Depends(verify_token)])
 async def auth_check() -> dict:
     return {"ok": True}
+
+
+@app.get("/api/file-transfer/settings", dependencies=[Depends(verify_token)])
+async def file_transfer_settings() -> dict:
+    return {
+        "receive_dir": str(get_receive_dir()),
+        "max_upload_bytes": settings.max_upload_bytes,
+    }
+
+
+@app.patch("/api/file-transfer/settings", dependencies=[Depends(verify_token)])
+async def update_file_transfer_settings(payload: ReceiveDirectoryRequest) -> dict:
+    try:
+        receive_dir = set_receive_dir(payload.path)
+        logger.info("Updated receive folder.")
+        return {
+            "ok": True,
+            "receive_dir": str(receive_dir),
+            "max_upload_bytes": settings.max_upload_bytes,
+        }
+    except Exception as exc:
+        logger.exception("Failed to update receive folder.")
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/file-transfer/transfers", dependencies=[Depends(verify_token)])
+async def file_transfer_records() -> dict:
+    return {
+        "transfers": [
+            record.public_dict()
+            for record in transfer_history.list_records()
+        ],
+    }
+
+
+@app.get("/api/file-transfer/targets", dependencies=[Depends(verify_token)])
+async def file_transfer_targets() -> dict:
+    targets = []
+    for trusted_device in TrustedDeviceStore().list_devices():
+        target = trusted_device.public_dict()
+        file_receive = bool(trusted_device.permissions.get("file_receive"))
+        review_required = bool(trusted_device.review_required)
+        target["can_receive_files"] = file_receive and not review_required
+        if review_required:
+            target["receive_blocked_reason"] = "trust review required"
+        elif not file_receive:
+            target["receive_blocked_reason"] = "file receive disabled"
+        else:
+            target["receive_blocked_reason"] = ""
+        targets.append(target)
+    return {"targets": targets}
+
+
+@app.post("/api/handoff/layout/preview", dependencies=[Depends(verify_token)])
+async def handoff_layout_preview(payload: HandoffLayoutPreviewRequest) -> dict:
+    screens = []
+    for screen in payload.screens:
+        layout_screen = make_layout_screen(
+            screen_id=screen.screen_id,
+            device_id=screen.device_id,
+            name=screen.name,
+            rect=screen.rect,
+            primary=screen.primary,
+            edge_enabled=screen.edge_enabled,
+        )
+        if layout_screen is not None:
+            screens.append(layout_screen)
+
+    layout = make_handoff_layout(
+        screens,
+        snap_tolerance_px=payload.snap_tolerance_px,
+        min_overlap_px=payload.min_overlap_px,
+    )
+    return layout.public_dict()
+
+
+@app.get("/api/handoff/remote/status", dependencies=[Depends(verify_token)])
+async def handoff_remote_status() -> dict:
+    return remote_handoff_bridge.status()
+
+
+@app.post("/api/handoff/remote/start", dependencies=[Depends(verify_token)])
+async def handoff_remote_start(payload: RemoteHandoffStartRequest) -> dict:
+    try:
+        target = RemoteTarget.from_values(payload.host, payload.port, payload.path)
+        status = await remote_handoff_bridge.start(target, payload.token)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.warning("Remote handoff connection failed: %s", exc)
+        raise HTTPException(status_code=400, detail="Remote handoff connection failed.") from exc
+
+    if not status.reachable:
+        raise HTTPException(status_code=400, detail="Remote receiver is unreachable.")
+    if status.disabled:
+        raise HTTPException(status_code=409, detail="Remote receiver emergency stop is active.")
+    required_events = {"mouse_move", "mouse_button", "scroll", "ping"}
+    if status.input_events and not required_events.issubset(set(status.input_events)):
+        raise HTTPException(status_code=409, detail="Remote receiver does not advertise mouse control support.")
+
+    return {
+        "ok": True,
+        "connected": True,
+        "target": {"host": target.host, "port": target.port, "path": target.path},
+        "remote_status": status.public_dict(),
+    }
+
+
+@app.post("/api/handoff/remote/event", dependencies=[Depends(verify_token)])
+async def handoff_remote_event(payload: RemoteHandoffEventRequest) -> dict:
+    try:
+        return await remote_handoff_bridge.send_event(payload.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.warning("Remote handoff event failed: %s", exc)
+        raise HTTPException(status_code=400, detail="Remote handoff event failed.") from exc
+
+
+@app.post("/api/handoff/remote/stop", dependencies=[Depends(verify_token)])
+async def handoff_remote_stop() -> dict:
+    return await remote_handoff_bridge.stop()
+
+
+@app.delete("/api/file-transfer/transfers", dependencies=[Depends(verify_token)])
+async def clear_file_transfer_records() -> dict:
+    removed = len(transfer_history.list_records())
+    transfer_history.clear()
+    logger.info("Cleared recent file-transfer records (%s).", removed)
+    return {"ok": True, "removed": removed}
 
 
 @app.get("/api/device", dependencies=[Depends(verify_token)])
@@ -459,9 +644,15 @@ async def session_set_clipboard(session_id: str = Body(...), session_token: str 
 async def upload(file: UploadFile = File(...)) -> dict:
     try:
         result = await save_upload(file)
+        transfer_history.add_received(result, source="owner")
         logger.info("Saved upload %s (%s bytes).", result["filename"], result["bytes"])
         return {"ok": True, "file": result}
     except Exception as exc:
+        transfer_history.add_rejected(
+            filename=file.filename or "upload.bin",
+            source="owner",
+            detail=str(exc),
+        )
         logger.exception("Failed to save upload.")
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -480,9 +671,15 @@ async def session_upload(
     try:
         result = await save_upload(file)
         mark_session_active(session_id, session_token)
+        transfer_history.add_received(result, source="session")
         logger.info("Saved upload from session %s: %s (%s bytes).", session_id, result["filename"], result["bytes"])
         return {"ok": True, "file": result}
     except Exception as exc:
+        transfer_history.add_rejected(
+            filename=file.filename or "upload.bin",
+            source="session",
+            detail=str(exc),
+        )
         logger.exception("Failed to save upload from session.")
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -528,13 +725,18 @@ async def touchpad(websocket: WebSocket, token: Optional[str] = Query(default=No
         await websocket.close(code=1008, reason="Missing or invalid pairing token.")
         return
 
-    if message.get("type") != "auth" or not token_is_valid(message.get("token")):
-        if message.get("type") != "session_auth":
+    auth_message = parse_message(message)
+    if not auth_message.supported_version:
+        await websocket.close(code=1008, reason="Unsupported protocol version.")
+        return
+
+    if auth_message.type != "auth" or not token_is_valid(auth_message.payload.get("token")):
+        if auth_message.type != "session_auth":
             await websocket.close(code=1008, reason="Missing or invalid pairing token.")
             return
 
-        session_id = message.get("session_id")
-        session_token = message.get("session_token")
+        session_id = auth_message.payload.get("session_id")
+        session_token = auth_message.payload.get("session_token")
         if not isinstance(session_id, str) or not isinstance(session_token, str):
             await websocket.close(code=1008, reason="Missing or invalid session credentials.")
             return

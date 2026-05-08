@@ -13,7 +13,11 @@
           <h1>Screen Slickshift</h1>
           <p id="connectionStatus">Disconnected</p>
         </div>
-        <button id="lockoutButton" class="danger" type="button">Emergency Stop</button>
+        <div class="topbar-actions">
+          <a class="button-link secondary" href="/handoff" target="_blank" rel="noopener">Handoff</a>
+          <a class="button-link secondary" href="/file-transfer" target="_blank" rel="noopener">File Transfers</a>
+          <button id="lockoutButton" class="danger" type="button">Emergency Stop</button>
+        </div>
       </header>
 
       <section class="auth-panel" id="authPanel">
@@ -67,11 +71,25 @@
 
         <div class="panel upload-panel">
           <h2>File Drop</h2>
+          <label for="receiveDirInput">Receive folder</label>
+          <div class="auth-row">
+            <input id="receiveDirInput" type="text" autocomplete="off" placeholder="Connect to load receive folder" />
+            <button id="saveReceiveDirButton" class="secondary" type="button">Save</button>
+          </div>
           <div id="dropZone" class="drop-zone">
             <input id="fileInput" type="file" />
             <span>Drop file here or choose a file</span>
           </div>
+          <div id="uploadLimitText" class="upload-meta">Upload limit loading...</div>
+          <div id="uploadStatus" class="upload-status" role="status">No transfer yet.</div>
           <button id="uploadButton" type="button">Upload</button>
+          <div class="transfer-history">
+            <div class="section-header">
+              <h3>Recent Transfers</h3>
+              <button id="clearTransfersButton" class="secondary compact-button" type="button">Clear</button>
+            </div>
+            <div id="transferList" class="transfer-list"></div>
+          </div>
         </div>
 
         <div class="panel security-panel">

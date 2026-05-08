@@ -35,10 +35,10 @@ Screen Slickshift is a local-only LAN input sharing project. The current working
 - `app/device_identity.py`: Local random device identity storage.
 - `app/state.py`: In-memory emergency lockout state.
 - `static/`: Browser UI assets.
-- `agents/`: Experimental macOS receiver and sender test tool.
+- `agents/`: Experimental macOS receiver, sender test tool, and manual sender prototype.
 - `tests/`: Backend tests.
 - `docs/current_state.md`: Current repository snapshot.
-- `docs/roadmap.md`: Grounded roadmap.
+- `docs/ROADMAP.md`: Grounded roadmap.
 - `docs/HANDOFF.md`: Short continuity notes for switching between Codex, local LLMs, or terminal workflows.
 
 ## Current Working Features
@@ -49,10 +49,10 @@ Screen Slickshift is a local-only LAN input sharing project. The current working
 - Text sending.
 - Clipboard get/set.
 - Approved local macros.
-- File upload to `uploads/` with a default 50 MB limit.
+- File upload to a configurable receive folder, defaulting to Downloads, with a default 50 MB limit.
 - Emergency lockout for active control actions.
 - Backend pairing/trusted-device/session APIs and tests.
-- Experimental macOS receiver and sender test scripts.
+- Experimental macOS receiver, sender test script, and manual sender prototype.
 - Cross-platform `run.py` server runner for prepared Python environments.
 
 ## Important Current Limits
@@ -61,14 +61,15 @@ Screen Slickshift is a local-only LAN input sharing project. The current working
 - Pairing/session APIs exist, but they are not the primary authorization path for the browser UI.
 - The macOS receiver is experimental and manual.
 - Desktop input and clipboard behavior depends on OS support and permissions.
-- There is no native Windows sender, native Linux/SteamOS agent, edge handoff, keyboard event capture, TLS, discovery, packaging, or screen capture.
-- Session-authenticated upload now requires `file_receive`; macros remain owner-token-only.
+- There is no native Windows sender, native Linux/SteamOS agent, edge handoff, keyboard event capture, TLS, discovery, packaging, or screen capture. The manual sender is a portable CLI prototype, not global input capture.
+- Session-authenticated upload requires `file_receive`; session-authenticated macros require `macros` and still run only local allow-listed command arrays.
+- The owner pairing token is currently short for prototype testing. Do not treat that as final security; final trust should use hidden shared secrets created during pairing.
 
 ## Documentation To Keep Current
 
 - `README.md`
 - `docs/current_state.md`
-- `docs/roadmap.md`
+- `docs/ROADMAP.md`
 - `docs/HANDOFF.md`
 - `docs/PROTOCOL.md`
 - `docs/SECURITY.md`

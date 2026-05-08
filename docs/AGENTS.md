@@ -46,6 +46,28 @@ It can:
 
 It is not a global input capture tool. That is deliberate. We want to prove receiver behavior before adding global hooks.
 
+### `manual_sender.py`
+
+Starts an interactive manual sender prototype.
+
+It prints an internal-testing notice when it starts. Treat it as a development
+tool, not product UX.
+
+It can:
+
+- Select one receiver by host, port, and token.
+- Require explicit `start` before input commands are sent.
+- Stop sending with `stop`, `pause`, or `panic`.
+- Send relative mouse movement, clicks, scroll, waits, ping, and in-app command help.
+- Send flat protocol messages by default or v1 payload envelopes with `--envelope`.
+- Check the receiver's `/api/status` endpoint before opening the WebSocket.
+- Refuse to connect when receiver status reports emergency-disabled unless `--allow-disabled-receiver` is used.
+- Refuse to connect when advertised receiver protocol events are missing required mouse/ping events.
+- Run repeated non-interactive test commands with `--command`.
+- Run quick smoke tests with `--preset wiggle`, `click`, `right-click`, `middle-click`, or `scroll`.
+
+It is not a native Windows sender yet and does not capture local keyboard or mouse events.
+
 ## macOS Permissions
 
 macOS may require Accessibility permission before `pyautogui` can control the mouse.
@@ -59,6 +81,8 @@ System Settings -> Privacy & Security -> Accessibility
 ```
 
 Screen Recording should not be needed. Do not grant Screen Recording for this prototype.
+The receiver startup banner should keep saying that Accessibility may be required
+and Screen Recording is not needed.
 
 ## Safe Test Flow
 
@@ -73,6 +97,8 @@ python -m agents.macos_receiver --host 0.0.0.0 --port 8770
 ```
 
 The receiver prints a pairing token.
+The receiver supports both the older query-token WebSocket test path and the
+newer first-message token auth path used by `manual_sender.py`.
 
 On the sender machine:
 
@@ -88,6 +114,40 @@ Other test actions:
 python -m agents.send_test_input --host MAC_IP --token TOKEN --action click
 python -m agents.send_test_input --host MAC_IP --token TOKEN --action right-click
 python -m agents.send_test_input --host MAC_IP --token TOKEN --action scroll --scroll -40
+```
+
+Manual sender:
+
+```powershell
+python -m agents.manual_sender --host MAC_IP --port 8770 --token TOKEN
+```
+
+Manual sender against the main app server:
+
+```powershell
+python -m agents.manual_sender --host SERVER_IP --port 8765 --token TOKEN --path /ws/touchpad --auth-mode first-message
+```
+
+Use `--skip-status-check` only for a receiver that does not expose `/api/status`. Use `--allow-disabled-receiver` only for diagnostics.
+
+The experimental macOS receiver exposes non-secret permission guidance at:
+
+```powershell
+curl http://MAC_IP:8770/api/permissions
+```
+
+Scripted manual sender:
+
+```powershell
+python -m agents.manual_sender --host MAC_IP --port 8770 --token TOKEN --command start --command "move 40 0" --command "click left" --command stop
+```
+
+Add `--command-delay SECONDS` to pause after each scripted command.
+
+Preset manual sender:
+
+```powershell
+python -m agents.manual_sender --host MAC_IP --port 8770 --token TOKEN --preset wiggle
 ```
 
 ## Finding The Mac IP

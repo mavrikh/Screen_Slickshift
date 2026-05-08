@@ -37,6 +37,12 @@ body {
   margin-bottom: 16px;
 }
 
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 h1,
 h2,
 p {
@@ -100,9 +106,44 @@ label {
   grid-row: span 2;
 }
 
+.file-transfer-shell {
+  width: min(900px, 100%);
+}
+
+.file-transfer-grid {
+  display: grid;
+  gap: 16px;
+}
+
+.handoff-shell {
+  width: min(1220px, 100%);
+}
+
+.handoff-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(280px, 0.8fr);
+  gap: 16px;
+}
+
+.handoff-layout-panel {
+  min-width: 0;
+}
+
+.handoff-control-panel {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+}
+
+.handoff-routes-panel {
+  grid-column: 1 / -1;
+}
+
 input,
 textarea,
-button {
+select,
+button,
+.button-link {
   width: 100%;
   border-radius: 8px;
   border: 1px solid var(--border);
@@ -110,7 +151,8 @@ button {
 }
 
 input,
-textarea {
+textarea,
+select {
   background: #0e1115;
   color: var(--text);
   padding: 12px;
@@ -120,7 +162,11 @@ textarea {
   resize: vertical;
 }
 
-button {
+button,
+.button-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   min-height: 44px;
   padding: 10px 14px;
   background: var(--accent);
@@ -128,13 +174,16 @@ button {
   border-color: transparent;
   font-weight: 700;
   cursor: pointer;
+  text-decoration: none;
 }
 
-button:hover {
+button:hover,
+.button-link:hover {
   background: var(--accent-strong);
 }
 
-button.secondary {
+button.secondary,
+.button-link.secondary {
   background: var(--panel-strong);
   color: var(--text);
   border-color: var(--border);
@@ -151,6 +200,10 @@ button.compact-button {
   min-height: 34px;
   padding: 7px 10px;
   font-size: 0.86rem;
+}
+
+.button-link.secondary {
+  width: auto;
 }
 
 button.text-danger {
@@ -181,6 +234,124 @@ button.text-danger:hover {
 .touchpad.locked {
   border-color: var(--accent);
   color: var(--text);
+}
+
+.layout-canvas {
+  position: relative;
+  height: min(58vh, 560px);
+  min-height: 360px;
+  overflow: hidden;
+  border: 2px solid var(--border);
+  border-radius: 8px;
+  background:
+    linear-gradient(#182029 1px, transparent 1px),
+    linear-gradient(90deg, #182029 1px, transparent 1px),
+    #0b0d10;
+  background-size: 24px 24px;
+  touch-action: none;
+  cursor: grab;
+}
+
+.layout-canvas:active {
+  cursor: grabbing;
+}
+
+.layout-world {
+  position: absolute;
+  inset: 0;
+  width: 2400px;
+  height: 1600px;
+  transform-origin: 0 0;
+}
+
+.layout-screen {
+  position: absolute;
+  display: grid;
+  place-items: center;
+  gap: 6px;
+  min-height: 80px;
+  padding: 10px;
+  border: 2px solid #64748b;
+  border-radius: 8px;
+  background: #17202a;
+  color: var(--text);
+  cursor: grab;
+  user-select: none;
+  transform-origin: 0 0;
+}
+
+.layout-screen:active {
+  cursor: grabbing;
+}
+
+.layout-screen.local {
+  border-color: #22c55e;
+}
+
+.layout-screen.target {
+  border-color: #38bdf8;
+}
+
+.layout-screen[data-selected="true"] {
+  box-shadow: 0 0 0 3px rgba(244, 247, 251, 0.3);
+}
+
+.layout-screen[data-edge-enabled="false"] {
+  border-style: dashed;
+  opacity: 0.58;
+}
+
+.layout-screen span,
+.layout-screen small {
+  pointer-events: none;
+}
+
+.layout-screen small {
+  color: var(--muted);
+}
+
+.handoff-status-box {
+  min-height: 44px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #0e1115;
+  color: var(--muted);
+}
+
+.remote-control-block {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.remote-control-block h2 {
+  margin: 0;
+}
+
+.remote-mouse-pad {
+  min-height: 132px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #111820;
+  color: var(--muted);
+  cursor: crosshair;
+  user-select: none;
+  touch-action: none;
+}
+
+.remote-mouse-pad[data-active="true"] {
+  border-color: #38bdf8;
+  color: var(--text);
+}
+
+.route-item {
+  grid-template-columns: 1fr auto;
+  align-items: center;
 }
 
 .slider-row {
@@ -223,6 +394,59 @@ button.text-danger:hover {
 .drop-zone.drag-over {
   border-color: var(--accent);
   color: var(--text);
+}
+
+.upload-meta {
+  min-height: 22px;
+  margin: -4px 0 10px;
+  color: var(--muted);
+  font-size: 0.88rem;
+  overflow-wrap: anywhere;
+}
+
+.upload-meta.warning {
+  color: #fecaca;
+}
+
+.upload-status {
+  min-height: 36px;
+  margin-bottom: 10px;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #0e1115;
+  color: var(--muted);
+  font-size: 0.9rem;
+  overflow-wrap: anywhere;
+}
+
+.upload-status.success {
+  border-color: #166534;
+  color: #bbf7d0;
+}
+
+.upload-status.error {
+  border-color: #7f1d1d;
+  color: #fecaca;
+}
+
+.transfer-history {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.transfer-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.transfer-item {
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #0e1115;
 }
 
 .security-panel {
@@ -370,6 +594,7 @@ button.text-danger:hover {
 
   .topbar,
   .grid,
+  .handoff-grid,
   .auth-row,
   .click-row,
   .section-header,

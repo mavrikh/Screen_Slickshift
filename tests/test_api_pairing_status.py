@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import io
 from pathlib import Path
 import time
@@ -12,6 +14,7 @@ from app import files as files_module
 from app.main import app
 from app import main
 from app import websocket as websocket_module
+from app.handoff_remote import RemoteStatus
 from app.pairing import PairingCodeBook, PairingSessionBook, TrustedDeviceStore
 
 
@@ -21,6 +24,281 @@ def test_device_endpoint_requires_token(tmp_path, monkeypatch) -> None:
     response = TestClient(app).get("/api/device")
 
     assert response.status_code == 401
+
+
+def test_status_endpoint_reports_upload_limit(tmp_path, monkeypatch) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+
+    response = TestClient(app).get("/api/status")
+
+    assert response.status_code == 200
+    assert response.json()["max_upload_bytes"] == config.settings.max_upload_bytes
+
+
+def test_status_endpoint_reports_protocol_capabilities(tmp_path, monkeypatch) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+
+    response = TestClient(app).get("/api/status")
+
+    assert response.status_code == 200
+    protocol = response.json()["protocol"]
+    assert protocol["version"] == 1
+    assert protocol["input_events"] == ["mouse_move", "mouse_button", "scroll", "ping"]
+    assert protocol["legacy_aliases"] == ["move", "click"]
+    assert protocol["envelope"] == "v1-payload"
+    assert protocol["limits"] == {
+        "max_mouse_delta": 5000,
+        "max_scroll_amount": 1000,
+    }
+
+
+def test_file_transfer_page_serves_static_window(tmp_path, monkeypatch) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+
+    response = TestClient(app).get("/file-transfer")
+
+    assert response.status_code == 200
+    assert "File Transfers" in response.text
+
+
+def test_file_transfer_settings_requires_token(tmp_path, monkeypatch) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+
+    response = TestClient(app).get("/api/file-transfer/settings")
+
+    assert response.status_code == 401
+
+
+def test_file_transfer_settings_returns_default_receive_dir(tmp_path, monkeypatch) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+    token = config.get_or_create_pairing_token()
+
+    response = TestClient(app).get(
+        "/api/file-transfer/settings",
+        headers={"X-Pairing-Token": token},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["receive_dir"] == str(config.default_receive_dir())
+    assert response.json()["max_upload_bytes"] == config.settings.max_upload_bytes
+
+
+def test_update_file_transfer_settings_sets_receive_dir(tmp_path, monkeypatch) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+    token = config.get_or_create_pairing_token()
+    receive_dir = tmp_path / "Received Files"
+
+    response = TestClient(app).patch(
+        "/api/file-transfer/settings",
+        headers={"X-Pairing-Token": token},
+        json={"path": str(receive_dir)},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["receive_dir"] == str(receive_dir)
+    assert receive_dir.is_dir()
+    assert config.get_receive_dir() == receive_dir
+
+
+def test_update_file_transfer_settings_rejects_relative_dir(tmp_path, monkeypatch) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+    token = config.get_or_create_pairing_token()
+
+    response = TestClient(app).patch(
+        "/api/file-transfer/settings",
+        headers={"X-Pairing-Token": token},
+        json={"path": "relative-folder"},
+    )
+
+    assert response.status_code == 400
+
+
+def test_file_transfer_records_requires_token(tmp_path, monkeypatch) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+
+    response = TestClient(app).get("/api/file-transfer/transfers")
+
+    assert response.status_code == 401
+
+
+def test_file_transfer_records_lists_received_uploads(tmp_path, monkeypatch) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+    token = config.get_or_create_pairing_token()
+
+    async def fake_save_upload(file):
+        return {
+            "filename": file.filename,
+            "bytes": 5,
+            "path": str(tmp_path / "received" / file.filename),
+        }
+
+    monkeypatch.setattr(main, "save_upload", fake_save_upload)
+
+    upload_response = TestClient(app).post(
+        "/api/upload",
+        headers={"X-Pairing-Token": token},
+        files={"file": ("note.txt", b"hello", "text/plain")},
+    )
+    records_response = TestClient(app).get(
+        "/api/file-transfer/transfers",
+        headers={"X-Pairing-Token": token},
+    )
+
+    assert upload_response.status_code == 200
+    assert records_response.status_code == 200
+    records = records_response.json()["transfers"]
+    assert len(records) == 1
+    assert records[0]["filename"] == "note.txt"
+    assert records[0]["bytes"] == 5
+    assert records[0]["source"] == "owner"
+    assert records[0]["status"] == "received"
+    assert records[0]["detail"] == ""
+    assert records[0]["path"].endswith("note.txt")
+    assert records[0]["created_at"] > 0
+
+
+def test_file_transfer_records_lists_rejected_uploads(tmp_path, monkeypatch) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+    token = config.get_or_create_pairing_token()
+
+    async def fake_save_upload(file):
+        raise RuntimeError("too large")
+
+    monkeypatch.setattr(main, "save_upload", fake_save_upload)
+
+    upload_response = TestClient(app).post(
+        "/api/upload",
+        headers={"X-Pairing-Token": token},
+        files={"file": ("huge.txt", b"hello", "text/plain")},
+    )
+    records_response = TestClient(app).get(
+        "/api/file-transfer/transfers",
+        headers={"X-Pairing-Token": token},
+    )
+
+    assert upload_response.status_code == 400
+    records = records_response.json()["transfers"]
+    assert len(records) == 1
+    assert records[0]["filename"] == "huge.txt"
+    assert records[0]["bytes"] == 0
+    assert records[0]["source"] == "owner"
+    assert records[0]["status"] == "rejected"
+    assert records[0]["detail"] == "too large"
+    assert records[0]["path"] == ""
+
+
+def test_clear_file_transfer_records_requires_token(tmp_path, monkeypatch) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+    main.transfer_history.add_received(
+        {"filename": "note.txt", "bytes": 5, "path": str(tmp_path / "note.txt")},
+        source="owner",
+    )
+
+    response = TestClient(app).delete("/api/file-transfer/transfers")
+
+    assert response.status_code == 401
+    assert len(main.transfer_history.list_records()) == 1
+
+
+def test_clear_file_transfer_records_removes_records(tmp_path, monkeypatch) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+    token = config.get_or_create_pairing_token()
+    main.transfer_history.add_received(
+        {"filename": "note.txt", "bytes": 5, "path": str(tmp_path / "note.txt")},
+        source="owner",
+    )
+
+    response = TestClient(app).delete(
+        "/api/file-transfer/transfers",
+        headers={"X-Pairing-Token": token},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "removed": 1}
+    assert main.transfer_history.list_records() == []
+
+
+def test_file_transfer_targets_requires_token(tmp_path, monkeypatch) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+
+    response = TestClient(app).get("/api/file-transfer/targets")
+
+    assert response.status_code == 401
+
+
+def test_file_transfer_targets_list_trusted_devices(tmp_path, monkeypatch) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+    token = config.get_or_create_pairing_token()
+    TrustedDeviceStore().trust_device(
+        "macbook-1",
+        "MacBook",
+        {"file_receive": True},
+    )
+    TrustedDeviceStore().trust_device("mini-1", "Mac Mini")
+
+    response = TestClient(app).get(
+        "/api/file-transfer/targets",
+        headers={"X-Pairing-Token": token},
+    )
+
+    assert response.status_code == 200
+    targets = response.json()["targets"]
+    targets_by_id = {target["device_id"]: target for target in targets}
+    assert set(targets_by_id) == {"macbook-1", "mini-1"}
+    assert targets_by_id["macbook-1"]["permissions"]["file_receive"] is True
+    assert targets_by_id["macbook-1"]["can_receive_files"] is True
+    assert targets_by_id["macbook-1"]["receive_blocked_reason"] == ""
+    assert targets_by_id["mini-1"]["permissions"]["file_receive"] is False
+    assert targets_by_id["mini-1"]["can_receive_files"] is False
+    assert targets_by_id["mini-1"]["receive_blocked_reason"] == "file receive disabled"
+    assert "secret_hash" not in targets_by_id["macbook-1"]
+
+
+def test_file_transfer_targets_reflect_permission_updates(tmp_path, monkeypatch) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+    token = config.get_or_create_pairing_token()
+    TrustedDeviceStore().trust_device("mini-1", "Mac Mini")
+
+    update_response = TestClient(app).patch(
+        "/api/trusted-devices/mini-1/permissions",
+        headers={"X-Pairing-Token": token},
+        json={"permissions": {"file_receive": True}},
+    )
+    targets_response = TestClient(app).get(
+        "/api/file-transfer/targets",
+        headers={"X-Pairing-Token": token},
+    )
+
+    assert update_response.status_code == 200
+    targets_by_id = {
+        target["device_id"]: target
+        for target in targets_response.json()["targets"]
+    }
+    assert targets_by_id["mini-1"]["permissions"]["file_receive"] is True
+    assert targets_by_id["mini-1"]["can_receive_files"] is True
+
+
+def test_file_transfer_targets_mark_review_required_as_not_ready(tmp_path, monkeypatch) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+    token = config.get_or_create_pairing_token()
+    TrustedDeviceStore().trust_device(
+        "macbook-1",
+        "MacBook",
+        {"file_receive": True},
+    )
+    TrustedDeviceStore().mark_review_required({"macbook-1"})
+
+    response = TestClient(app).get(
+        "/api/file-transfer/targets",
+        headers={"X-Pairing-Token": token},
+    )
+
+    assert response.status_code == 200
+    target = response.json()["targets"][0]
+    assert target["permissions"]["file_receive"] is True
+    assert target["review_required"] is True
+    assert target["can_receive_files"] is False
+    assert target["receive_blocked_reason"] == "trust review required"
 
 
 def test_device_endpoint_returns_local_identity(tmp_path, monkeypatch) -> None:
@@ -87,6 +365,62 @@ def test_touchpad_websocket_accepts_session_auth_with_mouse_permission(
     assert moves == [(4, -2)]
     assert updated_session is not None
     assert updated_session.last_active_at > original_last_active_at
+
+
+def test_touchpad_websocket_accepts_v1_session_auth_envelope(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+    moves = []
+    monkeypatch.setattr(websocket_module, "move_mouse", lambda dx, dy: moves.append((dx, dy)))
+    grant = main.pairing_session_book.create_session(
+        "macbook-1",
+        guest=False,
+        permissions={"mouse": True},
+    )
+
+    with TestClient(app).websocket_connect("/ws/touchpad") as websocket:
+        websocket.send_json(
+            {
+                "version": 1,
+                "payload": {
+                    "type": "session_auth",
+                    "session_id": grant.session.session_id,
+                    "session_token": grant.session_token,
+                },
+            }
+        )
+        websocket.send_json(
+            {
+                "version": 1,
+                "payload": {
+                    "type": "mouse_move",
+                    "dx": 4,
+                    "dy": -2,
+                },
+            }
+        )
+
+    assert moves == [(4, -2)]
+
+
+def test_touchpad_websocket_rejects_unsupported_auth_version(tmp_path, monkeypatch) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+
+    with TestClient(app).websocket_connect("/ws/touchpad") as websocket:
+        websocket.send_json(
+            {
+                "version": 2,
+                "payload": {
+                    "type": "session_auth",
+                    "session_id": "missing",
+                    "session_token": "wrong",
+                },
+            }
+        )
+        with pytest.raises(WebSocketDisconnect):
+            websocket.receive_json()
 
 
 def test_touchpad_websocket_rejects_session_without_mouse_permission(
@@ -1042,19 +1376,283 @@ def test_session_upload_rejects_missing_file_receive_permission(tmp_path, monkey
     assert saved_files == []
 
 
+def test_session_macro_requires_macros_permission(tmp_path, monkeypatch) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+    ran_macros = []
+    monkeypatch.setattr(main, "run_macro", lambda macro_id: ran_macros.append(macro_id) or {"id": macro_id})
+    grant = main.pairing_session_book.create_session(
+        "macbook-1",
+        guest=False,
+        permissions={"macros": True},
+    )
+    original_last_active_at = grant.session.last_active_at
+    time.sleep(0.001)
+
+    response = TestClient(app).post(
+        "/api/session/macro",
+        json={
+            "session_id": grant.session.session_id,
+            "session_token": grant.session_token,
+            "id": "open_notepad",
+        },
+    )
+
+    updated_session = main.pairing_session_book.verify_session(
+        grant.session.session_id,
+        grant.session_token,
+    )
+    assert response.status_code == 200
+    assert ran_macros == ["open_notepad"]
+    assert updated_session is not None
+    assert updated_session.last_active_at > original_last_active_at
+
+
+def test_session_macro_rejects_missing_macros_permission(tmp_path, monkeypatch) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+    ran_macros = []
+    monkeypatch.setattr(main, "run_macro", lambda macro_id: ran_macros.append(macro_id) or {"id": macro_id})
+    grant = main.pairing_session_book.create_session("macbook-1", guest=False)
+
+    response = TestClient(app).post(
+        "/api/session/macro",
+        json={
+            "session_id": grant.session.session_id,
+            "session_token": grant.session_token,
+            "id": "open_notepad",
+        },
+    )
+
+    assert response.status_code == 403
+    assert ran_macros == []
+
+
 @pytest.mark.anyio
 async def test_save_upload_enforces_size_limit_and_removes_partial_file(tmp_path, monkeypatch) -> None:
-    original_upload_dir = files_module.settings.upload_dir
-    object.__setattr__(files_module.settings, "upload_dir", tmp_path)
-    try:
-        upload = UploadFile(file=io.BytesIO(b"abcdef"), filename="too-large.txt")
+    _use_temp_config(tmp_path, monkeypatch)
+    main.lockout_state.set_disabled(False)
+    config.set_receive_dir(str(tmp_path / "received"))
+    upload = UploadFile(file=io.BytesIO(b"abcdef"), filename="too-large.txt")
 
-        with pytest.raises(RuntimeError):
-            await files_module.save_upload(upload, max_bytes=3)
+    with pytest.raises(RuntimeError):
+        await files_module.save_upload(upload, max_bytes=3)
 
-        assert list(tmp_path.iterdir()) == []
-    finally:
-        object.__setattr__(files_module.settings, "upload_dir", original_upload_dir)
+    assert list((tmp_path / "received").iterdir()) == []
+
+
+@pytest.mark.anyio
+async def test_save_upload_uses_configured_receive_dir(tmp_path, monkeypatch) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+    main.lockout_state.set_disabled(False)
+    receive_dir = config.set_receive_dir(str(tmp_path / "received"))
+    upload = UploadFile(file=io.BytesIO(b"hello"), filename="../note.txt")
+
+    result = await files_module.save_upload(upload)
+
+    assert result["filename"] == "note.txt"
+    assert Path(result["path"]).parent == receive_dir
+    assert (receive_dir / "note.txt").read_bytes() == b"hello"
+
+
+def test_handoff_layout_preview_requires_token(tmp_path, monkeypatch) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+
+    response = TestClient(app).post(
+        "/api/handoff/layout/preview",
+        json={"screens": []},
+    )
+
+    assert response.status_code == 401
+
+
+def test_handoff_page_is_served(tmp_path, monkeypatch) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+
+    response = TestClient(app).get("/handoff")
+
+    assert response.status_code == 200
+    assert "Screen Slickshift Handoff" in response.text
+
+
+def test_handoff_layout_preview_returns_derived_routes(tmp_path, monkeypatch) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+    token = config.get_or_create_pairing_token()
+
+    response = TestClient(app).post(
+        "/api/handoff/layout/preview",
+        headers={"X-Pairing-Token": token},
+        json={
+            "screens": [
+                {
+                    "screen_id": "local-main",
+                    "device_id": "local",
+                    "name": "This Mac",
+                    "rect": {"x": 0, "y": 0, "width": 1920, "height": 1080},
+                    "primary": True,
+                },
+                {
+                    "screen_id": "target-main",
+                    "device_id": "target",
+                    "name": "Target Mac",
+                    "rect": {"x": 1920, "y": 100, "width": 1440, "height": 900},
+                    "primary": True,
+                },
+            ],
+            "snap_tolerance_px": 24,
+            "min_overlap_px": 80,
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["screens"][0]["screen_id"] == "local-main"
+    assert data["routes"][0] == {
+        "from_screen_id": "local-main",
+        "to_screen_id": "target-main",
+        "from_device_id": "local",
+        "to_device_id": "target",
+        "exit_edge": "right",
+        "enter_edge": "left",
+        "overlap_px": 900,
+    }
+
+
+def test_handoff_layout_preview_honors_edge_disabled_monitor(tmp_path, monkeypatch) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+    token = config.get_or_create_pairing_token()
+
+    response = TestClient(app).post(
+        "/api/handoff/layout/preview",
+        headers={"X-Pairing-Token": token},
+        json={
+            "screens": [
+                {
+                    "screen_id": "local-main",
+                    "device_id": "local",
+                    "name": "This Mac",
+                    "rect": {"x": 0, "y": 0, "width": 1920, "height": 1080},
+                    "edge_enabled": True,
+                },
+                {
+                    "screen_id": "target-main",
+                    "device_id": "target",
+                    "name": "Target Mac",
+                    "rect": {"x": 1920, "y": 100, "width": 1440, "height": 900},
+                    "edge_enabled": False,
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["screens"][1]["edge_enabled"] is False
+    assert response.json()["routes"] == []
+
+
+def test_handoff_remote_status_requires_token(tmp_path, monkeypatch) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+
+    response = TestClient(app).get("/api/handoff/remote/status")
+
+    assert response.status_code == 401
+
+
+def test_handoff_remote_start_connects_bridge(tmp_path, monkeypatch) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+    token = config.get_or_create_pairing_token()
+    bridge = FakeRemoteBridge()
+    monkeypatch.setattr(main, "remote_handoff_bridge", bridge)
+
+    response = TestClient(app).post(
+        "/api/handoff/remote/start",
+        headers={"X-Pairing-Token": token},
+        json={"host": "192.168.1.25", "port": 8765, "token": "remote-token"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["connected"] is True
+    assert bridge.started == {
+        "host": "192.168.1.25",
+        "port": 8765,
+        "path": "/ws/touchpad",
+        "token": "remote-token",
+    }
+
+
+def test_handoff_remote_start_rejects_unreachable_receiver(tmp_path, monkeypatch) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+    token = config.get_or_create_pairing_token()
+    bridge = FakeRemoteBridge(RemoteStatus(reachable=False, error="offline"))
+    monkeypatch.setattr(main, "remote_handoff_bridge", bridge)
+
+    response = TestClient(app).post(
+        "/api/handoff/remote/start",
+        headers={"X-Pairing-Token": token},
+        json={"host": "192.168.1.25", "port": 8765, "token": "remote-token"},
+    )
+
+    assert response.status_code == 400
+
+
+def test_handoff_remote_event_sends_mouse_event(tmp_path, monkeypatch) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+    token = config.get_or_create_pairing_token()
+    bridge = FakeRemoteBridge()
+    monkeypatch.setattr(main, "remote_handoff_bridge", bridge)
+
+    response = TestClient(app).post(
+        "/api/handoff/remote/event",
+        headers={"X-Pairing-Token": token},
+        json={"type": "mouse_move", "dx": 4, "dy": -2},
+    )
+
+    assert response.status_code == 200
+    assert bridge.events == [{"type": "mouse_move", "dx": 4.0, "dy": -2.0, "button": "left", "down": True, "amount": 0}]
+
+
+def test_handoff_remote_stop_closes_bridge(tmp_path, monkeypatch) -> None:
+    _use_temp_config(tmp_path, monkeypatch)
+    token = config.get_or_create_pairing_token()
+    bridge = FakeRemoteBridge()
+    monkeypatch.setattr(main, "remote_handoff_bridge", bridge)
+
+    response = TestClient(app).post(
+        "/api/handoff/remote/stop",
+        headers={"X-Pairing-Token": token},
+    )
+
+    assert response.status_code == 200
+    assert bridge.stopped is True
+
+
+class FakeRemoteBridge:
+    def __init__(self, start_status: RemoteStatus | None = None) -> None:
+        self.start_status = start_status or RemoteStatus(
+            reachable=True,
+            input_events=("mouse_move", "mouse_button", "scroll", "ping"),
+        )
+        self.started = None
+        self.events = []
+        self.stopped = False
+
+    def status(self) -> dict:
+        return {"connected": self.started is not None, "target": None}
+
+    async def start(self, target, token: str) -> RemoteStatus:
+        self.started = {
+            "host": target.host,
+            "port": target.port,
+            "path": target.path,
+            "token": token,
+        }
+        return self.start_status
+
+    async def send_event(self, message: dict) -> dict:
+        self.events.append(message)
+        return {"ok": True, "event": message["type"]}
+
+    async def stop(self) -> dict:
+        self.stopped = True
+        return {"ok": True, "connected": False}
 
 
 def _create_code(client: TestClient, token: str, guest: bool) -> str:
@@ -1073,5 +1671,7 @@ def _use_temp_config(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(config, "TOKEN_FILE", config_dir / "pairing_token.txt")
     monkeypatch.setattr(config, "TRUSTED_DEVICES_FILE", config_dir / "trusted_devices.json")
     monkeypatch.setattr(config, "DEVICE_IDENTITY_FILE", config_dir / "device_identity.json")
+    monkeypatch.setattr(config, "RECEIVE_DIR_FILE", config_dir / "receive_dir.txt")
     monkeypatch.setattr(main, "pairing_code_book", PairingCodeBook())
     monkeypatch.setattr(main, "pairing_session_book", PairingSessionBook())
+    main.transfer_history.clear()

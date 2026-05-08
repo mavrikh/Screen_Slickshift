@@ -22,8 +22,8 @@ Runtime-created local files are ignored by git:
 - `config/pairing_token.txt`
 - `config/trusted_devices.json`
 - `config/device_identity.json`
+- `config/receive_dir.txt`
 - `logs/server.log`
-- `uploads/`
 
 ## Architecture
 
@@ -32,11 +32,11 @@ The working browser-control MVP is a single FastAPI process:
 - `app/main.py` defines API routes, WebSocket routes, static file serving, CORS configuration, startup logging, and emergency lockout behavior.
 - `app/security.py` checks the shared pairing token and reusable token validation helpers.
 - `app/websocket.py` receives touchpad events over `/ws/touchpad`.
-- `app/protocol.py` parses simple JSON input events: `mouse_move`, `mouse_button`, `scroll`, and `ping`. It also accepts legacy `move` and `click` aliases.
+- `app/protocol.py` parses protocol v1 JSON input events: `mouse_move`, `mouse_button`, `scroll`, and `ping`. It accepts both flat messages and v1 `payload` envelopes, plus legacy `move` and `click` aliases.
 - `app/input_control.py` lazily loads `pyautogui` for relative mouse movement, clicks, scrolling, and text typing.
 - `app/clipboard.py` lazily loads `pyperclip` for clipboard get/set.
 - `app/commands.py` runs only locally configured macro command arrays from `config/macros.json` and hides macros whose `platforms` list does not match the current OS.
-- `app/files.py` saves uploaded files into `uploads/` with sanitized, unique filenames and a configurable size limit.
+- `app/files.py` saves uploaded files into the configured receive folder with sanitized, unique filenames and a configurable size limit.
 - `app/pairing.py` contains short pairing-code, trusted-device, and temporary-session primitives.
 - `app/device_identity.py` creates a local random device identity.
 - `app/state.py` contains the in-memory emergency lockout flag.
@@ -108,7 +108,14 @@ Enter the pairing token printed in the server console. The token is intentionall
 - Text sending through `pyautogui.write`.
 - Clipboard read/write through `pyperclip`.
 - Local allow-listed macros from `config/macros.json`; the default checked-in macros are Windows-only.
-- File uploads into `uploads/`, with a default 50 MB limit.
+- File uploads into a configurable receive folder that defaults to the user's Downloads folder, with a default 50 MB limit.
+- Upload panel displays the configured upload limit and blocks oversized files before upload.
+- Upload panel displays and can update the receive folder path.
+- Upload panel shows recent received and rejected transfers from the current server run.
+- Upload panel can clear recent transfer records for the current server run.
+- Dedicated `/file-transfer` browser page for focused file-transfer use.
+- File-transfer page shows trusted recipient readiness with explicit blocked reasons.
+- File-transfer page can update trusted-device `file_receive` permission.
 - Emergency lockout that blocks input, clipboard, file upload, and macro actions.
 - Security panel showing local device identity, trusted devices, active pairing sessions, and pairing-code generation.
 - Trusted-device removal, trust-review actions, single-session revoke, and revoke-all sessions from the browser UI.
@@ -116,6 +123,7 @@ Enter the pairing token printed in the server console. The token is intentionall
 - Session-authenticated touchpad WebSocket mode that enforces `mouse` permission.
 - Session-authenticated text and clipboard routes enforcing `keyboard`, `clipboard_read`, and `clipboard_write`.
 - Session-authenticated upload route enforcing `file_receive`.
+- Session-authenticated macro route enforcing `macros`; macros still come only from the local allow-list.
 - Rotating server log file at `logs/server.log`.
 
 ## Implemented Pairing/Trust APIs
@@ -129,14 +137,15 @@ Backend code and tests currently cover:
 - Trusted pairing sessions with returned shared secrets.
 - Session token hashing.
 - Session expiration and idle timeout validation.
-- Permission records for `mouse`, `keyboard`, `clipboard_read`, `clipboard_write`, and `file_receive`.
+- Permission records for `mouse`, `keyboard`, `clipboard_read`, `clipboard_write`, `file_receive`, and `macros`.
 - Trusted-device removal and permission updates revoking active sessions.
 - Emergency lockout revoking active pairing sessions and marking trusted devices for review.
 - Session-authenticated touchpad WebSocket input with `mouse` permission checks and `last_active_at` updates only after accepted mouse actions.
 - Session-authenticated text input and clipboard read/write with separate permission checks.
 - Session-authenticated upload with `file_receive` permission checks.
+- Session-authenticated macro execution with `macros` permission checks.
 
-The Security panel uses these APIs for local-owner management. Session-authenticated clients can use existing session credentials for mouse input, text input, clipboard read/write, and upload. Macro actions still use the local-owner token path.
+The Security panel uses these APIs for local-owner management. Session-authenticated clients can use existing session credentials for mouse input, text input, clipboard read/write, upload, and approved macros.
 
 ## Experimental macOS Tools
 
@@ -146,29 +155,72 @@ The Security panel uses these APIs for local-owner management. Session-authentic
 - `POST /api/lockout`
 - `ws://HOST:8770/ws/input?token=TOKEN`
 
-It accepts `mouse_move`, `mouse_button`, `scroll`, and `ping` protocol messages and injects mouse input through `pyautogui`.
+It accepts the current flat `mouse_move`, `mouse_button`, `scroll`, and `ping` protocol messages and injects mouse input through `pyautogui`.
 
-`agents/send_test_input.py` sends simple test actions to a receiver:
+`agents/send_test_input.py` sends simple one-shot test actions to a receiver:
 
 - `wiggle`
 - `click`
 - `right-click`
 - `scroll`
 
+Add `--envelope` to send protocol v1 payload envelopes instead of flat input messages.
+
+`agents/manual_sender.py` starts an interactive manual sender prototype:
+
+```bash
+python -m agents.manual_sender --host MAC_IP --port 8770 --token TOKEN
+```
+
+It prints an internal-testing notice when it starts. This tool is not the final user-facing sender and does not perform global input capture.
+
+To target the main app server instead of the experimental receiver:
+
+```bash
+python -m agents.manual_sender --host SERVER_IP --port 8765 --token TOKEN --path /ws/touchpad --auth-mode first-message
+```
+
+It requires explicit `start` before mouse input commands are sent. Supported commands are `move DX DY`, `click [left|right|middle]`, `scroll AMOUNT`, `wait SECONDS`, `ping`, `help`, `stop`, and `quit`.
+Before opening the WebSocket it reads the receiver's `/api/status` endpoint and reports whether the receiver is reachable, disabled, and which protocol subset it advertises. If the receiver reports emergency-disabled, the sender stops before connecting unless `--allow-disabled-receiver` is used for diagnostics. If the receiver advertises protocol events but is missing mouse movement, mouse button, scroll, or ping support, the sender also stops before connecting. Use `--skip-status-check` only when testing a receiver that does not expose that endpoint.
+
+The experimental receiver also exposes `GET /api/permissions` with non-secret macOS guidance: Accessibility is required for mouse control, Screen Recording is not implemented, and emergency stop paths are listed.
+The receiver WebSocket accepts owner-token auth, legacy query-token auth, and `session_auth` when the session has `mouse` permission.
+
+For repeatable tests, pass `--command` more than once:
+
+```bash
+python -m agents.manual_sender --host MAC_IP --port 8770 --token TOKEN --command start --command "move 40 0" --command "click left" --command stop
+```
+
+Use `--command-delay SECONDS` to pause after each scripted command.
+For quick smoke tests, use `--preset wiggle`, `--preset click`, `--preset right-click`, `--preset middle-click`, or `--preset scroll`.
+
 These tools do not implement global input capture, edge handoff, clipboard sync, file transfer, screen capture, persistence, TLS, packaging, or a native UI.
+
+## Linux / SteamOS Direction
+
+There is no native Linux or SteamOS agent yet. The current Steam Deck path remains the browser UI.
+
+Phase 8 research is recorded in `docs/LINUX_STEAMOS.md`. The current direction is to test XDG Desktop Portal RemoteDesktop first for future Wayland receiver work, keep `uinput`/libevdev as an explicit advanced fallback, and treat XTEST as X11-only compatibility mode.
+
+## Edge Handoff Direction
+
+There is no pointer-edge detector, handoff sender loop, or global input capture code yet. Phase 9 planning is recorded in `docs/EDGE_HANDOFF.md`, and the pure config/state plus monitor layout geometry model lives in `app/handoff.py`. The prototype `/handoff` page lets the user drag simulated screens, snap sides edge-to-edge, use Freeform mode, fit/pan/zoom the layout view, disable individual monitors from edge routing, add multiple monitors/devices, preview derived routes, and exercise the handoff state machine without sending remote input.
 
 ## Security Notes
 
 The current protections visible in code are:
 
 - Local-only design; no cloud services, accounts, or telemetry.
-- Shared pairing token required for browser HTTP APIs and `/ws/touchpad`.
+- Shared owner pairing token required for browser HTTP APIs and `/ws/touchpad`.
+- The owner token is currently a 6-digit prototype/testing convenience. Final device trust should use a short human-entered pairing code only to establish hidden long-lived secrets and temporary session credentials.
 - Token is saved locally and printed to console, but startup logging avoids logging it.
 - Project run helpers disable Uvicorn access logs so WebSocket URLs and request paths are not recorded by default.
 - CORS is closed by default because the UI is served from the same origin.
 - Remote clients cannot submit arbitrary shell commands.
 - Macros are local allow-list entries and run with `shell=False`.
 - Upload filenames are sanitized and path-stripped before saving.
+- Receive folder changes require the owner token and are stored locally in `config/receive_dir.txt`.
 - Emergency lockout is visible in the UI and checked by input, clipboard, upload, and macro helpers.
 - Trusted-device shared secrets and session tokens are hashed at rest/in memory where applicable.
 - Pairing code guesses are rate-limited in the pairing code book.
@@ -176,12 +228,12 @@ The current protections visible in code are:
 
 Known gaps:
 
-- The browser-control route still grants broad control to anyone with the global token.
+- The browser-control route still grants broad control to anyone with the global owner token.
+- The owner token is intentionally short for current testing and should not be treated as final security.
 - No TLS/local certificate support is implemented.
 - No mDNS discovery or firewall guidance is implemented in code.
-- File uploads have a default 50 MB size limit. The UI does not yet display that limit before selecting a file.
+- File uploads have a default 50 MB size limit, and the browser UI displays/preflights that limit.
 - Legacy WebSocket query-token compatibility still exists for now, but the browser UI no longer uses it.
-- The trusted-device/session model is not yet used to authorize macro actions.
 - Desktop input and clipboard actions require OS support, installed optional backends, and any permissions required by that OS.
 
 ## Tests
@@ -196,15 +248,15 @@ The tests are focused on backend primitives and APIs. There are no browser autom
 
 ## Current Safest Next Step
 
-The safest next development step is to continue wiring the existing pairing/session permission model into real control paths without breaking the current browser-control MVP.
+The safest next development step is to continue Phase 5 protocol tightening without breaking the current browser-control MVP.
 
 A conservative milestone would be:
 
 1. Keep the existing token flow as local-owner/admin access.
 2. Keep the Security panel as the owner/admin management surface.
-3. Decide whether macros should remain owner-token-only or get a separate explicit permission.
-4. Keep emergency lockout revocation behavior visible and tested.
+3. Keep protocol v1 compatible with the browser UI and experimental macOS receiver.
+4. Plan the later nearby trusted-device send flow.
 
-See `docs/current_state.md` and `docs/roadmap.md` for the current source-of-truth snapshot.
+See `docs/current_state.md` and `docs/ROADMAP.md` for the current source-of-truth snapshot.
 
 For moving work between Codex, a local Ollama model, or a plain terminal workflow, start with `docs/HANDOFF.md`.

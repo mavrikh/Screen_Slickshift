@@ -6,7 +6,7 @@ This document describes what is present in the codebase. It does not claim featu
 
 For switching between GPT/Codex, Ollama, another local LLM, or a plain terminal workflow, use `docs/HANDOFF.md` as the quick continuity file.
 
-Phase 1 stabilization is complete for the current macOS-first development baseline. Windows verification is intentionally deferred until a Windows machine with Python is available.
+Phase 1 stabilization is complete for the current baseline. Phase 9 is now moving toward a Mac-Windows remote-mouse test path with both machines running the same Python/FastAPI app.
 
 ## 1. App Architecture
 
@@ -23,6 +23,7 @@ The working MVP is the FastAPI backend plus static UI:
 - `app/input_control.py`, `app/clipboard.py`, `app/commands.py`, and `app/files.py` do the local side effects. Desktop input and clipboard libraries are loaded lazily so backend imports and tests are not tied to one desktop OS.
 - `app/protocol.py` parses the small JSON input-event format.
 - `app/pairing.py` contains a newer pairing/trusted-device/session model used by backend APIs and tests.
+- `app/handoff_remote.py` contains the first app-integrated outbound remote-mouse bridge for connecting one running Screen Slickshift app to another over `/ws/touchpad` or `/ws/input`.
 
 The backend trusted-device/session model now protects session-authenticated touchpad WebSocket input for mouse actions. The current browser UI still uses the global pairing token as the local-owner/admin path.
 
@@ -70,7 +71,10 @@ python -m pytest
 Expected on the current macOS baseline:
 
 ```text
-109 passed, 2 warnings
+Expected on the current macOS baseline:
+
+```text
+270 passed, 2 warnings
 ```
 
 The warnings are FastAPI `on_event` deprecation warnings and are intentionally deferred.
@@ -86,6 +90,31 @@ Experimental sender test:
 ```bash
 python -m agents.send_test_input --host MAC_IP --port 8770 --token TOKEN --action wiggle
 ```
+
+Manual sender prototype:
+
+```bash
+python -m agents.manual_sender --host MAC_IP --port 8770 --token TOKEN
+```
+
+This tool prints an internal-testing notice when it starts. It is not product UX
+and does not perform global input capture.
+
+Manual sender against the main app server:
+
+```bash
+python -m agents.manual_sender --host SERVER_IP --port 8765 --token TOKEN --path /ws/touchpad --auth-mode first-message
+```
+
+The manual sender checks the receiver's `/api/status` endpoint before opening
+the WebSocket unless `--skip-status-check` is used. It stops before connecting
+when receiver status reports emergency-disabled unless `--allow-disabled-receiver`
+is used for diagnostics. If a receiver advertises protocol events but omits
+required mouse/ping events, the sender also stops before connecting.
+Repeated `--command` arguments can run non-interactive manual tests. Scripted
+tests can include `wait SECONDS` and `--command-delay`. The sender includes a
+`help` command for its command list and smoke-test presets for wiggle, clicks,
+and scroll.
 
 ## 3. Features Implemented
 
@@ -104,7 +133,7 @@ Working browser-control MVP:
 - Macro list loaded from `config/macros.json`.
 - Platform-specific macros can be hidden by a `platforms` field.
 - Running approved macro command arrays.
-- File upload to `uploads/`.
+- File upload to a configurable receive folder that defaults to the user's Downloads folder.
 - Emergency stop and re-enable.
 - Security panel with local device identity, pairing-code generation, trusted devices, and active pairing sessions.
 - UI actions for trusted-device removal, trust review keep/remove, single-session revoke, and revoke-all sessions.
@@ -115,7 +144,19 @@ Working browser-control MVP:
 - Session-authenticated upload route enforcing `file_receive` permission.
 - Session-authenticated macro route enforcing `macros` permission.
 - Default 50 MB upload size limit.
+- Upload panel displays the configured upload limit and blocks oversized files before upload.
+- Upload panel displays and can update the receive folder path.
+- Upload panel includes inline status for upload progress, success, and rejection/error messages.
+- Upload panel shows recent received and rejected transfers from the current server run.
+- Upload panel can clear recent transfer records for the current server run.
+- Dedicated `/file-transfer` browser page for focused file-transfer use.
+- File-transfer page shows trusted recipient readiness with explicit blocked reasons.
+- File-transfer page can update trusted-device `file_receive` permission.
 - Activity log in the browser UI.
+- Dedicated `/handoff` browser page for prototype monitor layout and remote mouse testing.
+- Handoff layout page supports draggable monitor tiles, no-overlap placement, nearest-side snapping, Freeform mode, monitor edge-disable toggles, multiple monitors per device, up to five simulated devices, zoom, pan, and Reset View fit-to-layout.
+- Handoff layout page can connect to a remote Screen Slickshift receiver by host/IP, port, and remote token, then send mouse movement, clicks, and scroll through a manual remote touchpad.
+- Owner-token-protected remote handoff APIs: `/api/handoff/remote/status`, `/api/handoff/remote/start`, `/api/handoff/remote/event`, and `/api/handoff/remote/stop`.
 - Rotating server logs.
 - LLM text generation via `/api/generate-text` route, using local OpenAI-compatible API (LM Studio).
 
@@ -146,6 +187,7 @@ Present in the working MVP:
 
 - No cloud service, accounts, or telemetry in the codebase.
 - HTTP control APIs require `X-Pairing-Token`.
+- The owner token is currently a 6-digit prototype/testing convenience. Final trust should use short human-entered pairing only to establish hidden shared secrets and temporary session credentials.
 - `/ws/touchpad` requires either owner-token auth as the first message, a valid session credential as the first message, or legacy query-token auth.
 - The pairing token is generated locally and saved in `config/pairing_token.txt`.
 - Startup logs do not include the token; the console does print it for local use.
@@ -155,6 +197,7 @@ Present in the working MVP:
 - Macro commands are arrays and run with `shell=False`.
 - Upload filenames are path-stripped, sanitized, and made unique.
 - Uploads have a default 50 MB size limit.
+- Receive folder changes require the owner token and are stored locally in `config/receive_dir.txt`.
 - Emergency lockout is checked before input, clipboard, macro, and upload actions.
 - `pyautogui.FAILSAFE` is enabled.
 
@@ -177,9 +220,11 @@ Known security gaps or unclear areas:
 - Legacy WebSocket query-token compatibility still exists in the backend, but the browser UI now sends the token as the first WebSocket message.
 - No TLS or local certificate support is implemented.
 - No network discovery security model is implemented.
-- The UI does not yet show the upload size limit before file selection.
+- Nearby trusted-device send/broadcast flow is not implemented yet.
 - Trusted-device/session authorization is enforced for session-authenticated touchpad mouse actions, text, clipboard read/write, upload, and macros.
 - The macOS receiver uses a temporary token but has no persistent trust model.
+- Remote handoff start is owner-token protected, preflights the target `/api/status`, refuses emergency-disabled receivers, and only sends mouse/ping protocol events.
+- Remote handoff target tokens are not logged by the app and are not returned from API responses.
 
 ## 5. Platform-Specific Code
 
@@ -189,17 +234,55 @@ Windows-oriented code:
 - `config/macros.json` contains Windows commands: `notepad.exe`, `rundll32.exe user32.dll,LockWorkStation`, and a Windows Calculator shell target.
 - `app/commands.py` uses Windows creation flags when `os.name == "nt"`.
 - `app/input_control.py` is not Windows-only by code. It lazily loads `pyautogui` when input actions are used.
+- The main app's `/ws/touchpad` receiver path is intended to run on Windows as the remote mouse target when Python dependencies are installed and the app is running in a desktop session. Physical Windows verification is still required.
 
 macOS-specific or macOS-oriented code:
 
 - `agents/macos_receiver.py` is explicitly an experimental macOS receiver.
 - It lazily loads `pyautogui` and may require macOS Accessibility permission.
+- Its startup banner says Accessibility may be required, Screen Recording is not needed, and emergency stop paths are Ctrl+C plus pyautogui screen-corner failsafe.
+- Receiver status/index payloads and event-dispatch behavior have focused tests.
+- Receiver `/api/permissions` reports Accessibility as required for mouse control, Screen Recording as not needed/not implemented, and the available emergency stop paths.
+- Receiver status/index/lockout payloads report `input_allowed` alongside `disabled`.
+- Receiver status/index payloads report prototype capabilities for mouse input, no keyboard, no clipboard, no file transfer, no screen capture, Accessibility required, and Screen Recording not required.
+- Receiver `/ws/input` accepts first-message token auth and still accepts query-token auth for compatibility.
+- Receiver `/ws/input` accepts `session_auth` with `mouse` permission and updates session activity only after accepted mouse input.
+- Receiver `/api/lockout` accepts `X-Pairing-Token` and still accepts query-token auth for compatibility.
+- Receiver status/index payloads advertise supported WebSocket and HTTP auth modes without exposing the token.
+- The main app's `/ws/touchpad` receiver path is intended to run on macOS as the remote mouse target when Accessibility permission is granted. Physical Mac-to-Mac verification is still required.
+- Receiver emergency-disabled state blocks mouse/click/scroll while allowing ping.
 - `app/device_identity.py` maps `platform.system() == "Darwin"` to `macos`.
 
 Linux/SteamOS-specific code:
 
 - No native Linux or SteamOS agent code is present.
 - Steam Deck support currently means using the browser UI.
+- Phase 8 research is documented in `docs/LINUX_STEAMOS.md`.
+- Future Linux receiver work should test XDG Desktop Portal RemoteDesktop first.
+- `uinput`/libevdev is documented as an explicit advanced fallback, not the default.
+- XTEST is documented as an X11-only compatibility fallback.
+
+Edge handoff:
+
+- Phase 9 planning is documented in `docs/EDGE_HANDOFF.md`.
+- Pure edge handoff config/state code exists in `app/handoff.py`.
+- Pure monitor layout geometry exists in `app/handoff.py` for draggable screen rectangles and adjacent-edge route derivation.
+- Prototype browser handoff page exists at `/handoff` for drag-layout and state simulation.
+- Owner-token-protected `POST /api/handoff/layout/preview` returns sanitized screens and derived routes.
+- Handoff layout preview reports overlapping screens, and the `/handoff` drag UI blocks overlapping monitor tiles.
+- `/handoff` snaps nearby screen sides edge-to-edge while dragging.
+- `/handoff` forces screen tiles to snap to the nearest valid side when released unless Freeform mode is enabled.
+- `/handoff` has a Freeform mode that disables forced snapping while preview uses a larger side-search distance; turning Freeform off snaps all screens inward to nearest valid sides.
+- `/handoff` can toggle a selected monitor out of edge routing while keeping it visible in the layout.
+- `/handoff` can add multiple monitors per device and add machines up to the current prototype cap of five devices.
+- `/handoff` Add Machine/Add Monitor use non-overlap placement so new tiles are never created on top of existing tiles.
+- `/handoff` supports zoom controls, mouse-wheel zoom, fit-to-all Reset View, and panning by dragging empty layout space.
+- State transition tests exist in `tests/test_handoff.py`.
+- No global input capture code exists.
+- No pointer-edge detector exists.
+- No handoff network sender loop exists.
+- Manual sender and experimental receiver remain the proving tools.
+- Keyboard capture remains deferred.
 
 ## 6. Incomplete Or Experimental Files
 
@@ -219,17 +302,17 @@ Implemented but not fully integrated into the active browser-control path:
 
 Unclear or incomplete:
 
-- The protocol docs include future native-agent message types that are not fully implemented as WebSocket protocol actions.
+- The protocol docs include future native-agent message types that are not fully implemented as WebSocket protocol actions. The implemented WebSocket subset is protocol v1 mouse input, ping, session auth, and legacy `move`/`click` aliases. Main and experimental receiver status responses advertise the implemented protocol subset and per-message numeric limits.
 - The roadmap describes future native agents and edge handoff, but those are not implemented.
 - Cross-platform server startup exists through `run.py`, but desktop input behavior still depends on `pyautogui` support and OS permissions.
 
 ## 7. Next Safest Development Step
 
-The next safest step is to finish Phase 3 by deciding how macros should relate to the session permission model.
+The next safest step is to move toward Phase 9 edge-handoff planning without adding global capture yet.
 
 A small, testable sequence:
 
-1. Keep the existing pairing token as local-owner/admin access.
-2. Decide whether macros should remain owner-token-only or get a separate explicit permission.
-3. Keep uploads bounded and owner-visible.
-4. Keep updating `last_active_at` only after accepted permissioned actions.
+1. Keep manual sender/receiver control as the test bed.
+2. Add a prototype UI surface for layout/state simulation before OS capture.
+3. Reuse manual sender receiver-status checks from the handoff model.
+4. Keep local panic/stop behavior independent from the receiver.
