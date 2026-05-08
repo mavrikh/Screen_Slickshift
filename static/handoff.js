@@ -1,5 +1,8 @@
 const handoffState = {
   token: localStorage.getItem("wdcToken") || "",
+  remoteHost: localStorage.getItem("slickshiftHandoffRemoteHost") || "",
+  remotePort: localStorage.getItem("slickshiftHandoffRemotePort") || "8765",
+  remoteToken: localStorage.getItem("slickshiftHandoffRemoteToken") || "",
   mode: "idle",
   activeTargetId: null,
   activeEdge: null,
@@ -80,6 +83,9 @@ const activeLayerRightClickButton = document.getElementById("activeLayerRightCli
 const activeLayerStopButton = document.getElementById("activeLayerStopButton");
 
 handoffTokenInput.value = handoffState.token;
+remoteHostInput.value = handoffState.remoteHost;
+remotePortInput.value = handoffState.remotePort;
+remoteTokenInput.value = handoffState.remoteToken;
 
 function authHeaders() {
   return { "X-Pairing-Token": handoffState.token };
@@ -743,6 +749,7 @@ async function startRemoteControl() {
     setNotice("Enter the remote host and remote token before connecting.");
     return;
   }
+  saveRemoteConnectionFields();
   try {
     await api("/api/handoff/remote/start", {
       method: "POST",
@@ -758,6 +765,15 @@ async function startRemoteControl() {
     setNotice(error.message);
   }
   renderState();
+}
+
+function saveRemoteConnectionFields() {
+  handoffState.remoteHost = remoteHostInput.value.trim();
+  handoffState.remotePort = remotePortInput.value || "8765";
+  handoffState.remoteToken = remoteTokenInput.value.trim();
+  localStorage.setItem("slickshiftHandoffRemoteHost", handoffState.remoteHost);
+  localStorage.setItem("slickshiftHandoffRemotePort", handoffState.remotePort);
+  localStorage.setItem("slickshiftHandoffRemoteToken", handoffState.remoteToken);
 }
 
 async function stopRemoteControl(options = {}) {

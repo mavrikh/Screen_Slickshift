@@ -20,6 +20,10 @@ The route preview can arm a derived route directly. This keeps the manual
 handoff flow tied to the visible screen layout instead of requiring the target
 and edge controls to be set separately.
 
+For prototype testing convenience, `/handoff` stores the last remote host,
+remote port, and remote token in browser local storage. This should be revisited
+before a final product because the remote token is sensitive.
+
 Confirming a pending handoff now requires an active remote connection. When it
 succeeds, the browser focuses the remote touchpad so the active remote surface
 is visually and interactively clear.
@@ -254,6 +258,7 @@ When coding starts, keep the first slice small:
 - Derived routes in `/handoff` can arm the handoff state directly.
 - Confirming a pending handoff requires a connected remote target and focuses the remote touchpad.
 - Active remote mode uses a full-window browser layer for manual remote movement, clicks, scroll, and stop.
+- `/handoff` remembers the last remote host, port, and token in browser local storage for current testing convenience.
 - Mac to Windows remote mouse movement has been physically verified with both machines running the main app.
 - Windows to Mac remote mouse movement has been physically verified with both machines running the main app.
 - Mac to Mac remote mouse movement is expected to use the same path but still needs physical verification.
