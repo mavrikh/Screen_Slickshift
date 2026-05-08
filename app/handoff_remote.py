@@ -4,9 +4,9 @@ import asyncio
 import json
 from dataclasses import dataclass
 from typing import Any, Optional
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 import websockets
 
@@ -53,6 +53,10 @@ class RemoteTarget:
         return f"http://{self.host}:{self.port}/api/status"
 
     @property
+    def auth_check_url(self) -> str:
+        return f"http://{self.host}:{self.port}/api/auth/check"
+
+    @property
     def websocket_url(self) -> str:
         return f"ws://{self.host}:{self.port}{self.path}"
 
@@ -70,6 +74,8 @@ class RemoteHandoffBridge:
         status = await asyncio.to_thread(get_remote_status, target)
         if not should_connect(status):
             return status
+        if not await asyncio.to_thread(remote_token_is_valid, target, token):
+            raise ValueError("Remote token was rejected.")
 
         async with self._lock:
             await self._close_locked()
@@ -175,6 +181,15 @@ def get_remote_status(target: RemoteTarget, timeout: float = 2.0) -> RemoteStatu
         protocol_version=protocol.get("version") if isinstance(protocol.get("version"), int) else None,
         input_events=tuple(str(event) for event in input_events),
     )
+
+
+def remote_token_is_valid(target: RemoteTarget, token: str, timeout: float = 2.0) -> bool:
+    request = Request(target.auth_check_url, headers={"X-Pairing-Token": token}, method="GET")
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            return 200 <= response.status < 300
+    except (HTTPError, OSError, URLError):
+        return False
 
 
 def should_connect(status: RemoteStatus) -> bool:
