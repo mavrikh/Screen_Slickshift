@@ -844,7 +844,22 @@ function ActiveControlOverlay({ deviceName, onStop }) {
     return () => document.removeEventListener("keydown", onKeyDown);
   }, []);
 
-  function requestLock() { overlayRef.current?.requestPointerLock?.(); }
+  function requestLock() {
+    const el = overlayRef.current;
+    if (!el) return;
+    // requestPointerLock returns a Promise in modern WebKit — catch rejections.
+    // Try with unadjustedMovement first (better raw-delta tracking on macOS).
+    try {
+      const p = el.requestPointerLock({ unadjustedMovement: true });
+      if (p && typeof p.catch === "function") {
+        p.catch(() => {
+          try { el.requestPointerLock(); } catch {}
+        });
+      }
+    } catch {
+      try { el.requestPointerLock(); } catch {}
+    }
+  }
 
   function onPointerDown(e) {
     if (!document.pointerLockElement) { requestLock(); return; }
@@ -1127,19 +1142,19 @@ function OverviewSection() {
   const { devices: discovered, refresh: discoveryRefresh } = useDiscovery(true);
   const [pairOpen, setPairOpen] = useState(false);
   const [activeControl, setActiveControl] = useState(null);
-  const [edgeHandoff, setEdgeHandoff] = useState(false);
+  const [edgeHandoff, setEdgeHandoff] = useState(true);
   const [edgeRel, setEdgeRel] = useState(null);
   const [detectorState, setDetectorState] = useState("idle");
   const [dwellProgress, setDwellProgress] = useState(0);
   const connectingRef = useRef(false);
   const bridgeWarmRef = useRef(false);
-  const [overviewToast, setOverviewToast] = useState("");
-  const overviewToastTimer = useRef(null);
+  const [overviewMsg, setOverviewMsg] = useState("");
+  const overviewMsgTimer = useRef(null);
 
-  function showOverviewToast(msg) {
-    setOverviewToast(msg);
-    clearTimeout(overviewToastTimer.current);
-    overviewToastTimer.current = setTimeout(() => setOverviewToast(""), 6000);
+  function showOverviewMsg(msg) {
+    setOverviewMsg(msg);
+    clearTimeout(overviewMsgTimer.current);
+    overviewMsgTimer.current = setTimeout(() => setOverviewMsg(""), 6000);
   }
 
   async function stopControl(keepBridgeForHandoff = false) {
@@ -1194,7 +1209,7 @@ function OverviewSection() {
       }
       setActiveControl({ deviceName: name });
     } catch (e) {
-      if (e?.message) showOverviewToast(e.message);
+      if (e?.message) showOverviewMsg(e.message);
     } finally {
       connectingRef.current = false;
     }
@@ -1297,6 +1312,10 @@ function OverviewSection() {
         </button>
       </div>
 
+      {overviewMsg && (
+        <div style={{ color: "var(--warn)", fontSize: 13, marginBottom: 12 }}>{overviewMsg}</div>
+      )}
+
       <div className="overview-grid">
         <div className="panel">
           <div className="panel-h">
@@ -1338,18 +1357,6 @@ function OverviewSection() {
           dwellProgress={dwellProgress}
           activeControl={activeControl} />
       </div>
-
-      {overviewToast && (
-        <div style={{
-          position: "fixed", top: 20, right: 20, zIndex: 200,
-          background: "var(--panel-2)", border: "1px solid var(--border-strong)",
-          borderRadius: 10, padding: "10px 16px", maxWidth: 360,
-          color: "var(--warn)", fontSize: 13, fontWeight: 500,
-          boxShadow: "0 8px 24px rgba(0,0,0,0.45)",
-        }}>
-          {overviewToast}
-        </div>
-      )}
 
       <PairModal open={pairOpen} target={null}
         onClose={() => setPairOpen(false)}
@@ -1457,7 +1464,7 @@ function OverviewEdges({ paired, thisDevice, onEdgeChange, edgeHandoff, onToggle
     <div className="panel">
       <div className="panel-h">
         <div>
-          <h2>Screen edges</h2>
+          <h2>Screen Edges</h2>
           <span className="h-sub">
             {edgeHandoff && edgeRel
               ? `${edgeRel.localEdge} edge → ${edgeRel.remoteName}`
