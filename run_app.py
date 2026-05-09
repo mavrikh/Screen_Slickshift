@@ -164,16 +164,24 @@ class _AppAPI:
                 import pyautogui
             except Exception:
                 return
+            # Use pyautogui's own coordinate space for the anchor point so there
+            # is no DPI / coordinate-system mismatch with pyautogui.position().
+            # Disable FAILSAFE so the warp loop doesn't raise when the cursor
+            # briefly passes near (0, 0).
+            pyautogui.FAILSAFE = False
+            sw, sh = pyautogui.size()
+            acx, acy = sw // 2, sh // 2
+            pyautogui.moveTo(acx, acy, duration=0)
             prev_l = prev_r = False
             while self._cap_running:
                 try:
                     pos = pyautogui.position()
-                    dx, dy = pos.x - cx, pos.y - cy
+                    dx, dy = pos.x - acx, pos.y - acy
                     l_dn, r_dn = _buttons()
                     evs = []
                     if dx or dy:
                         evs.append({"type": "mouse_move", "dx": int(dx), "dy": int(dy)})
-                        pyautogui.moveTo(cx, cy, duration=0)
+                        pyautogui.moveTo(acx, acy, duration=0)
                     if l_dn != prev_l:
                         evs.append({"type": "mouse_button", "button": "left", "down": l_dn})
                         prev_l = l_dn
