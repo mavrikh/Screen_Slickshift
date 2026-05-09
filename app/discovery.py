@@ -95,10 +95,13 @@ class DiscoveryService:
             "discovered": [d.public_dict() for d in self.get_discovered()],
         }
 
-    async def _ensure_zc_and_browser(self) -> None:
+    async def _ensure_zc(self) -> None:
         if self._zc is None:
             self._loop = asyncio.get_event_loop()
             self._zc = AsyncZeroconf()
+
+    async def _ensure_browser(self) -> None:
+        await self._ensure_zc()
         if self._browser is None:
             self._browser = AsyncServiceBrowser(
                 self._zc.zeroconf,
@@ -110,7 +113,7 @@ class DiscoveryService:
         if self._browsing:
             return
         self._own_device_id = device_id
-        await self._ensure_zc_and_browser()
+        await self._ensure_browser()
         self._browsing = True
         logger.info("Discovery: browsing started")
 
@@ -118,8 +121,7 @@ class DiscoveryService:
         if self._advertising:
             return
         self._own_device_id = device_id
-        await self._ensure_zc_and_browser()
-        self._browsing = True
+        await self._ensure_zc()  # advertise needs zeroconf but not the service browser
         local_ip = get_local_ip()
         self._info = AsyncServiceInfo(
             SERVICE_TYPE,

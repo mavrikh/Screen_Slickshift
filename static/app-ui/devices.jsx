@@ -1069,10 +1069,18 @@ function OverviewSection() {
   const [detectorState, setDetectorState] = useState("idle");
   const [dwellProgress, setDwellProgress] = useState(0);
   const connectingRef = useRef(false);
+  const bridgeWarmRef = useRef(false);
 
-  async function stopControl() {
+  async function stopControl(keepBridgeForHandoff = false) {
+    // Warp local cursor to center so it doesn't snap back to the edge
+    try { await SS.api("/api/handoff/warp-cursor", { method: "POST" }); } catch {}
     setActiveControl(null);
-    try { await SS.api("/api/handoff/remote/stop", { method: "POST" }); } catch {}
+    if (keepBridgeForHandoff && edgeHandoff) {
+      bridgeWarmRef.current = true;
+    } else {
+      bridgeWarmRef.current = false;
+      try { await SS.api("/api/handoff/remote/stop", { method: "POST" }); } catch {}
+    }
   }
 
   async function handleConnect(device_id, returnEdge = null) {
@@ -1101,13 +1109,15 @@ function OverviewSection() {
           });
         }
       }
+      // Warp local cursor off the edge immediately so it doesn't feel "stuck"
+      try { await SS.api("/api/handoff/warp-cursor", { method: "POST" }); } catch {}
       await SS.api("/api/handoff/remote/warp-cursor", { method: "POST" });
       if (returnEdge) {
         try {
           await SS.api("/api/handoff/remote/arm-return", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ return_edge: returnEdge, dwell_ms: 400 }),
+            body: JSON.stringify({ return_edge: returnEdge, dwell_ms: 50 }),
           });
         } catch {}
       }
@@ -1120,7 +1130,11 @@ function OverviewSection() {
   // Arm local edge detector when handoff is on, screens are adjacent, and not currently controlling
   useEffect(() => {
     if (!edgeHandoff || !edgeRel || activeControl) {
-      if (edgeHandoff) SS.api("/api/handoff/disarm", { method: "POST" }).catch(() => {});
+      SS.api("/api/handoff/disarm", { method: "POST" }).catch(() => {});
+      if (!edgeHandoff && bridgeWarmRef.current) {
+        bridgeWarmRef.current = false;
+        SS.api("/api/handoff/remote/stop", { method: "POST" }).catch(() => {});
+      }
       setDetectorState("idle");
       setDwellProgress(0);
       return;
@@ -1128,7 +1142,7 @@ function OverviewSection() {
     SS.api("/api/handoff/arm", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ edge: edgeRel.localEdge, dwell_ms: 400 }),
+      body: JSON.stringify({ edge: edgeRel.localEdge, dwell_ms: 50 }),
     }).catch(() => {});
   }, [edgeHandoff, edgeRel?.localEdge, !!activeControl]);
 
@@ -1158,11 +1172,45 @@ function OverviewSection() {
       try {
         const d = await SS.api("/api/handoff/remote/return-state");
         if (!alive) return;
-        if (d.state === "pending") stopControl();
+        if (d.state === "pending") stopControl(true); // keep bridge warm for next edge trigger
       } catch {}
     }, 200);
     return () => { alive = false; clearInterval(t); };
   }, [edgeHandoff, !!activeControl]);
+
+  // Pre-connect bridge in background so the edge trigger is near-instant
+  useEffect(() => {
+    if (!edgeHandoff || !edgeRel || activeControl) return;
+    let alive = true;
+    async function warmBridge() {
+      const device_id = edgeRel.remoteId;
+      let cred = null;
+      try { const raw = localStorage.getItem(`slickshiftTrusted_${device_id}`); if (raw) cred = JSON.parse(raw); } catch {}
+      if (!cred?.shared_secret) return;
+      const found = discovered.find(d => d.device_id === device_id)
+        || (cred?.host ? { host: cred.host, port: cred.port || 8765 } : null);
+      if (!found || !alive) return;
+      try {
+        const status = await SS.api("/api/handoff/remote/status");
+        if (!alive) return;
+        if (status.connected) { bridgeWarmRef.current = true; return; }
+        const data = await SS.api("/api/discovery/remote/reconnect", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ host: found.host, port: found.port || 8765, shared_secret: cred.shared_secret }),
+        });
+        if (!alive || !data?.session?.session_id) return;
+        await SS.api("/api/handoff/remote/start-session", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ host: found.host, port: found.port || 8765, session_id: data.session.session_id, session_token: data.session_token }),
+        });
+        if (alive) bridgeWarmRef.current = true;
+      } catch {}
+    }
+    warmBridge();
+    return () => { alive = false; };
+  }, [edgeHandoff, edgeRel?.remoteId, !!activeControl]);
 
   return (
     <>
