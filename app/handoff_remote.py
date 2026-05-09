@@ -562,6 +562,23 @@ def remote_trusted_reconnect(
         raise RuntimeError(str(exc)) from exc
 
 
+def remote_cancel_pair_request(
+    target: RemoteTarget, device_id: str, timeout: float = 3.0
+) -> dict[str, Any]:
+    body = json.dumps({"device_id": device_id}).encode("utf-8")
+    request = Request(
+        f"http://{target.host}:{target.port}/api/discovery/cancel-request",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except (HTTPError, OSError, URLError, json.JSONDecodeError) as exc:
+        raise RuntimeError(str(exc)) from exc
+
+
 def warp_remote_cursor(
     target: RemoteTarget, token: str, timeout: float = 3.0
 ) -> dict[str, Any]:

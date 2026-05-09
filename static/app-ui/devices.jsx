@@ -236,7 +236,7 @@ function DiscoveredRow({ d, onPair }) {
         <div className="dev-meta">{d.host} · advertising on LAN</div>
       </div>
       <div className="dev-actions">
-        <button type="button" className="btn-secondary" onClick={() => onPair(d)}>Save</button>
+        <button type="button" className="btn-secondary" onClick={() => onPair(d)}>Connect</button>
       </div>
     </div>
   );
@@ -409,6 +409,22 @@ function PairModal({ open, target, onClose, onComplete, discoveredDevices = [] }
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   const inputRefs = useRef([]);
+  const pendingRequestRef = useRef(null); // {host, port} when a request-pair is in flight
+
+  // Close the modal. If a request-pair was sent and not yet completed or cancelled,
+  // tell Screen B to discard it immediately rather than waiting for the 45s timeout.
+  function handleClose() {
+    if (pendingRequestRef.current) {
+      const { host, port } = pendingRequestRef.current;
+      pendingRequestRef.current = null;
+      SS.api("/api/discovery/remote/cancel-pair", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ host, port }),
+      }).catch(() => {});
+    }
+    onClose();
+  }
 
   // Reset and kick off the right flow when modal opens
   useEffect(() => {
@@ -418,14 +434,15 @@ function PairModal({ open, target, onClose, onComplete, discoveredDevices = [] }
     setBusy(false);
     setPickedDevice(null);
     if (target) {
-      // Clicked Pair on a discovered row — auto-request
+      // Clicked Connect on a discovered row — auto-request
       setStep("requesting");
+      pendingRequestRef.current = { host: target.host, port: target.port || 8765 };
       SS.api("/api/discovery/remote/request-pair", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ host: target.host, port: target.port || 8765 }),
       }).then(() => setStep("enter"))
-        .catch(e => { setErr(e.message || "Could not reach device."); setStep("failed"); });
+        .catch(e => { pendingRequestRef.current = null; setErr(e.message || "Could not reach device."); setStep("failed"); });
     } else {
       // Add device button — show discovered devices first
       setStep("pick");
@@ -451,12 +468,13 @@ function PairModal({ open, target, onClose, onComplete, discoveredDevices = [] }
   function quickPair(d) {
     setPickedDevice(d);
     setStep("requesting");
+    pendingRequestRef.current = { host: d.host, port: d.port || 8765 };
     SS.api("/api/discovery/remote/request-pair", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ host: d.host, port: d.port || 8765 }),
     }).then(() => setStep("enter"))
-      .catch(e => { setErr(e.message || "Could not reach device."); setPickedDevice(null); setStep("pick"); });
+      .catch(e => { pendingRequestRef.current = null; setErr(e.message || "Could not reach device."); setPickedDevice(null); setStep("pick"); });
   }
 
   async function startManualRequest(e) {
@@ -464,14 +482,17 @@ function PairModal({ open, target, onClose, onComplete, discoveredDevices = [] }
     if (!manualHost.trim()) return;
     setErr("");
     setStep("requesting");
+    const mHost = manualHost.trim(), mPort = Number(manualPort) || 8765;
+    pendingRequestRef.current = { host: mHost, port: mPort };
     try {
       await SS.api("/api/discovery/remote/request-pair", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ host: manualHost.trim(), port: Number(manualPort) || 8765 }),
+        body: JSON.stringify({ host: mHost, port: mPort }),
       });
       setStep("enter");
     } catch (e2) {
+      pendingRequestRef.current = null;
       setErr(e2.message || "Could not reach device.");
       setStep("manual-host");
     }
@@ -518,7 +539,8 @@ function PairModal({ open, target, onClose, onComplete, discoveredDevices = [] }
           });
         } catch {}
       }
-      // Close modal immediately — parent shows a toast and starts the connection
+      // Pairing succeeded — clear cancel guard before closing
+      pendingRequestRef.current = null;
       onComplete && onComplete({ host, port, device_id: deviceId, name: deviceName }, perms, data);
       onClose();
     } catch (e2) {
@@ -534,7 +556,7 @@ function PairModal({ open, target, onClose, onComplete, discoveredDevices = [] }
 
   if (!open) return null;
   return (
-    <div className="modal-overlay" onClick={step === "connecting" ? undefined : onClose}>
+    <div className="modal-overlay" onClick={step === "connecting" ? undefined : handleClose}>
       <div className="modal" onClick={e => e.stopPropagation()}>
 
         {/* Pick step — shown when "Add device" is clicked with no specific target */}
@@ -573,7 +595,7 @@ function PairModal({ open, target, onClose, onComplete, discoveredDevices = [] }
               </button>
             </div>
             <div className="modal-foot">
-              <button type="button" className="btn-ghost" onClick={onClose}>Cancel</button>
+              <button type="button" className="btn-ghost" onClick={handleClose}>Cancel</button>
             </div>
           </>
         )}
@@ -609,7 +631,7 @@ function PairModal({ open, target, onClose, onComplete, discoveredDevices = [] }
             </div>
             <div className="modal-foot">
               <button type="button" className="btn-ghost" onClick={() => setStep("pick")}>Back</button>
-              <button type="button" className="btn-ghost" onClick={onClose}>Cancel</button>
+              <button type="button" className="btn-ghost" onClick={handleClose}>Cancel</button>
             </div>
           </>
         )}
@@ -654,7 +676,7 @@ function PairModal({ open, target, onClose, onComplete, discoveredDevices = [] }
                 onClick={() => submitPin(pin.join(""))}>
                 {busy ? "Confirming…" : "Confirm"}
               </button>
-              <button type="button" className="btn-ghost" onClick={onClose}>Cancel</button>
+              <button type="button" className="btn-ghost" onClick={handleClose}>Cancel</button>
             </div>
           </>
         )}
@@ -667,7 +689,7 @@ function PairModal({ open, target, onClose, onComplete, discoveredDevices = [] }
             </div>
             <div className="modal-foot">
               <button type="button" className="btn-ghost" onClick={() => setStep("pick")}>Back</button>
-              <button type="button" className="btn-ghost" onClick={onClose}>Close</button>
+              <button type="button" className="btn-ghost" onClick={handleClose}>Close</button>
             </div>
           </>
         )}

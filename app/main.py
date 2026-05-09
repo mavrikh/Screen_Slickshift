@@ -26,6 +26,7 @@ from app.handoff_remote import (
     remote_pair,
     remote_request_pair,
     remote_trusted_reconnect,
+    remote_cancel_pair_request,
     warp_remote_cursor,
     warp_remote_cursor_session,
 )
@@ -182,6 +183,10 @@ class RemoteHandoffSessionStartRequest(BaseModel):
 class RemoteDiscoveryTargetRequest(BaseModel):
     host: str
     port: int = 8765
+
+
+class CancelPairRequest(BaseModel):
+    device_id: str
 
 
 class RemoteDiscoveryPairPayload(BaseModel):
@@ -827,6 +832,20 @@ async def discovery_dismiss_request() -> dict:
     return {"ok": True}
 
 
+@app.post("/api/discovery/cancel-request")
+async def discovery_cancel_request(payload: CancelPairRequest) -> dict:
+    global _pending_pair_request
+    pending = _pending_pair_request
+    if pending is None or pending.is_expired():
+        _pending_pair_request = None
+        return {"ok": True}
+    if pending.requester_id != payload.device_id:
+        raise HTTPException(status_code=403, detail="Not authorized to cancel this request.")
+    _pending_pair_request = None
+    logger.info("Pairing request cancelled by requester %s.", payload.device_id)
+    return {"ok": True}
+
+
 @app.post("/api/discovery/pair")
 async def discovery_pair(payload: DiscoveryPairRequest) -> dict:
     global _pending_pair_request
@@ -964,6 +983,18 @@ async def discovery_remote_reconnect(payload: RemoteDiscoveryReconnectPayload) -
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/discovery/remote/cancel-pair", dependencies=[Depends(verify_token)])
+async def discovery_remote_cancel_pair(payload: RemoteDiscoveryTargetRequest) -> dict:
+    identity = get_or_create_device_identity()
+    try:
+        target = RemoteTarget.from_values(payload.host, payload.port)
+        return await asyncio.to_thread(remote_cancel_pair_request, target, identity.device_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError:
+        return {"ok": True}
 
 
 @app.get("/api/pairing-sessions", dependencies=[Depends(verify_token)])
