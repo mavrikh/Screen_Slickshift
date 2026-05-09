@@ -1,6 +1,6 @@
 // devices.jsx — Devices section + Overview devices panel, wired to real APIs
 
-const { useState, useEffect, useRef, useCallback } = React;
+const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
 // ── Data helpers ─────────────────────────────────────────────────────────────
 
@@ -786,8 +786,11 @@ const REMOTE_KEY_MAP = {
 function ActiveControlOverlay({ deviceName, onStop }) {
   const overlayRef = useRef(null);
   const [pointerLocked, setPointerLocked] = useState(false);
+  const [softCapture, setSoftCapture] = useState(false);
   const lastMoveRef = useRef(0);
+  const lastPosRef = useRef({ x: 0, y: 0 });
 
+  // Pointer lock change/error listeners
   useEffect(() => {
     overlayRef.current?.focus();
     function onChange() {
@@ -812,11 +815,53 @@ function ActiveControlOverlay({ deviceName, onStop }) {
     } catch { onStop(); }
   }
 
-  // Mouse movement via pointer lock
+  function _warpToWindowCenter() {
+    const dpr = window.devicePixelRatio || 1;
+    const px = Math.round((window.screenX + window.innerWidth / 2) * dpr);
+    const py = Math.round((window.screenY + window.innerHeight / 2) * dpr);
+    window.pywebview?.api?.cursor_warp_to_physical(px, py)?.catch?.(() => {});
+    lastPosRef.current = { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+  }
+
+  function requestLock() {
+    // In pywebview (WKWebView) pointer lock is unreliable. Use soft-capture instead:
+    // track mouse deltas from the window centre and warp the OS cursor back after
+    // each move so it never escapes the window.
+    if (window.pywebview) {
+      lastPosRef.current = { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+      setSoftCapture(true);
+      _warpToWindowCenter();
+      return;
+    }
+    const el = overlayRef.current;
+    if (!el) return;
+    try {
+      const p = el.requestPointerLock({ unadjustedMovement: true });
+      if (p?.catch) p.catch(() => { try { el.requestPointerLock(); } catch {} });
+    } catch {
+      try { el.requestPointerLock(); } catch {}
+    }
+  }
+
+  function releaseCapture() {
+    if (softCapture) { setSoftCapture(false); return; }
+    if (document.pointerLockElement) document.exitPointerLock();
+  }
+
+  // Mouse movement — pointer lock OR soft capture
   useEffect(() => {
     function onMove(e) {
-      if (!document.pointerLockElement) return;
-      const dx = e.movementX || 0, dy = e.movementY || 0;
+      let dx, dy;
+      if (document.pointerLockElement) {
+        dx = e.movementX || 0;
+        dy = e.movementY || 0;
+      } else if (softCapture) {
+        dx = e.clientX - lastPosRef.current.x;
+        dy = e.clientY - lastPosRef.current.y;
+        _warpToWindowCenter();
+      } else {
+        return;
+      }
       if (!dx && !dy) return;
       const now = Date.now();
       if (now - lastMoveRef.current < 12) return;
@@ -825,13 +870,13 @@ function ActiveControlOverlay({ deviceName, onStop }) {
     }
     document.addEventListener("mousemove", onMove);
     return () => document.removeEventListener("mousemove", onMove);
-  }, []);
+  }, [softCapture]);
 
   // Keyboard forwarding
   useEffect(() => {
     function onKeyDown(e) {
       if (e.key === "Escape") {
-        if (document.pointerLockElement) { document.exitPointerLock(); return; }
+        if (softCapture || document.pointerLockElement) { releaseCapture(); return; }
         onStop(); return;
       }
       if (["Control", "Alt", "Shift", "Meta"].includes(e.key)) return;
@@ -842,32 +887,17 @@ function ActiveControlOverlay({ deviceName, onStop }) {
     }
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, []);
+  }, [softCapture]);
 
-  function requestLock() {
-    const el = overlayRef.current;
-    if (!el) return;
-    // requestPointerLock returns a Promise in modern WebKit — catch rejections.
-    // Try with unadjustedMovement first (better raw-delta tracking on macOS).
-    try {
-      const p = el.requestPointerLock({ unadjustedMovement: true });
-      if (p && typeof p.catch === "function") {
-        p.catch(() => {
-          try { el.requestPointerLock(); } catch {}
-        });
-      }
-    } catch {
-      try { el.requestPointerLock(); } catch {}
-    }
-  }
+  const captured = pointerLocked || softCapture;
 
   function onPointerDown(e) {
-    if (!document.pointerLockElement) { requestLock(); return; }
+    if (!captured) { requestLock(); return; }
     const btn = e.button === 2 ? "right" : e.button === 1 ? "middle" : "left";
     sendEvent({ type: "mouse_button", button: btn, down: true });
   }
   function onPointerUp(e) {
-    if (!document.pointerLockElement) return;
+    if (!captured) return;
     const btn = e.button === 2 ? "right" : e.button === 1 ? "middle" : "left";
     sendEvent({ type: "mouse_button", button: btn, down: false });
   }
@@ -881,7 +911,7 @@ function ActiveControlOverlay({ deviceName, onStop }) {
       style={{
         position: "fixed", inset: 0, zIndex: 500, outline: "none",
         background: "rgba(8,7,26,0.92)", display: "flex", flexDirection: "column",
-        cursor: pointerLocked ? "none" : "default",
+        cursor: captured ? "none" : "default",
       }}
       onPointerDown={onPointerDown} onPointerUp={onPointerUp}
       onWheel={onWheel} onContextMenu={e => e.preventDefault()}>
@@ -896,18 +926,17 @@ function ActiveControlOverlay({ deviceName, onStop }) {
         <div style={{ flex: 1 }}>
           <span style={{ fontWeight: 600, fontSize: 14 }}>Controlling {deviceName}</span>
           <span style={{ marginLeft: 12, fontSize: 12, color: "var(--text-dim)" }}>
-            {pointerLocked ? "Cursor captured · Esc to release" : "Click anywhere to capture cursor"}
+            {captured ? "Cursor captured · Esc to release" : "Click anywhere to capture cursor"}
           </span>
         </div>
-        <button type="button" className="btn-ghost" style={{ fontSize: 12 }}
-          onClick={() => pointerLocked ? document.exitPointerLock() : requestLock()}>
-          {pointerLocked ? "Release Cursor" : "Capture Cursor"}
+        <button type="button" className="btn-ghost" style={{ fontSize: 12 }} onClick={captured ? releaseCapture : requestLock}>
+          {captured ? "Release Cursor" : "Capture Cursor"}
         </button>
         <button type="button" className="btn-danger" onClick={onStop}>Disconnect</button>
       </div>
 
       {/* Centre prompt when cursor is not yet captured */}
-      {!pointerLocked && (
+      {!captured && (
         <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
           <div style={{ textAlign: "center", color: "var(--text-dim)", maxWidth: 360 }}>
             <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 8, color: "var(--text)" }}>
@@ -1148,6 +1177,14 @@ function OverviewSection() {
   const [dwellProgress, setDwellProgress] = useState(0);
   const connectingRef = useRef(false);
   const bridgeWarmRef = useRef(false);
+
+  // Fall back to right→left when tiles aren't snapped in the canvas
+  const effectiveEdgeRel = useMemo(() =>
+    edgeRel || (edgeHandoff && paired.length > 0 ? {
+      localEdge: "right", returnEdge: "left",
+      remoteId: paired[0].id, remoteName: paired[0].name,
+    } : null),
+  [edgeRel, edgeHandoff, paired]);
   const [overviewMsg, setOverviewMsg] = useState("");
   const overviewMsgTimer = useRef(null);
 
@@ -1215,9 +1252,9 @@ function OverviewSection() {
     }
   }
 
-  // Arm local edge detector when handoff is on, screens are adjacent, and not currently controlling
+  // Arm local edge detector when handoff is on and not currently controlling
   useEffect(() => {
-    if (!edgeHandoff || !edgeRel || activeControl) {
+    if (!edgeHandoff || !effectiveEdgeRel || activeControl) {
       SS.api("/api/handoff/disarm", { method: "POST" }).catch(() => {});
       if (!edgeHandoff && bridgeWarmRef.current) {
         bridgeWarmRef.current = false;
@@ -1230,13 +1267,13 @@ function OverviewSection() {
     SS.api("/api/handoff/arm", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ edge: edgeRel.localEdge, dwell_ms: 0 }),
+      body: JSON.stringify({ edge: effectiveEdgeRel.localEdge, dwell_ms: 0 }),
     }).catch(() => {});
-  }, [edgeHandoff, edgeRel?.localEdge, !!activeControl]);
+  }, [edgeHandoff, effectiveEdgeRel?.localEdge, !!activeControl]);
 
-  // Poll local detector — trigger connect when cursor dwells at the armed edge
+  // Poll local detector — trigger connect when cursor reaches the armed edge
   useEffect(() => {
-    if (!edgeHandoff || !edgeRel || activeControl) return;
+    if (!edgeHandoff || !effectiveEdgeRel || activeControl) return;
     let alive = true;
     const poll = async () => {
       try {
@@ -1244,15 +1281,15 @@ function OverviewSection() {
         if (!alive) return;
         setDetectorState(d.state || "idle");
         setDwellProgress(d.dwell_progress ?? 0);
-        if (d.state === "pending") handleConnect(edgeRel.remoteId, edgeRel.returnEdge);
+        if (d.state === "pending") handleConnect(effectiveEdgeRel.remoteId, effectiveEdgeRel.returnEdge);
       } catch {}
     };
     poll();
     const t = setInterval(poll, 16);
     return () => { alive = false; clearInterval(t); };
-  }, [edgeHandoff, edgeRel?.localEdge, edgeRel?.remoteId, !!activeControl]);
+  }, [edgeHandoff, effectiveEdgeRel?.localEdge, effectiveEdgeRel?.remoteId, !!activeControl]);
 
-  // Poll remote return detector — auto-disconnect when cursor dwells at the return edge
+  // Poll remote return detector — auto-disconnect when cursor reaches the return edge
   useEffect(() => {
     if (!edgeHandoff || !activeControl) return;
     let alive = true;
@@ -1260,7 +1297,7 @@ function OverviewSection() {
       try {
         const d = await SS.api("/api/handoff/remote/return-state");
         if (!alive) return;
-        if (d.state === "pending") stopControl(true); // keep bridge warm for next edge trigger
+        if (d.state === "pending") stopControl(true);
       } catch {}
     }, 200);
     return () => { alive = false; clearInterval(t); };
@@ -1268,10 +1305,10 @@ function OverviewSection() {
 
   // Pre-connect bridge in background so the edge trigger is near-instant
   useEffect(() => {
-    if (!edgeHandoff || !edgeRel || activeControl) return;
+    if (!edgeHandoff || !effectiveEdgeRel || activeControl) return;
     let alive = true;
     async function warmBridge() {
-      const device_id = edgeRel.remoteId;
+      const device_id = effectiveEdgeRel.remoteId;
       let cred = null;
       try { const raw = localStorage.getItem(`slickshiftTrusted_${device_id}`); if (raw) cred = JSON.parse(raw); } catch {}
       if (!cred?.shared_secret) return;
@@ -1298,7 +1335,7 @@ function OverviewSection() {
     }
     warmBridge();
     return () => { alive = false; };
-  }, [edgeHandoff, edgeRel?.remoteId, !!activeControl]);
+  }, [edgeHandoff, effectiveEdgeRel?.remoteId, !!activeControl]);
 
   return (
     <>
@@ -1352,6 +1389,7 @@ function OverviewSection() {
         <OverviewEdges paired={paired} thisDevice={thisDevice}
           onEdgeChange={setEdgeRel}
           edgeHandoff={edgeHandoff}
+          effectiveEdgeRel={effectiveEdgeRel}
           onToggleEdgeHandoff={() => setEdgeHandoff(v => !v)}
           detectorState={detectorState}
           dwellProgress={dwellProgress}
@@ -1403,7 +1441,7 @@ function computeEdgeRel(tiles) {
 
 // ── Overview edge canvas ─────────────────────────────────────────────────────
 
-function OverviewEdges({ paired, thisDevice, onEdgeChange, edgeHandoff, onToggleEdgeHandoff, detectorState, dwellProgress, activeControl }) {
+function OverviewEdges({ paired, thisDevice, onEdgeChange, edgeHandoff, effectiveEdgeRel, onToggleEdgeHandoff, detectorState, dwellProgress, activeControl }) {
   const W = 360, H = 220;
   const [tiles, setTiles] = useState([]);
   const [drag, setDrag] = useState(null);
@@ -1466,13 +1504,13 @@ function OverviewEdges({ paired, thisDevice, onEdgeChange, edgeHandoff, onToggle
         <div>
           <h2>Screen Edges</h2>
           <span className="h-sub">
-            {edgeHandoff && edgeRel
-              ? `${edgeRel.localEdge} edge → ${edgeRel.remoteName}`
-              : "Drag to arrange · snap edges to enable handoff"}
+            {edgeHandoff && effectiveEdgeRel
+              ? `${effectiveEdgeRel.localEdge} edge → ${effectiveEdgeRel.remoteName}`
+              : "Drag to arrange · or default right edge is used"}
           </span>
         </div>
         <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
-          {edgeHandoff && edgeRel && !activeControl && detectorState === "armed" && dwellProgress > 0 && (
+          {edgeHandoff && effectiveEdgeRel && !activeControl && detectorState === "armed" && dwellProgress > 0 && (
             <div style={{ width: 48, height: 4, borderRadius: 2, background: "var(--border-strong)", overflow: "hidden" }}>
               <div style={{ width: `${dwellProgress * 100}%`, height: "100%", background: "var(--accent)", transition: "width 0.1s linear" }} />
             </div>
@@ -1480,10 +1518,10 @@ function OverviewEdges({ paired, thisDevice, onEdgeChange, edgeHandoff, onToggle
           {edgeHandoff && activeControl && (
             <span style={{ fontSize: 11, color: "var(--ok)" }}>Active</span>
           )}
-          {edgeHandoff && !edgeRel && (
-            <span style={{ fontSize: 11, color: "var(--warn)" }}>Snap screens first</span>
+          {edgeHandoff && !effectiveEdgeRel && (
+            <span style={{ fontSize: 11, color: "var(--warn)" }}>No paired device</span>
           )}
-          <span style={{ fontSize: 12, color: edgeHandoff ? (edgeRel ? "var(--ok)" : "var(--warn)") : "var(--muted)" }}>
+          <span style={{ fontSize: 12, color: edgeHandoff ? (effectiveEdgeRel ? "var(--ok)" : "var(--warn)") : "var(--muted)" }}>
             {edgeHandoff ? "On" : "Off"}
           </span>
           <div className={"toggle " + (edgeHandoff ? "on" : "")} onClick={onToggleEdgeHandoff} />

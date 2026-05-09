@@ -46,6 +46,19 @@ def _wait_for_server(timeout: float = 15.0) -> bool:
     return False
 
 
+class _AppAPI:
+    """Python functions exposed to the webview JavaScript context as window.pywebview.api.*"""
+
+    def cursor_warp_to_physical(self, x: int, y: int) -> None:
+        """Move the OS cursor to physical screen coordinates (x, y).
+        Called by the soft-capture mouse-tracking fallback in the overlay."""
+        try:
+            import pyautogui
+            pyautogui.moveTo(int(x), int(y), duration=0)
+        except Exception:
+            pass
+
+
 def main() -> None:
     if sys.version_info < (3, 9):
         raise SystemExit("Screen Slickshift requires Python 3.9 or newer.")
@@ -69,6 +82,7 @@ def main() -> None:
         height=800,
         min_size=(900, 620),
         resizable=True,
+        js_api=_AppAPI(),
     )
     webview.start()
 
