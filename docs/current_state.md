@@ -353,25 +353,44 @@ Key design decisions captured in UI_HANDOFFNEW.md:
 - Browser MVP (`/`, `/handoff`, `/file-transfer`) continues as the Steam Deck control surface — treated as a separate skin, not a parallel implementation.
 - `docs/DESIGN.md` covers the existing browser MVP design language (green accent, system fonts, vanilla JS). For new native app work, follow UI_HANDOFFNEW.md instead.
 
-## 8. Current Status and Next Steps
+## 8. Session Summary — 2026-05-09
 
-Phase 9 edge handoff is complete. All originally-listed gaps are resolved:
+This session built the live React UI (`static/app-ui/`) from the earlier prototype, wired it to the real APIs, and added several fixes and the edge-handoff feature.
 
-| Item | Status |
-|---|---|
-| OS-level edge detection (60Hz, dwell timer) | ✅ Done |
-| Active remote overlay with pointer lock | ✅ Done |
-| Automatic return edge detection | ✅ Done |
-| Layout persistence (localStorage) | ✅ Done |
-| mDNS device discovery and PIN pairing | ✅ Done |
-| Session-based remote connection (no owner token needed) | ✅ Done |
-| Multi-monitor edge detection | ✅ Done |
-| Mac-Mac / Mac-Windows / Windows-Mac physically verified | ✅ Done |
+### What was built / changed
 
-Remaining gaps before a polished product:
+| Item | File(s) | Notes |
+|---|---|---|
+| New React UI live at `/` | `static/app-ui/` | Old green UI preserved at `/classic` |
+| Discovery toggles split | `app/discovery.py`, `app/main.py`, `devices.jsx` | Search (browse) and Allow connections (advertise) are now independent; new endpoints: `POST /api/discovery/browse/start`, `browse/stop`, `advertise/stop` |
+| Refresh button removed | `devices.jsx` | Pointless — list already auto-polls |
+| Saved-device reconnect fix | `devices.jsx` | `submitPin` now uses `remember_device:true` and stores `{shared_secret, host, port}` in `localStorage`; `handleConnect` uses stored host/port as fallback when device not visible in mDNS |
+| "This Device" removed from Overview trusted list | `devices.jsx` | Was appearing as a spurious row in `OverviewSection` |
+| Edge handoff wired in Overview | `devices.jsx` | Drag tiles to snap → toggle "Edge handoff" → cursor dwell at edge auto-connects; return edge on Screen B auto-disconnects |
+| `OverviewEdges` shows all paired devices | `devices.jsx` | Previously only showed `status === "connected"` devices |
 
-1. **TLS** — all traffic is plain HTTP/WS. User has not decided whether this is in scope.
-2. **Native packaging** — currently requires Python and a terminal. Phase 10, explicitly deferred.
-3. ~~Auto-reconnect on session drop~~ — **done**. When a session-based bridge event fails, `sendRemoteEvent` now calls `attemptAutoReconnect()` before giving up. If `slickshiftTrusted_<device_id>` is in localStorage, it silently calls `/api/discovery/remote/reconnect` (trusted-reconnect) then `/api/handoff/remote/start-session` to re-establish the bridge. In `active_remote` mode it also re-arms the return detector so the handoff resumes. Falls through to the existing disconnect behavior if no credential is stored or reconnect fails.
-4. **Windows discovery** — mDNS (`zeroconf`) is cross-platform and pure Python — it does not require Apple Bonjour. Not yet verified on Windows. If devices don't appear, check that Windows Firewall allows inbound UDP on port 5353 (`netsh advfirewall firewall add rule name="Slickshift mDNS" protocol=UDP dir=in localport=5353 action=allow`).
-5. **Multi-monitor** — primary screen detection works on macOS via `NSScreen` and Windows via `EnumDisplayMonitors`. Not tested on multi-monitor hardware yet.
+### Needs testing (Windows + Mac)
+
+1. **Split toggles** — Turn on "Search" without "Allow connections": this machine should see others but not be visible. Turn on "Allow connections" without "Search": this machine should be visible but the list should stay empty. Verify the toggle states persist through the poll cycle.
+2. **Saved-device reconnect** — Pair two devices. Close the app on one and reopen. On the other, click Connect without the first machine being in the mDNS discovered list — it should reconnect using stored host/port.
+3. **Edge handoff** — In Overview, drag the remote tile to snap its left edge against the local tile's right edge. Toggle "Edge handoff" on. Move cursor to the right edge of the local screen and hold — expect control to transfer automatically. On the remote, push cursor back to its left edge and hold — expect return.
+4. **PIN pairing end-to-end** — Fresh pair on Windows: Screen A clicks Connect on a discovered device, Screen B shows the code, Screen A enters it. Verify both sides end up in each other's trusted list and active control starts immediately.
+5. **Allow connections toggle** — Turning "Allow connections" off while "Search" is on should keep the discovered list populated (browsing continues) but remove this machine from other devices' lists.
+
+### Remaining gaps before packaging
+
+1. **Settings persistence** — Mouse speed, scroll speed, natural scroll, keyboard toggle, pointer mode are all UI-local `useState`. Closing the Settings tab loses them. Fix: write a JSON blob to `localStorage` on change and read it on mount. No backend work needed.
+2. **Logs section** — Currently shows a placeholder pointing to `/classic`. The backend writes rotating logs to `LOG_DIR/server.log`. A simple `GET /api/logs/tail` endpoint returning the last N lines would feed a live view. Or an SSE stream.
+3. **Clipboard sync** — Settings panel has toggles but nothing behind them. Backend has `GET/POST /api/clipboard` and session variants. Needs a polling or push loop to sync between devices.
+4. **Windows mDNS** — Not yet verified. If devices don't appear: `netsh advfirewall firewall add rule name="Slickshift mDNS" protocol=UDP dir=in localport=5353 action=allow`.
+5. **Multi-monitor** — Edge detector has per-monitor support but not tested on multi-monitor hardware.
+
+## 9. What Is Next (Path to Executables + Chrome Extension)
+
+Priority order for completing the app before packaging:
+
+1. **Settings persistence** (1–2h, frontend only) — localStorage JSON blob; no backend needed.
+2. **Clipboard sync wiring** (2–3h) — Poll remote clipboard on a configurable interval; sync both directions.
+3. **Logs tab live feed** (1–2h) — Add `GET /api/logs/tail?n=200` endpoint; auto-scroll log view in the UI.
+4. **Chrome extension — browser handoff window** (separate effort, see Phase 11 in ROADMAP.md) — The extension sits in Chrome's sidebar or a popup and acts as a lightweight control surface: connects to the local Slickshift server via `localhost:8765`, shows discovered devices, and lets the user switch which machine gets keyboard/mouse from the browser. Key capabilities needed: `chrome.sidePanel` or popup UI, WebSocket to local server, pointer-lock-free mouse event forwarding via the existing `/api/handoff/remote/event` HTTP endpoint, keyboard forwarding.
+5. **Native executable packaging** (Phase 10) — PyInstaller single-file bundle is the fastest path: `pyinstaller --onefile --add-data "static:static" run.py`. Target: double-click to start, browser opens automatically, no terminal visible. Mac `.app` and Windows `.exe`. Tauri or Electron deferred unless the Python bundle proves too large or slow.

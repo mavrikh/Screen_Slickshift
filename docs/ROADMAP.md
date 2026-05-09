@@ -314,3 +314,34 @@ Packaging options to evaluate when ready:
 Done when:
 - The protocol and first cross-device prototype are stable enough that packaging tradeoffs are meaningful.
 - A packaged build can start without a terminal on at least one platform.
+
+Fastest path: PyInstaller single-file bundle.
+```
+pyinstaller --onefile --add-data "static:static" --add-data "config:config" run.py
+```
+Target: double-click to launch, browser opens to `http://localhost:8765` automatically, no terminal window visible. Mac `.app` + Windows `.exe`. Tauri/Electron deferred unless Python bundle is too large.
+
+## Phase 11: Chrome Extension — Browser Handoff Window
+
+Goal: a Chrome sidebar / popup that connects to the local Slickshift server and lets the user switch device control without leaving the browser.
+
+What the extension does:
+- Connects to `http://localhost:8765` via the owner token (stored in `chrome.storage.local`).
+- Shows discovered devices (polls `GET /api/discovery/browse`).
+- "Control this device" button: starts a session with the selected device and forwards mouse + keyboard events via `POST /api/handoff/remote/event` (HTTP, no pointer lock required).
+- Shows the active control state and a Disconnect button.
+- Optionally: syncs clipboard between the browser and the controlled device.
+
+Chrome APIs needed:
+- `chrome.sidePanel` (Chrome 114+) for persistent sidebar — or Manifest V3 popup as fallback.
+- `chrome.storage.local` for token and settings.
+- `chrome.tabs` / `windows.onFocusChanged` to detect tab switches (future: auto-switch on tab focus).
+
+Architecture:
+- Extension communicates with the local server over plain HTTP (localhost only — no CORS concerns since extension origin is not a web origin for localhost fetch).
+- No WebSocket needed from the extension itself; mouse/keyboard events go via the existing `POST /api/handoff/remote/event` endpoint.
+- The existing `ActiveControlOverlay` component in the main UI handles pointer lock; the extension is an alternative non-pointer-lock control path for browser use.
+
+Done when:
+- The extension can be loaded unpacked, connect to a running server, discover a device, and forward mouse movement + keyboard events without requiring pointer lock.
+- The extension does not require publishing to the Chrome Web Store to be useful (sideload via developer mode is acceptable for initial distribution).
