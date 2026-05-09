@@ -684,6 +684,150 @@ function PairModal({ open, target, onClose, onComplete, discoveredDevices = [] }
   );
 }
 
+// ── Key map (browser key name → protocol/pyautogui name) ────────────────────
+const REMOTE_KEY_MAP = {
+  Enter: "enter", Tab: "tab", Backspace: "backspace", Delete: "delete",
+  ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right",
+  Home: "home", End: "end", PageUp: "pageup", PageDown: "pagedown",
+  Insert: "insert", CapsLock: "capslock", NumLock: "numlock", ScrollLock: "scrolllock",
+  F1: "f1", F2: "f2", F3: "f3", F4: "f4", F5: "f5", F6: "f6",
+  F7: "f7", F8: "f8", F9: "f9", F10: "f10", F11: "f11", F12: "f12",
+};
+
+// ── Active control overlay ───────────────────────────────────────────────────
+// Full-screen overlay that forwards mouse and keyboard to the remote machine.
+// Pointer lock is used for relative mouse movement; without it, clicking the
+// overlay requests lock instead of forwarding.
+
+function ActiveControlOverlay({ deviceName, onStop }) {
+  const overlayRef = useRef(null);
+  const [pointerLocked, setPointerLocked] = useState(false);
+  const lastMoveRef = useRef(0);
+
+  useEffect(() => {
+    overlayRef.current?.focus();
+    function onChange() {
+      setPointerLocked(document.pointerLockElement === overlayRef.current);
+    }
+    document.addEventListener("pointerlockchange", onChange);
+    document.addEventListener("pointerlockerror", onChange);
+    return () => {
+      document.removeEventListener("pointerlockchange", onChange);
+      document.removeEventListener("pointerlockerror", onChange);
+      if (document.pointerLockElement) document.exitPointerLock();
+    };
+  }, []);
+
+  async function sendEvent(msg) {
+    try {
+      await SS.api("/api/handoff/remote/event", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(msg),
+      });
+    } catch { onStop(); }
+  }
+
+  // Mouse movement via pointer lock
+  useEffect(() => {
+    function onMove(e) {
+      if (!document.pointerLockElement) return;
+      const dx = e.movementX || 0, dy = e.movementY || 0;
+      if (!dx && !dy) return;
+      const now = Date.now();
+      if (now - lastMoveRef.current < 12) return;
+      lastMoveRef.current = now;
+      sendEvent({ type: "mouse_move", dx, dy });
+    }
+    document.addEventListener("mousemove", onMove);
+    return () => document.removeEventListener("mousemove", onMove);
+  }, []);
+
+  // Keyboard forwarding
+  useEffect(() => {
+    function onKeyDown(e) {
+      if (e.key === "Escape") {
+        if (document.pointerLockElement) { document.exitPointerLock(); return; }
+        onStop(); return;
+      }
+      if (["Control", "Alt", "Shift", "Meta"].includes(e.key)) return;
+      const key = REMOTE_KEY_MAP[e.key] ?? (e.key.length === 1 ? e.key : null);
+      if (!key) return;
+      e.preventDefault();
+      sendEvent({ type: "keyboard", key, ctrl: e.ctrlKey, alt: e.altKey, shift: e.shiftKey, meta: e.metaKey });
+    }
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  function requestLock() { overlayRef.current?.requestPointerLock?.(); }
+
+  function onPointerDown(e) {
+    if (!document.pointerLockElement) { requestLock(); return; }
+    const btn = e.button === 2 ? "right" : e.button === 1 ? "middle" : "left";
+    sendEvent({ type: "mouse_button", button: btn, down: true });
+  }
+  function onPointerUp(e) {
+    if (!document.pointerLockElement) return;
+    const btn = e.button === 2 ? "right" : e.button === 1 ? "middle" : "left";
+    sendEvent({ type: "mouse_button", button: btn, down: false });
+  }
+  function onWheel(e) {
+    e.preventDefault();
+    sendEvent({ type: "scroll", amount: e.deltaY < 0 ? 3 : -3 });
+  }
+
+  return (
+    <div ref={overlayRef} tabIndex={-1}
+      style={{
+        position: "fixed", inset: 0, zIndex: 500, outline: "none",
+        background: "rgba(8,7,26,0.92)", display: "flex", flexDirection: "column",
+        cursor: pointerLocked ? "none" : "default",
+      }}
+      onPointerDown={onPointerDown} onPointerUp={onPointerUp}
+      onWheel={onWheel} onContextMenu={e => e.preventDefault()}>
+
+      {/* Top bar */}
+      <div style={{
+        display: "flex", alignItems: "center", gap: 12, padding: "14px 20px",
+        background: "rgba(21,19,46,0.98)", borderBottom: "1px solid var(--border)",
+        userSelect: "none",
+      }}>
+        <span style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--ok)", flexShrink: 0 }} />
+        <div style={{ flex: 1 }}>
+          <span style={{ fontWeight: 600, fontSize: 14 }}>Controlling {deviceName}</span>
+          <span style={{ marginLeft: 12, fontSize: 12, color: "var(--text-dim)" }}>
+            {pointerLocked ? "Cursor captured · Esc to release" : "Click anywhere to capture cursor"}
+          </span>
+        </div>
+        <button type="button" className="btn-ghost" style={{ fontSize: 12 }}
+          onClick={() => pointerLocked ? document.exitPointerLock() : requestLock()}>
+          {pointerLocked ? "Release Cursor" : "Capture Cursor"}
+        </button>
+        <button type="button" className="btn-danger" onClick={onStop}>Disconnect</button>
+      </div>
+
+      {/* Centre prompt when cursor is not yet captured */}
+      {!pointerLocked && (
+        <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <div style={{ textAlign: "center", color: "var(--text-dim)", maxWidth: 360 }}>
+            <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 8, color: "var(--text)" }}>
+              Controlling {deviceName}
+            </div>
+            <div style={{ fontSize: 13, marginBottom: 20 }}>
+              Click anywhere to capture your cursor and begin. Mouse and keyboard will be forwarded to {deviceName}.
+            </div>
+            <button type="button" className="btn-primary" onClick={requestLock}>Capture Cursor</button>
+            <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 12 }}>
+              Esc releases cursor · Disconnect stops the session
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Devices section ──────────────────────────────────────────────────────────
 
 function DevicesSection() {
@@ -693,6 +837,7 @@ function DevicesSection() {
   const [pairTarget, setPairTarget] = useState(null);
   const [reconnectMsg, setReconnectMsg] = useState("");
   const [toast, setToast] = useState("");
+  const [activeControl, setActiveControl] = useState(null); // {deviceName}
   const toastTimer = useRef(null);
 
   function showToast(msg) {
@@ -702,7 +847,7 @@ function DevicesSection() {
   }
 
   async function completePair(connInfo, _perms, pairData) {
-    showToast(`Paired with ${connInfo?.name || connInfo?.host || "device"}`);
+    showToast(`Saved ${connInfo?.name || connInfo?.host || "device"}`);
     await load();
     await discoveryRefresh();
 
@@ -757,12 +902,18 @@ function DevicesSection() {
           });
         }
       }
-      // Warp the remote cursor to the centre of its screen.
+      // Warp the remote cursor to the centre of its screen, then enter active control.
       await SS.api("/api/handoff/remote/warp-cursor", { method: "POST" });
-      setReconnectMsg(`Connected — cursor placed at centre of ${name}'s screen.`);
+      setActiveControl({ deviceName: name });
     } catch (e) {
       setReconnectMsg(`Connect failed: ${e.message}`);
     }
+  }
+
+  async function stopControl() {
+    setActiveControl(null);
+    try { await SS.api("/api/handoff/remote/stop", { method: "POST" }); } catch {}
+    showToast("Disconnected.");
   }
 
   return (
@@ -859,6 +1010,7 @@ function DevicesSection() {
       <PairModal open={pairOpen} target={pairTarget} discoveredDevices={discovered}
         onClose={() => setPairOpen(false)} onComplete={completePair} />
       <PendingPairDisplay />
+      {activeControl && <ActiveControlOverlay deviceName={activeControl.deviceName} onStop={stopControl} />}
 
       {toast && (
         <div style={{
