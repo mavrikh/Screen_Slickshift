@@ -39,6 +39,10 @@ const handoffState = {
   realDims: {},
   remoteConnected: false,
   remoteTargetLabel: "",
+  remoteDeviceId: null,
+  remoteDeviceHost: null,
+  remoteDevicePort: null,
+  remoteDeviceName: null,
   remoteDragging: false,
   activeLayerDragging: false,
   pointerLocked: false,
@@ -1164,11 +1168,58 @@ async function stopRemoteControl(options = {}) {
   }
   handoffState.remoteConnected = false;
   handoffState.remoteTargetLabel = "";
+  handoffState.remoteDeviceId = null;
+  handoffState.remoteDeviceHost = null;
+  handoffState.remoteDevicePort = null;
+  handoffState.remoteDeviceName = null;
   handoffState.remoteDragging = false;
   handoffState.activeLayerDragging = false;
   handoffState.pointerLocked = false;
   if (!options.quiet) setNotice("Remote mouse disconnected.");
   renderState();
+}
+
+let _autoReconnectInProgress = false;
+
+async function attemptAutoReconnect() {
+  if (_autoReconnectInProgress) return false;
+  if (!handoffState.remoteDeviceId || !handoffState.remoteDeviceHost) return false;
+
+  const raw = localStorage.getItem(`slickshiftTrusted_${handoffState.remoteDeviceId}`);
+  if (!raw) return false;
+  let cred;
+  try { cred = JSON.parse(raw); } catch { return false; }
+  if (!cred.shared_secret) return false;
+
+  _autoReconnectInProgress = true;
+  const wasActive = handoffState.mode === "active_remote";
+  handoffState.remoteConnected = false;
+  setNotice("Session expired — reconnecting…");
+  renderState();
+
+  const deviceId = handoffState.remoteDeviceId;
+  const host = handoffState.remoteDeviceHost;
+  const port = handoffState.remoteDevicePort;
+  const name = handoffState.remoteDeviceName;
+
+  try {
+    const data = await api("/api/discovery/remote/reconnect", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ host, port, shared_secret: cred.shared_secret }),
+    });
+    await startSessionConnection(host, port, data.session.session_id, data.session_token, name, deviceId);
+    if (wasActive && handoffState.remoteConnected) {
+      handoffState.mode = "active_remote";
+      renderState();
+      await armReturn();
+    }
+    _autoReconnectInProgress = false;
+    return true;
+  } catch {
+    _autoReconnectInProgress = false;
+    return false;
+  }
 }
 
 async function sendRemoteEvent(message) {
@@ -1180,6 +1231,8 @@ async function sendRemoteEvent(message) {
       body: JSON.stringify(message),
     });
   } catch (error) {
+    const reconnected = await attemptAutoReconnect();
+    if (reconnected) return;
     const errorMessage = error.message;
     if (handoffState.mode === "active_remote") {
       await stopHandoff();
@@ -1626,6 +1679,7 @@ async function submitPair() {
       data.session.session_id,
       data.session_token,
       ps.target.name,
+      ps.target.device_id,
     );
   } catch (error) {
     ps.step = "waiting_pin";
@@ -1691,6 +1745,7 @@ async function reconnectTrustedDevice(device) {
       data.session.session_id,
       data.session_token,
       device.name,
+      device.device_id,
     );
   } catch (error) {
     setNotice(`Reconnect failed: ${error.message}`);
@@ -1701,7 +1756,7 @@ async function reconnectTrustedDevice(device) {
 // Session-based connection (post-pairing / post-reconnect)
 // ---------------------------------------------------------------------------
 
-async function startSessionConnection(host, port, sessionId, sessionToken, deviceName) {
+async function startSessionConnection(host, port, sessionId, sessionToken, deviceName, deviceId = null) {
   try {
     await api("/api/handoff/remote/start-session", {
       method: "POST",
@@ -1710,6 +1765,10 @@ async function startSessionConnection(host, port, sessionId, sessionToken, devic
     });
     handoffState.remoteConnected = true;
     handoffState.remoteTargetLabel = `${deviceName} (${host})`;
+    handoffState.remoteDeviceId = deviceId;
+    handoffState.remoteDeviceHost = host;
+    handoffState.remoteDevicePort = port;
+    handoffState.remoteDeviceName = deviceName;
     handoffState.screens = handoffState.screens.map((s) => {
       if (s.device_id === "target" && s.primary) return { ...s, name: deviceName };
       return s;
@@ -1722,6 +1781,10 @@ async function startSessionConnection(host, port, sessionId, sessionToken, devic
   } catch (error) {
     handoffState.remoteConnected = false;
     handoffState.remoteTargetLabel = "";
+    handoffState.remoteDeviceId = null;
+    handoffState.remoteDeviceHost = null;
+    handoffState.remoteDevicePort = null;
+    handoffState.remoteDeviceName = null;
     setNotice(`Connection failed: ${error.message}`);
     renderState();
   }

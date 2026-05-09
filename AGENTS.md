@@ -34,12 +34,14 @@ Screen Slickshift is a local-only LAN input sharing project. The current working
 - `app/pairing.py`: Pairing codes, trusted devices, session credentials, permissions.
 - `app/device_identity.py`: Local random device identity storage.
 - `app/state.py`: In-memory emergency lockout state.
-- `static/`: Browser UI assets.
+- `static/`: Browser UI assets (current working browser MVP).
 - `agents/`: Experimental macOS receiver, sender test tool, and manual sender prototype.
 - `tests/`: Backend tests.
 - `docs/current_state.md`: Current repository snapshot.
 - `docs/ROADMAP.md`: Grounded roadmap.
 - `docs/HANDOFF.md`: Short continuity notes for switching between Codex, local LLMs, or terminal workflows.
+- `docs/UI_HANDOFFNEW.md`: **Baseline UI design spec for the future native desktop app.** This is the forward-looking design reference. All new native-app UI work should follow this document.
+- `docs/UIFILES/`: Reference prototype files for the native UI — `Screen Slickshift Settings.html` (single-file React prototype), `styles.css`, and JSX component sketches (`app.jsx`, `devices.jsx`, `icons.jsx`, `other-sections.jsx`, `tweaks-panel.jsx`).
 
 ## Current Working Features
 
@@ -73,7 +75,8 @@ Screen Slickshift is a local-only LAN input sharing project. The current working
 - `docs/HANDOFF.md`
 - `docs/PROTOCOL.md`
 - `docs/SECURITY.md`
-- `docs/DESIGN.md`
+- `docs/DESIGN.md` (browser MVP design reference — existing UI)
+- `docs/UI_HANDOFFNEW.md` (native app design spec — forward-looking baseline)
 - `docs/AGENTS.md`
 
 When updating docs, distinguish clearly between implemented behavior, tested backend scaffolding, and future intent.

@@ -19,6 +19,15 @@ const state = {
   transfers: [],
 };
 
+const KEY_MAP = {
+  Enter: "enter", Tab: "tab", Backspace: "backspace", Delete: "delete",
+  ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right",
+  Home: "home", End: "end", PageUp: "pageup", PageDown: "pagedown",
+  Insert: "insert", CapsLock: "capslock", NumLock: "numlock", ScrollLock: "scrolllock",
+  F1: "f1", F2: "f2", F3: "f3", F4: "f4", F5: "f5", F6: "f6",
+  F7: "f7", F8: "f8", F9: "f9", F10: "f10", F11: "f11", F12: "f12",
+};
+
 const tokenInput = document.getElementById("tokenInput");
 const saveTokenButton = document.getElementById("saveTokenButton");
 const connectionStatus = document.getElementById("connectionStatus");
@@ -412,6 +421,7 @@ function connectSocket() {
   state.socket.addEventListener("open", () => {
     sendSocket({ type: "auth", token: state.token });
     setStatus("Connected");
+    updatePointerLockUi();
     log("Touchpad connected.");
     startHeartbeat();
     clearTimeout(state.reconnectStableTimer);
@@ -426,6 +436,7 @@ function connectSocket() {
     clearTimeout(state.reconnectStableTimer);
     stopHeartbeat();
     setStatus("Disconnected");
+    updatePointerLockUi();
     if (!state.manualSocketClose && state.token) {
       if (state.reconnectAttempts >= 5) {
         log("Touchpad disconnected. Reconnect paused; press Save / Connect to try again.");
@@ -492,9 +503,12 @@ function updatePointerLockUi() {
   state.pointerLocked = document.pointerLockElement === touchpad;
   touchpad.classList.toggle("locked", state.pointerLocked);
   captureCursorButton.textContent = state.pointerLocked ? "Release Cursor" : "Capture Cursor";
+  const socketOpen = state.socket && state.socket.readyState === WebSocket.OPEN;
   touchpad.querySelector("span").textContent = state.pointerLocked
     ? "Cursor captured. Press Esc to release."
-    : "Drag to move mouse";
+    : socketOpen
+      ? "Drag to move mouse · keyboard forwarding active"
+      : "Drag to move mouse";
 }
 
 async function togglePointerLock() {
@@ -919,6 +933,18 @@ lockoutButton.addEventListener("click", async () => {
   } catch (error) {
     log(error.message);
   }
+});
+
+document.addEventListener("keydown", (event) => {
+  if (!state.socket || state.socket.readyState !== WebSocket.OPEN) return;
+  if (["Control", "Alt", "Shift", "Meta"].includes(event.key)) return;
+  if (event.key === "Escape") return;
+  const el = document.activeElement;
+  if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable)) return;
+  const key = KEY_MAP[event.key] ?? (event.key.length === 1 ? event.key : null);
+  if (!key) return;
+  event.preventDefault();
+  sendSocket({ type: "keyboard", key, ctrl: event.ctrlKey, alt: event.altKey, shift: event.shiftKey, meta: event.metaKey });
 });
 
 loadStatus().catch((error) => {

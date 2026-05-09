@@ -247,6 +247,7 @@ app.add_middleware(
 )
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+app.mount("/app-ui", StaticFiles(directory=STATIC_DIR / "app-ui"), name="app-ui")
 
 
 def verify_session_permission_or_403(
@@ -288,6 +289,11 @@ async def startup() -> None:
 
 @app.get("/")
 async def index() -> FileResponse:
+    return FileResponse(STATIC_DIR / "app-ui" / "index.html")
+
+
+@app.get("/classic")
+async def classic_page() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
 
 
@@ -299,6 +305,12 @@ async def file_transfer_page() -> FileResponse:
 @app.get("/handoff")
 async def handoff_page() -> FileResponse:
     return FileResponse(STATIC_DIR / "handoff.html")
+
+
+@app.get("/app")
+async def new_app_page() -> FileResponse:
+    return FileResponse(STATIC_DIR / "app-ui" / "index.html")
+
 
 
 @app.get("/api/status")

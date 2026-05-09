@@ -306,7 +306,7 @@ Edge handoff:
 - Mac-to-Windows, Windows-to-Mac, and Mac-to-Mac remote mouse have all been physically verified.
 - No global input capture code exists (cursor position reading does not require Accessibility permission on macOS).
 - Multi-monitor edge detection uses the primary screen only; multi-monitor support is deferred.
-- Keyboard capture remains deferred.
+- Keyboard forwarding is implemented on both control surfaces: the `/handoff` active_remote overlay and the `/` main page touchpad session. Keystrokes are sent as `{type: "keyboard", key, ctrl, alt, shift, meta}` events over the existing WebSocket. Escape and modifier-only keys are not forwarded. Global OS-level keyboard capture remains out of scope.
 
 ## 6. Incomplete Or Experimental Files
 
@@ -330,7 +330,30 @@ Unclear or incomplete:
 - The roadmap describes future native agents and edge handoff, but those are not implemented.
 - Cross-platform server startup exists through `run.py`, but desktop input behavior still depends on `pyautogui` support and OS permissions.
 
-## 7. Current Status and Next Steps
+## 7. Native App UI Design Artifacts
+
+The browser MVP (`static/`) is the current working product. A native desktop app UI has been designed as the forward-looking replacement. The design is not yet implemented in the main app.
+
+Design spec:
+- **`docs/UI_HANDOFFNEW.md`** — the baseline implementation brief for the native settings window. Covers layout, component hierarchy, palette (dark vaporwave — deep indigo + cyan/violet accent), typography, spacing tokens, interaction flows, accessibility, and a full React component file breakdown. This is the authoritative design reference for all future native UI work.
+
+Reference prototype files (all in `docs/UIFILES/`):
+- `Screen Slickshift Settings.html` — self-contained React+JSX prototype rendered in a browser. Single window, dark vaporwave palette. Use this to visually verify the design intent.
+- `styles.css` — complete CSS token set and component styles matching §11–12 of UI_HANDOFFNEW.md.
+- `app.jsx` — root app shell, sidebar, routing, lockout banner.
+- `devices.jsx` — Devices screen, DeviceRow, PermPill, PairModal state machine.
+- `icons.jsx` — shared SVG icon set.
+- `other-sections.jsx` — Overview, Settings, Security, and Logs screens.
+- `tweaks-panel.jsx` — accent palette swap and density toggle panel.
+
+Key design decisions captured in UI_HANDOFFNEW.md:
+- Single fixed-aspect window (~1180×760) with sidebar navigation — no tabs or breadcrumbs.
+- Emergency Stop always visible in the sidebar foot, reachable from any section.
+- Pair modal is a 5-step state machine: method → enter/show code → connecting → success.
+- Browser MVP (`/`, `/handoff`, `/file-transfer`) continues as the Steam Deck control surface — treated as a separate skin, not a parallel implementation.
+- `docs/DESIGN.md` covers the existing browser MVP design language (green accent, system fonts, vanilla JS). For new native app work, follow UI_HANDOFFNEW.md instead.
+
+## 8. Current Status and Next Steps
 
 Phase 9 edge handoff is complete. All originally-listed gaps are resolved:
 
@@ -349,6 +372,6 @@ Remaining gaps before a polished product:
 
 1. **TLS** — all traffic is plain HTTP/WS. User has not decided whether this is in scope.
 2. **Native packaging** — currently requires Python and a terminal. Phase 10, explicitly deferred.
-3. **Auto-reconnect on session drop** — if the session token expires during use, the bridge silently disconnects. A reconnect prompt using the stored shared secret would improve resilience.
+3. ~~Auto-reconnect on session drop~~ — **done**. When a session-based bridge event fails, `sendRemoteEvent` now calls `attemptAutoReconnect()` before giving up. If `slickshiftTrusted_<device_id>` is in localStorage, it silently calls `/api/discovery/remote/reconnect` (trusted-reconnect) then `/api/handoff/remote/start-session` to re-establish the bridge. In `active_remote` mode it also re-arms the return detector so the handoff resumes. Falls through to the existing disconnect behavior if no credential is stored or reconnect fails.
 4. **Windows discovery** — mDNS (`zeroconf`) is cross-platform and pure Python — it does not require Apple Bonjour. Not yet verified on Windows. If devices don't appear, check that Windows Firewall allows inbound UDP on port 5353 (`netsh advfirewall firewall add rule name="Slickshift mDNS" protocol=UDP dir=in localport=5353 action=allow`).
 5. **Multi-monitor** — primary screen detection works on macOS via `NSScreen` and Windows via `EnumDisplayMonitors`. Not tested on multi-monitor hardware yet.

@@ -292,16 +292,25 @@ Done:
 - `/handoff` UI reorganized into State / Remote / Discovery tabs. Discovery badge on pending pair request. Remote tab auto-activates after discovery connect. "Add Monitor" uses real monitor data.
 - Mac-Mac, Mac-Windows, Windows-Mac physically verified.
 
-## Phase 10: Packaging Decision
+## Phase 10: Native App UI and Packaging
 
-Goal: decide how this should become a regular app after the behavior is proven.
+Goal: replace the browser MVP with a native settings window once behavior is proven.
 
-Options to evaluate later:
+The UI design is already specified. The baseline is in `docs/UI_HANDOFFNEW.md`. A reference React/JSX + CSS prototype is in `docs/UIFILES/`. All native UI work should follow that document.
 
-- Keep Python and package it.
-- Tauri plus Rust/native helpers.
-- Electron plus native helpers.
+Design decisions already made:
+- Single fixed-aspect settings window (~1180×760, resizable).
+- Dark vaporwave palette: deep indigo base, cyan/violet accent gradient.
+- Sidebar navigation (Overview → Devices → Settings → Security → Logs).
+- Emergency Stop persistent in sidebar foot.
+- Pair modal 5-step state machine (method → enter/show → connecting → success).
+- Browser shell (`/`, `/handoff`, `/file-transfer`) survives as the Steam Deck control surface.
+
+Packaging options to evaluate when ready:
+- Keep Python and package it (e.g., PyInstaller or Nuitka).
+- Tauri plus Rust/native helpers — smallest binary, best OS integration.
+- Electron plus native helpers — easiest React reuse.
 
 Done when:
-
 - The protocol and first cross-device prototype are stable enough that packaging tradeoffs are meaningful.
+- A packaged build can start without a terminal on at least one platform.

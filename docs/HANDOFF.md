@@ -9,10 +9,11 @@ Read these files in this order:
 1. `AGENTS.md`
 2. `docs/current_state.md`
 3. `docs/ROADMAP.md`
-4. `docs/SECURITY.md`
-5. `docs/PROTOCOL.md`
-6. `docs/LINUX_STEAMOS.md`
-7. `docs/EDGE_HANDOFF.md`
+4. `docs/UI_HANDOFFNEW.md` (native app UI baseline — the forward-looking design spec)
+5. `docs/SECURITY.md`
+6. `docs/PROTOCOL.md`
+7. `docs/LINUX_STEAMOS.md`
+8. `docs/EDGE_HANDOFF.md`
 
 Then inspect the code rather than relying on chat history.
 
@@ -53,7 +54,9 @@ Current working shape:
 - Layout tiles auto-update with real screen dimensions on connect; tile sizes normalized to ≤20% size difference.
 - Drag-through behavior: tiles move freely during drag; on release, cursor position over blocker determines snap side.
 - Mac-to-Mac remote mouse physically verified (in addition to Mac-Windows and Windows-Mac).
-- No global input capture, native packaging, TLS, or discovery exists yet.
+- Keyboard forwarding is active on both the `/handoff` active_remote overlay and the `/` main page touchpad session. Global OS-level keyboard capture does not exist.
+- No global input capture, native packaging, or TLS exists yet.
+- Native desktop app UI is designed but not yet built. The spec lives in `docs/UI_HANDOFFNEW.md`. Reference prototype files (React/JSX + CSS) are in `docs/UIFILES/`. The browser MVP in `static/` remains the working product.
 
 Do not assume native cross-platform agents, edge handoff, TLS, discovery, screen capture, or trusted-device UI exist yet.
 
