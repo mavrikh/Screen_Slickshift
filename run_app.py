@@ -116,8 +116,16 @@ class _AppAPI:
         except Exception:
             pass
 
+    def get_owner_token(self) -> str:
+        """Return the local owner token so the webview can authenticate without
+        the user having to read the terminal."""
+        try:
+            from app.config import TOKEN_FILE
+            return TOKEN_FILE.read_text(encoding="utf-8").strip()
+        except Exception:
+            return ""
+
     def minimize(self) -> None:
-        """Minimize the app window (called when entering active control)."""
         try:
             if self._win is not None:
                 self._win.minimize()
@@ -125,10 +133,16 @@ class _AppAPI:
             pass
 
     def restore(self) -> None:
-        """Restore the app window (called when leaving active control)."""
         try:
             if self._win is not None:
                 self._win.restore()
+        except Exception:
+            pass
+
+    def close_window(self) -> None:
+        try:
+            if self._win is not None:
+                self._win.destroy()
         except Exception:
             pass
 
@@ -157,6 +171,8 @@ def main() -> None:
         height=800,
         min_size=(900, 620),
         resizable=True,
+        frameless=True,
+        easy_drag=False,   # we handle drag via -webkit-app-region in the HTML
         js_api=api,
     )
     webview.start()

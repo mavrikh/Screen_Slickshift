@@ -40,19 +40,32 @@ function App() {
   const [accent, setAccent] = useState(prefs.accent || "cyan");
   const [density, setDensity] = useState(prefs.density || "comfortable");
   const [authed, setAuthed] = useState(false);
-  const [checking, setChecking] = useState(!!SS.token());
+  const [checking, setChecking] = useState(!!(SS.token() || window.pywebview));
   const [lockout, setLockout] = useState(false);
   const [serverAddr, setServerAddr] = useState("");
 
   useEffect(() => { applyAccent(accent); }, [accent]);
   useEffect(() => { document.documentElement.dataset.density = density; }, [density]);
 
-  // Verify token on mount
+  // Verify token on mount; in pywebview auto-inject the owner token
   useEffect(() => {
-    if (!SS.token()) { setChecking(false); return; }
-    SS.api("/api/auth/check")
-      .then(() => { setAuthed(true); setChecking(false); })
-      .catch(() => { setAuthed(false); setChecking(false); });
+    async function init() {
+      if (window.pywebview && !SS.token()) {
+        try {
+          const tok = await window.pywebview.api.get_owner_token();
+          if (tok) SS.setToken(tok);
+        } catch {}
+      }
+      if (!SS.token()) { setChecking(false); return; }
+      try {
+        await SS.api("/api/auth/check");
+        setAuthed(true);
+      } catch {
+        setAuthed(false);
+      }
+      setChecking(false);
+    }
+    init();
   }, []);
 
   // Load server state once authenticated
@@ -119,10 +132,9 @@ function App() {
   return (
     <div className="stage">
       <div className="win">
-        <div className="titlebar">
-          <div className="tl"><span className="r" /><span className="y" /><span className="g" /></div>
+        <div className="titlebar" style={{ WebkitAppRegion: "drag" }}>
           <div className="win-title">Screen Slickshift</div>
-          <div className="win-rhs">
+          <div className="win-rhs" style={{ WebkitAppRegion: "no-drag" }}>
             <span className="dot" style={{ background: lockout ? "var(--danger)" : "var(--ok)" }} />
             <span>{lockout ? "Lockout active" : `Connected · ${serverAddr}`}</span>
           </div>
