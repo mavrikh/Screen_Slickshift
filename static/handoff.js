@@ -1211,6 +1211,14 @@ function endRemotePad() {
 function startActiveLayer(event) {
   if (event.target.closest("button")) return;
   if (handoffState.mode !== "active_remote" || !handoffState.remoteConnected) return;
+  if (handoffState.pointerLocked) {
+    // In pointer lock mode the cursor is captured — route physical clicks directly
+    // to the remote instead of starting a drag session.
+    if (event.button === 0) clickRemoteMouse("left");
+    else if (event.button === 2) clickRemoteMouse("right");
+    else if (event.button === 1) clickRemoteMouse("middle");
+    return;
+  }
   handoffState.activeLayerDragging = true;
   activeHandoffLayer.setPointerCapture(event.pointerId);
 }
@@ -1799,6 +1807,7 @@ activeHandoffLayer.addEventListener("pointerdown", startActiveLayer);
 activeHandoffLayer.addEventListener("pointermove", moveActiveLayer);
 activeHandoffLayer.addEventListener("pointerup", endActiveLayer);
 activeHandoffLayer.addEventListener("pointercancel", endActiveLayer);
+activeHandoffLayer.addEventListener("contextmenu", (event) => event.preventDefault());
 activeHandoffLayer.addEventListener("wheel", (event) => {
   event.preventDefault();
   sendRemoteEvent({ type: "scroll", amount: event.deltaY > 0 ? -8 : 8 });
