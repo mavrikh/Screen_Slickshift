@@ -791,9 +791,8 @@ function ActiveControlOverlay({ deviceName, onStop }) {
   const lastPosRef = useRef({ x: 0, y: 0 });
   const physCenterRef = useRef({ x: 0, y: 0 });
 
-  // Minimize app window on mount, restore on unmount
+  // Restore app window when overlay closes
   useEffect(() => {
-    window.pywebview?.api?.minimize?.()?.catch?.(() => {});
     return () => { window.pywebview?.api?.restore?.()?.catch?.(() => {}); };
   }, []);
 
@@ -834,6 +833,8 @@ function ActiveControlOverlay({ deviceName, onStop }) {
 
   async function requestLock() {
     if (window.pywebview) {
+      // Minimize so the app window doesn't sit over the controlled screen
+      window.pywebview.api.minimize?.()?.catch?.(() => {});
       // Python handles all coordinate maths (AppKit vs pyautogui Y-axis difference).
       // One async call to get the window centre; subsequent warps are fire-and-forget.
       try {
