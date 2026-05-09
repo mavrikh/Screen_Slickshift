@@ -152,7 +152,15 @@ class RemoteHandoffBridge:
 
     async def stop(self) -> dict[str, Any]:
         async with self._lock:
+            target = self._target
+            sid, stok = self._session_id, self._session_token
             await self._close_locked()
+        # Tell Device B the session is over so its trust prompt fires immediately
+        if target is not None and sid is not None and stok is not None:
+            try:
+                await asyncio.to_thread(remote_end_session, target, sid, stok)
+            except Exception:
+                pass
         return {"ok": True, "connected": False}
 
     def status(self) -> dict[str, Any]:
@@ -559,6 +567,26 @@ def remote_trusted_reconnect(
     except HTTPError as exc:
         raise RuntimeError(_extract_http_error_detail(exc)) from exc
     except (OSError, URLError, json.JSONDecodeError) as exc:
+        raise RuntimeError(str(exc)) from exc
+
+
+def remote_end_session(
+    target: RemoteTarget,
+    session_id: str,
+    session_token: str,
+    timeout: float = 3.0,
+) -> dict[str, Any]:
+    body = json.dumps({"session_id": session_id, "session_token": session_token}).encode("utf-8")
+    request = Request(
+        f"http://{target.host}:{target.port}/api/session/end",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except (HTTPError, OSError, URLError, json.JSONDecodeError) as exc:
         raise RuntimeError(str(exc)) from exc
 
 

@@ -27,6 +27,7 @@ from app.handoff_remote import (
     remote_request_pair,
     remote_trusted_reconnect,
     remote_cancel_pair_request,
+    remote_end_session,
     warp_remote_cursor,
     warp_remote_cursor_session,
 )
@@ -608,6 +609,15 @@ async def session_handoff_detector_state(payload: SessionRequest) -> dict:
     if pairing_session_book.verify_session(payload.session_id, payload.session_token) is None:
         raise HTTPException(status_code=401, detail="Invalid or expired session.")
     return edge_detector.public_dict()
+
+
+@app.post("/api/session/end")
+async def session_end(payload: SessionRequest) -> dict:
+    if pairing_session_book.verify_session(payload.session_id, payload.session_token) is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired session.")
+    pairing_session_book.remove_session(payload.session_id)
+    logger.info("Session %s ended by remote client.", payload.session_id)
+    return {"ok": True}
 
 
 @app.post("/api/session/handoff/warp-cursor")

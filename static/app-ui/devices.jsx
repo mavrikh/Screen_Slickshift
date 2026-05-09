@@ -355,6 +355,17 @@ function PendingPairDisplay() {
     setTrustPrompt(null);
   }
 
+  async function dismissTrust() {
+    // Remove the device that was auto-added during pairing (remember_device:true).
+    // This makes it reappear in discovery and requires re-pairing to reconnect.
+    if (trustPrompt?.device_id) {
+      try {
+        await SS.api(`/api/trusted-devices/${trustPrompt.device_id}`, { method: "DELETE" });
+      } catch {}
+    }
+    setTrustPrompt(null);
+  }
+
   // Trust prompt — shown after the controlled session ends
   if (trustPrompt) {
     return (
@@ -364,12 +375,12 @@ function PendingPairDisplay() {
             <h2>Session ended</h2>
             <p>
               <strong style={{ color: "var(--text)" }}>{trustPrompt.name}</strong>
-              {" "}just controlled this device. Add them as a trusted device to allow future connections without re-pairing?
+              {" "}just controlled this device. Save them as a trusted device to allow future connections without re-pairing?
             </p>
           </div>
           <div className="modal-foot">
             <button type="button" className="btn-primary" onClick={saveTrust}>Save as trusted</button>
-            <button type="button" className="btn-ghost" onClick={() => setTrustPrompt(null)}>Dismiss</button>
+            <button type="button" className="btn-ghost" onClick={dismissTrust}>Not now</button>
           </div>
         </div>
       </div>
