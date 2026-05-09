@@ -787,13 +787,17 @@ function ActiveControlOverlay({ deviceName, onStop }) {
   const overlayRef = useRef(null);
   const [pointerLocked, setPointerLocked] = useState(false);
   const [softCapture, setSoftCapture] = useState(false);
+  const [usePythonCapture, setUsePythonCapture] = useState(false);
   const lastMoveRef = useRef(0);
   const lastPosRef = useRef({ x: 0, y: 0 });
   const physCenterRef = useRef({ x: 0, y: 0 });
 
-  // Restore app window when overlay closes
+  // Restore app window and stop Python capture when overlay closes
   useEffect(() => {
-    return () => { window.pywebview?.api?.restore?.()?.catch?.(() => {}); };
+    return () => {
+      window.pywebview?.api?.restore?.()?.catch?.(() => {});
+      window.pywebview?.api?.stop_cursor_capture?.()?.catch?.(() => {});
+    };
   }, []);
 
   // Release cursor capture when the app window is un-minimized / brought to foreground.
@@ -820,6 +824,25 @@ function ActiveControlOverlay({ deviceName, onStop }) {
     };
   }, []);
 
+  // Auto-start sharing on mount so the cursor moves to the remote machine immediately
+  useEffect(() => { requestLock(); }, []);
+
+  // Poll Python cursor-capture events when the window is minimized
+  useEffect(() => {
+    if (!usePythonCapture) return;
+    let alive = true;
+    async function poll() {
+      if (!alive) return;
+      try {
+        const evs = await window.pywebview.api.get_cursor_events();
+        for (const ev of (evs || [])) sendEvent(ev);
+      } catch {}
+      if (alive) setTimeout(poll, 16);
+    }
+    poll();
+    return () => { alive = false; };
+  }, [usePythonCapture]);
+
   async function sendEvent(msg) {
     try {
       await SS.api("/api/handoff/remote/event", {
@@ -844,15 +867,15 @@ function ActiveControlOverlay({ deviceName, onStop }) {
     if (window.pywebview) {
       // Minimize so the app window doesn't sit over the controlled screen
       window.pywebview.api.minimize?.()?.catch?.(() => {});
-      // Python handles all coordinate maths (AppKit vs pyautogui Y-axis difference).
-      // One async call to get the window centre; subsequent warps are fire-and-forget.
       try {
         const r = await window.pywebview.api.warp_to_center();
         if (r?.ok) {
           physCenterRef.current = { x: r.phys_x, y: r.phys_y };
           lastPosRef.current = { x: r.css_ref_x, y: r.css_ref_y };
+          // Hand off to Python: poll OS cursor at 120 Hz and queue deltas
+          await window.pywebview.api.start_cursor_capture(r.phys_x, r.phys_y);
+          setUsePythonCapture(true);
         } else {
-          // Fallback: use reported window dimensions
           lastPosRef.current = { x: window.innerWidth / 2, y: window.innerHeight / 2 };
         }
       } catch {
@@ -872,6 +895,10 @@ function ActiveControlOverlay({ deviceName, onStop }) {
   }
 
   function releaseCapture() {
+    if (usePythonCapture) {
+      window.pywebview?.api?.stop_cursor_capture?.()?.catch?.(() => {});
+      setUsePythonCapture(false);
+    }
     if (softCapture) { setSoftCapture(false); return; }
     if (document.pointerLockElement) document.exitPointerLock();
   }
@@ -883,7 +910,7 @@ function ActiveControlOverlay({ deviceName, onStop }) {
       if (document.pointerLockElement) {
         dx = e.movementX || 0;
         dy = e.movementY || 0;
-      } else if (softCapture) {
+      } else if (softCapture && !usePythonCapture) {
         dx = e.clientX - lastPosRef.current.x;
         dy = e.clientY - lastPosRef.current.y;
         _warpToWindowCenter();
@@ -921,11 +948,12 @@ function ActiveControlOverlay({ deviceName, onStop }) {
 
   function onPointerDown(e) {
     if (!captured) { requestLock(); return; }
+    if (usePythonCapture) return; // Python handles button events
     const btn = e.button === 2 ? "right" : e.button === 1 ? "middle" : "left";
     sendEvent({ type: "mouse_button", button: btn, down: true });
   }
   function onPointerUp(e) {
-    if (!captured) return;
+    if (!captured || usePythonCapture) return; // Python handles button events
     const btn = e.button === 2 ? "right" : e.button === 1 ? "middle" : "left";
     sendEvent({ type: "mouse_button", button: btn, down: false });
   }
@@ -954,11 +982,11 @@ function ActiveControlOverlay({ deviceName, onStop }) {
         <div style={{ flex: 1 }}>
           <span style={{ fontWeight: 600, fontSize: 14 }}>Controlling {deviceName}</span>
           <span style={{ marginLeft: 12, fontSize: 12, color: "var(--text-dim)" }}>
-            {captured ? "Cursor captured · Esc to release" : "Click anywhere to capture cursor"}
+            {captured ? "Sharing active · Esc to release" : "Click anywhere to start sharing"}
           </span>
         </div>
         <button type="button" className="btn-ghost" style={{ fontSize: 12 }} onClick={captured ? releaseCapture : requestLock}>
-          {captured ? "Release Cursor" : "Capture Cursor"}
+          {captured ? "Release" : "Start Sharing"}
         </button>
         <button type="button" className="btn-danger" onClick={onStop}>Disconnect</button>
       </div>
@@ -971,11 +999,11 @@ function ActiveControlOverlay({ deviceName, onStop }) {
               Controlling {deviceName}
             </div>
             <div style={{ fontSize: 13, marginBottom: 20 }}>
-              Click anywhere to capture your cursor and begin. Mouse and keyboard will be forwarded to {deviceName}.
+              Click anywhere to start sharing. Mouse and keyboard will be forwarded to {deviceName}.
             </div>
-            <button type="button" className="btn-primary" onClick={requestLock}>Capture Cursor</button>
+            <button type="button" className="btn-primary" onClick={requestLock}>Start Sharing</button>
             <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 12 }}>
-              Esc releases cursor · Disconnect stops the session
+              Esc releases · Disconnect stops the session
             </div>
             <div style={{
               marginTop: 24, padding: "10px 16px",
@@ -1042,9 +1070,21 @@ function DevicesSection() {
     setReconnectMsg("");
     const name = paired.find(d => d.id === device_id)?.name || device_id;
     try {
-      // Check if bridge is already active for this device; if not, establish it.
-      const status = await SS.api("/api/handoff/remote/status");
-      if (!status.connected) {
+      // Ping-verify the bridge before trusting status.connected — the socket
+      // can be non-null but already closed if the remote rejected session auth.
+      let bridgeReady = false;
+      try {
+        const status = await SS.api("/api/handoff/remote/status");
+        if (status.connected) {
+          await SS.api("/api/handoff/remote/event", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ type: "ping" }),
+          });
+          bridgeReady = true;
+        }
+      } catch {}
+
+      if (!bridgeReady) {
         let cred = null;
         try { const raw = localStorage.getItem(`slickshiftTrusted_${device_id}`); if (raw) cred = JSON.parse(raw); } catch {}
         if (!cred?.shared_secret) {
@@ -1070,7 +1110,6 @@ function DevicesSection() {
           });
         }
       }
-      // Warp the remote cursor to the centre of its screen, then enter active control.
       await SS.api("/api/handoff/remote/warp-cursor", { method: "POST" });
       setActiveControl({ deviceName: name });
     } catch (e) {
@@ -1249,13 +1288,33 @@ function OverviewSection() {
     const name = paired.find(d => d.id === device_id)?.name || device_id;
     let cred = null;
     try { const raw = localStorage.getItem(`slickshiftTrusted_${device_id}`); if (raw) cred = JSON.parse(raw); } catch {}
-    if (!cred?.shared_secret) { connectingRef.current = false; return; }
+    if (!cred?.shared_secret) {
+      connectingRef.current = false;
+      showOverviewMsg(`${name}: no saved credential — remove and re-add this device to enable edge handoff.`);
+      return;
+    }
     const found = discovered.find(d => d.device_id === device_id)
       || (cred?.host ? { host: cred.host, port: cred.port || 8765 } : null);
-    if (!found) { connectingRef.current = false; return; }
+    if (!found) {
+      connectingRef.current = false;
+      showOverviewMsg(`${name} not found on the network — make sure Screen Slickshift is running on it.`);
+      return;
+    }
     try {
-      const status = await SS.api("/api/handoff/remote/status");
-      if (!status.connected) {
+      // Ping-verify the bridge — the socket can appear connected but already be
+      // closed if the remote rejected session auth. If the ping fails, reconnect.
+      let bridgeReady = false;
+      try {
+        const status = await SS.api("/api/handoff/remote/status");
+        if (status.connected) {
+          await SS.api("/api/handoff/remote/event", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ type: "ping" }),
+          });
+          bridgeReady = true;
+        }
+      } catch {}
+      if (!bridgeReady) {
         const data = await SS.api("/api/discovery/remote/reconnect", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1318,13 +1377,23 @@ function OverviewSection() {
         if (!alive) return;
         setDetectorState(d.state || "idle");
         setDwellProgress(d.dwell_progress ?? 0);
-        if (d.state === "pending") handleConnect(effectiveEdgeRel.remoteId, effectiveEdgeRel.returnEdge);
+        if (d.state === "pending") {
+            // Re-arm immediately so the detector is ready for the next edge push
+            // while handleConnect runs. Without this the detector stays "pending"
+            // and every 16ms poll fires handleConnect again.
+            SS.api("/api/handoff/arm", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ edge: effectiveEdgeRel.localEdge, dwell_ms: 0 }),
+            }).catch(() => {});
+            handleConnect(effectiveEdgeRel.remoteId, effectiveEdgeRel.returnEdge);
+          }
       } catch {}
     };
     poll();
     const t = setInterval(poll, 16);
     return () => { alive = false; clearInterval(t); };
-  }, [edgeHandoff, effectiveEdgeRel?.localEdge, effectiveEdgeRel?.remoteId, !!activeControl]);
+  }, [edgeHandoff, effectiveEdgeRel?.localEdge, effectiveEdgeRel?.returnEdge, effectiveEdgeRel?.remoteId, !!activeControl]);
 
   // Poll remote return detector — auto-disconnect when cursor reaches the return edge
   useEffect(() => {

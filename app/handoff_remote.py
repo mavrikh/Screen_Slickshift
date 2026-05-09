@@ -147,7 +147,11 @@ class RemoteHandoffBridge:
         async with self._lock:
             if self._websocket is None:
                 raise RuntimeError("Remote handoff is not connected.")
-            await self._websocket.send(json.dumps(outbound))
+            try:
+                await self._websocket.send(json.dumps(outbound))
+            except Exception as exc:
+                self._websocket = None  # mark as disconnected so next status() is accurate
+                raise RuntimeError("Remote connection lost.") from exc
         return {"ok": True, "event": outbound["type"]}
 
     async def stop(self) -> dict[str, Any]:
@@ -246,7 +250,10 @@ class RemoteHandoffBridge:
         self._session_id = None
         self._session_token = None
         if websocket is not None:
-            await websocket.close()
+            try:
+                await websocket.close()
+            except Exception:
+                pass
 
 
 def normalize_host(host: str) -> str:
