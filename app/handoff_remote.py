@@ -570,6 +570,39 @@ def remote_trusted_reconnect(
         raise RuntimeError(str(exc)) from exc
 
 
+def remote_push_peer_credential(
+    target: RemoteTarget,
+    session_id: str,
+    session_token: str,
+    peer_device_id: str,
+    peer_host: str,
+    peer_port: int,
+    peer_shared_secret: str,
+    timeout: float = 5.0,
+) -> dict[str, Any]:
+    body = json.dumps({
+        "session_id": session_id,
+        "session_token": session_token,
+        "peer_device_id": peer_device_id,
+        "peer_host": peer_host,
+        "peer_port": peer_port,
+        "peer_shared_secret": peer_shared_secret,
+    }).encode("utf-8")
+    request = Request(
+        f"http://{target.host}:{target.port}/api/session/peer-credential",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        raise RuntimeError(_extract_http_error_detail(exc)) from exc
+    except (OSError, URLError, json.JSONDecodeError) as exc:
+        raise RuntimeError(str(exc)) from exc
+
+
 def remote_end_session(
     target: RemoteTarget,
     session_id: str,

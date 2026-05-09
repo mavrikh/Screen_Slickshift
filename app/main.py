@@ -17,7 +17,7 @@ from app.commands import public_macro_list, run_macro
 from app.config import LOG_DIR, STATIC_DIR, ensure_directories, get_or_create_pairing_token, get_receive_dir, set_receive_dir, settings
 from app.device_identity import get_or_create_device_identity
 from app.files import save_upload
-from app.discovery import DiscoveredDevice, DiscoveryService, PendingPairRequest
+from app.discovery import DiscoveredDevice, DiscoveryService, PendingPairRequest, get_local_ip
 from app.edge_detector import DetectorState, EdgeDetector, make_detector_config
 from app.handoff import make_handoff_layout, make_layout_screen, normalize_edge
 from app.handoff_remote import (
@@ -28,6 +28,7 @@ from app.handoff_remote import (
     remote_trusted_reconnect,
     remote_cancel_pair_request,
     remote_end_session,
+    remote_push_peer_credential,
     warp_remote_cursor,
     warp_remote_cursor_session,
 )
@@ -72,6 +73,23 @@ class LockoutRequest(BaseModel):
 
 class TrustedConnectionsRequest(BaseModel):
     enabled: bool
+
+
+class SessionPeerCredentialRequest(BaseModel):
+    session_id: str
+    session_token: str
+    peer_device_id: str
+    peer_host: str
+    peer_port: int = 8765
+    peer_shared_secret: str
+
+
+class RemotePeerCredentialPayload(BaseModel):
+    host: str
+    port: int = 8765
+    session_id: str
+    session_token: str
+    shared_secret: str
 
 
 class PairingCodeRequest(BaseModel):
@@ -251,6 +269,7 @@ edge_detector = EdgeDetector()
 discovery_service = DiscoveryService()
 discovery_code_book = PairingCodeBook(ttl_seconds=45)
 _pending_pair_request: Optional[PendingPairRequest] = None
+_pending_peer_credentials: dict[str, dict] = {}  # device_id → {shared_secret, host, port}
 
 # Allow all origins: this is a LAN-only tool and security comes from the pairing
 # token, not the Origin header. Starlette's CORS middleware blocks WebSocket
@@ -611,6 +630,46 @@ async def session_handoff_detector_state(payload: SessionRequest) -> dict:
     return edge_detector.public_dict()
 
 
+@app.post("/api/session/peer-credential")
+async def session_peer_credential(payload: SessionPeerCredentialRequest) -> dict:
+    if pairing_session_book.verify_session(payload.session_id, payload.session_token) is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired session.")
+    _pending_peer_credentials[payload.peer_device_id] = {
+        "shared_secret": payload.peer_shared_secret,
+        "host": payload.peer_host,
+        "port": payload.peer_port,
+    }
+    return {"ok": True}
+
+
+@app.get("/api/peer-credential/{device_id}", dependencies=[Depends(verify_token)])
+async def get_peer_credential(device_id: str) -> dict:
+    cred = _pending_peer_credentials.pop(device_id, None)
+    if cred is None:
+        return {"found": False}
+    return {"found": True, **cred}
+
+
+@app.post("/api/discovery/remote/peer-credential", dependencies=[Depends(verify_token)])
+async def discovery_remote_peer_credential(payload: RemotePeerCredentialPayload) -> dict:
+    identity = get_or_create_device_identity()
+    local_ip = get_local_ip()
+    try:
+        target = RemoteTarget.from_values(payload.host, payload.port)
+        return await asyncio.to_thread(
+            remote_push_peer_credential,
+            target,
+            payload.session_id,
+            payload.session_token,
+            identity.device_id,
+            local_ip,
+            8765,
+            payload.shared_secret,
+        )
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.post("/api/session/end")
 async def session_end(payload: SessionRequest) -> dict:
     if pairing_session_book.verify_session(payload.session_id, payload.session_token) is None:
@@ -655,7 +714,7 @@ async def record_trusted_device(payload: RecordTrustedDeviceRequest) -> dict:
         return {"ok": True, "device": existing.public_dict(), "created": False}
     credential = store.trust_device(payload.device_id, payload.name, payload.permissions)
     logger.info("Recorded trusted device %s (%s).", payload.device_id, payload.name)
-    return {"ok": True, "device": credential.device.public_dict(), "created": True}
+    return {"ok": True, "device": credential.device.public_dict(), "created": True, "shared_secret": credential.shared_secret}
 
 
 @app.get("/api/trusted-devices", dependencies=[Depends(verify_token)])

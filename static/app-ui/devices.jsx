@@ -268,7 +268,7 @@ function DiscoveredRow({ d, onPair }) {
 // After the code is consumed and the session eventually ends, asks the owner
 // whether to keep or remove the remote device's trust record.
 
-function PendingPairDisplay() {
+function PendingPairDisplay({ onTrustSaved }) {
   const [pending, setPending] = useState(null);
   const [secondsLeft, setSecondsLeft] = useState(0);
   const [trustPrompt, setTrustPrompt] = useState(null); // {name, device_id}
@@ -351,8 +351,20 @@ function PendingPairDisplay() {
           body: JSON.stringify({ device_id: trustPrompt.device_id, name: trustPrompt.name }),
         });
       } catch {}
+      // Pick up the reverse credential Device A pushed during pairing so Device B
+      // can reconnect to Device A without re-pairing.
+      try {
+        const cred = await SS.api(`/api/peer-credential/${trustPrompt.device_id}`);
+        if (cred?.found && cred?.shared_secret) {
+          localStorage.setItem(
+            `slickshiftTrusted_${trustPrompt.device_id}`,
+            JSON.stringify({ shared_secret: cred.shared_secret, host: cred.host, port: cred.port })
+          );
+        }
+      } catch {}
     }
     setTrustPrompt(null);
+    onTrustSaved && onTrustSaved();
   }
 
   async function dismissTrust() {
@@ -364,6 +376,7 @@ function PendingPairDisplay() {
       } catch {}
     }
     setTrustPrompt(null);
+    onTrustSaved && onTrustSaved();
   }
 
   // Trust prompt — shown after the controlled session ends
@@ -559,15 +572,32 @@ function PairModal({ open, target, onClose, onComplete, discoveredDevices = [] }
       if (data.shared_secret && deviceId) {
         try { localStorage.setItem(`slickshiftTrusted_${deviceId}`, JSON.stringify({ shared_secret: data.shared_secret, host, port })); } catch {}
       }
-      // Record Screen B in Screen A's own trusted-device store so it appears
-      // in this machine's trusted list (pairing only writes to Screen B's store
-      // by default — this call writes the symmetric record on Screen A).
+      // Record Device B on Device A's trusted store; capture the new shared_secret
+      // so we can push it back to Device B (giving B the credential to reconnect to A).
+      let reversedSecret = null;
       if (deviceId) {
         try {
-          await SS.api("/api/trusted-devices/record", {
+          const rec = await SS.api("/api/trusted-devices/record", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ device_id: deviceId, name: deviceName }),
+          });
+          if (rec?.created && rec?.shared_secret) reversedSecret = rec.shared_secret;
+        } catch {}
+      }
+      // Push Device A's reverse credential to Device B so Device B can
+      // reconnect to Device A after accepting the trust prompt.
+      if (reversedSecret && data?.session?.session_id && data?.session_token) {
+        try {
+          await SS.api("/api/discovery/remote/peer-credential", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              host, port,
+              session_id: data.session.session_id,
+              session_token: data.session_token,
+              shared_secret: reversedSecret,
+            }),
           });
         } catch {}
       }
@@ -1072,7 +1102,7 @@ function DevicesSection() {
 
       <PairModal open={pairOpen} target={pairTarget} discoveredDevices={discovered}
         onClose={() => setPairOpen(false)} onComplete={completePair} />
-      <PendingPairDisplay />
+      <PendingPairDisplay onTrustSaved={load} />
       {activeControl && <ActiveControlOverlay deviceName={activeControl.deviceName} onStop={stopControl} />}
 
       {toast && (
@@ -1340,7 +1370,7 @@ function OverviewSection() {
             } catch {}
           }
         }} />
-      <PendingPairDisplay />
+      <PendingPairDisplay onTrustSaved={load} />
       {activeControl && <ActiveControlOverlay deviceName={activeControl.deviceName} onStop={stopControl} />}
     </>
   );
