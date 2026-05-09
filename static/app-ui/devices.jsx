@@ -796,13 +796,11 @@ function ActiveControlOverlay({ deviceName, onStop }) {
     return () => { window.pywebview?.api?.restore?.()?.catch?.(() => {}); };
   }, []);
 
-  // Auto-stop cursor control when the app window is un-minimized / brought to foreground
+  // Release cursor capture when the app window is un-minimized / brought to foreground.
+  // Does NOT disconnect — the session stays alive so the user can re-capture.
   useEffect(() => {
     if (!softCapture && !pointerLocked) return;
-    function onFocus() {
-      releaseCapture();
-      onStop();
-    }
+    function onFocus() { releaseCapture(); }
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
   }, [softCapture, pointerLocked]);
@@ -968,7 +966,7 @@ function ActiveControlOverlay({ deviceName, onStop }) {
       {/* Centre prompt when cursor is not yet captured */}
       {!captured && (
         <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
-          <div style={{ textAlign: "center", color: "var(--text-dim)", maxWidth: 360 }}>
+          <div style={{ textAlign: "center", color: "var(--text-dim)", maxWidth: 400 }}>
             <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 8, color: "var(--text)" }}>
               Controlling {deviceName}
             </div>
@@ -978,6 +976,15 @@ function ActiveControlOverlay({ deviceName, onStop }) {
             <button type="button" className="btn-primary" onClick={requestLock}>Capture Cursor</button>
             <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 12 }}>
               Esc releases cursor · Disconnect stops the session
+            </div>
+            <div style={{
+              marginTop: 24, padding: "10px 16px",
+              border: "1px dashed var(--border-strong)", borderRadius: 8,
+              fontSize: 11, color: "var(--muted)", lineHeight: 1.6,
+            }}>
+              <span style={{ color: "var(--accent)", fontWeight: 600 }}>Coming soon</span>
+              {" — "}Screen Edges panel will open here so you can adjust monitor
+              arrangement without disconnecting.
             </div>
           </div>
         </div>
