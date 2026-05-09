@@ -176,7 +176,7 @@ function statusTag(d) {
   if (d.status === "connected")
     return <span className="tag" style={{ color: "var(--ok)", borderColor: "rgba(74,222,128,0.3)" }}>Online</span>;
   if (d.status === "paired")
-    return <span className="tag">Paired · {d.lastSeen}</span>;
+    return <span className="tag">Paired</span>;
   if (d.review_required)
     return <span className="tag" style={{ color: "var(--warn)", borderColor: "rgba(251,191,36,0.3)" }}>Review required</span>;
   return null;
@@ -192,7 +192,7 @@ function PermPill({ label, on, onChange }) {
   );
 }
 
-function DeviceRow({ d, onUnpair, onPerm, compact }) {
+function DeviceRow({ d, onUnpair, onPerm, onReconnect, compact }) {
   return (
     <div className={"dev-row" + (compact ? " compact" : "")}>
       <div className={"dev-icon " + (d.self ? "self" : "")}>
@@ -204,7 +204,7 @@ function DeviceRow({ d, onUnpair, onPerm, compact }) {
       </div>
       <div className="dev-main">
         <div className="dev-name">{d.name}{statusTag(d)}</div>
-        <div className="dev-meta">{d.model}</div>
+        <div className="dev-meta">{d.self ? "" : (d.lastSeen ? `Last seen ${d.lastSeen}` : "")}</div>
       </div>
       <div className="dev-actions">
         {d.self ? (
@@ -218,6 +218,7 @@ function DeviceRow({ d, onUnpair, onPerm, compact }) {
                 <PermPill label="Macros"    on={d.perms.macros}    onChange={v => onPerm && onPerm(d.id, "macros", v)} />
               </div>
             )}
+            <button type="button" className="btn-ghost" onClick={() => onReconnect && onReconnect(d.id)}>Reconnect</button>
             <button type="button" className="btn-ghost" onClick={() => onUnpair && onUnpair(d.id)}>Unpair</button>
           </>
         )}
@@ -427,6 +428,7 @@ function DevicesSection() {
   const { devices: discovered, advertising, scanning, toggleAdvertise } = useDiscovery(true);
   const [pairOpen, setPairOpen] = useState(false);
   const [pairTarget, setPairTarget] = useState(null);
+  const [reconnectMsg, setReconnectMsg] = useState("");
 
   const selfRow = thisDevice ? [{
     id: "__self__", self: true,
@@ -438,6 +440,32 @@ function DevicesSection() {
   async function completePair() {
     setPairOpen(false);
     await load();
+  }
+
+  async function handleReconnect(device_id) {
+    setReconnectMsg("");
+    let cred = null;
+    try { const raw = localStorage.getItem(`slickshiftTrusted_${device_id}`); if (raw) cred = JSON.parse(raw); } catch {}
+    if (!cred?.shared_secret) {
+      setReconnectMsg("No stored credential for this device. Pair it again to enable silent reconnect.");
+      return;
+    }
+    const found = discovered.find(d => d.device_id === device_id);
+    if (!found) {
+      setReconnectMsg("Device not found on the network. Make sure Screen Slickshift is running on it.");
+      return;
+    }
+    try {
+      await SS.api("/api/discovery/remote/reconnect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ host: found.host, port: found.port || 8765, shared_secret: cred.shared_secret }),
+      });
+      const name = paired.find(d => d.id === device_id)?.name || device_id;
+      setReconnectMsg(`Reconnected to ${name}.`);
+    } catch (e) {
+      setReconnectMsg(`Reconnect failed: ${e.message}`);
+    }
   }
 
   return (
@@ -456,6 +484,7 @@ function DevicesSection() {
       </div>
 
       {error && <div style={{ color: "var(--danger)", fontSize: 13, marginBottom: 12 }}>{error}</div>}
+      {reconnectMsg && <div style={{ color: reconnectMsg.startsWith("Reconnected") ? "var(--ok)" : "var(--warn)", fontSize: 13, marginBottom: 12 }}>{reconnectMsg}</div>}
 
       <div className="panel">
         <div className="panel-h">
@@ -473,7 +502,7 @@ function DevicesSection() {
                   No paired devices yet. Click Add device to pair one.
                 </div>
               ) : (
-                paired.map(d => <DeviceRow key={d.id} d={d} onUnpair={unpair} onPerm={setPerm} />)
+                paired.map(d => <DeviceRow key={d.id} d={d} onUnpair={unpair} onPerm={setPerm} onReconnect={handleReconnect} />)
               )}
             </>
           )}
@@ -518,6 +547,21 @@ function OverviewSection() {
   const { devices: discovered } = useDiscovery(true);
   const [pairOpen, setPairOpen] = useState(false);
 
+  async function handleReconnect(device_id) {
+    let cred = null;
+    try { const raw = localStorage.getItem(`slickshiftTrusted_${device_id}`); if (raw) cred = JSON.parse(raw); } catch {}
+    if (!cred?.shared_secret) return;
+    const found = discovered.find(d => d.device_id === device_id);
+    if (!found) return;
+    try {
+      await SS.api("/api/discovery/remote/reconnect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ host: found.host, port: found.port || 8765, shared_secret: cred.shared_secret }),
+      });
+    } catch {}
+  }
+
   const selfRow = thisDevice ? [{
     id: "__self__", self: true,
     name: thisDevice.name,
@@ -549,7 +593,7 @@ function OverviewSection() {
             ) : (
               <>
                 {selfRow.map(d => <DeviceRow key={d.id} d={d} compact />)}
-                {paired.map(d => <DeviceRow key={d.id} d={d} onUnpair={unpair} compact />)}
+                {paired.map(d => <DeviceRow key={d.id} d={d} onUnpair={unpair} onReconnect={handleReconnect} compact />)}
               </>
             )}
           </div>
