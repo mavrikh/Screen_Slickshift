@@ -35,7 +35,7 @@ from app.llm import generate_text
 from app.pairing import PairingCodeBook, PairingSessionBook, TrustedDeviceStore
 from app.protocol import parse_message, protocol_capabilities
 from app.security import token_is_valid, verify_token, verify_websocket_token
-from app.state import lockout_state
+from app.state import lockout_state, trusted_connections_state
 from app.transfer_history import TransferHistory
 from app.websocket import handle_touchpad_socket
 
@@ -67,6 +67,10 @@ class SessionMacroRequest(SessionRequest):
 
 class LockoutRequest(BaseModel):
     disabled: bool
+
+
+class TrustedConnectionsRequest(BaseModel):
+    enabled: bool
 
 
 class PairingCodeRequest(BaseModel):
@@ -815,6 +819,7 @@ async def discovery_browse() -> dict:
     return {
         "advertising": discovery_service.advertising,
         "browsing": discovery_service.browsing,
+        "trusted_connections_enabled": trusted_connections_state.is_enabled(),
         "devices": devices,
     }
 
@@ -912,10 +917,27 @@ async def discovery_pair(payload: DiscoveryPairRequest) -> dict:
     }
 
 
+@app.get("/api/trusted-connections", dependencies=[Depends(verify_token)])
+async def get_trusted_connections() -> dict:
+    return {"enabled": trusted_connections_state.is_enabled()}
+
+
+@app.post("/api/trusted-connections", dependencies=[Depends(verify_token)])
+async def set_trusted_connections(payload: TrustedConnectionsRequest) -> dict:
+    enabled = trusted_connections_state.set_enabled(payload.enabled)
+    logger.info("Trusted device connections set to %s.", enabled)
+    return {"enabled": enabled}
+
+
 @app.post("/api/pairing/trusted-reconnect")
 async def trusted_reconnect(payload: TrustedReconnectRequest) -> dict:
     if lockout_state.is_disabled():
         raise HTTPException(status_code=503, detail="This device is in emergency lockout.")
+    if not trusted_connections_state.is_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail="Trusted device connections are disabled on this device. Enable 'Trusted device connections' on the target device to allow automatic reconnection.",
+        )
     device = TrustedDeviceStore().verify_and_mark_seen(payload.device_id, payload.shared_secret)
     if device is None:
         raise HTTPException(status_code=401, detail="Unknown device or invalid credentials.")

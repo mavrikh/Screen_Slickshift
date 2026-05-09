@@ -116,7 +116,7 @@ def make_detector_config(
     clean_edge = normalize_edge(edge)
     if clean_edge is None:
         return None
-    clean_dwell = dwell_ms if isinstance(dwell_ms, int) and 100 <= dwell_ms <= 5000 else 400
+    clean_dwell = dwell_ms if isinstance(dwell_ms, int) and 0 <= dwell_ms <= 5000 else 400
     clean_zone = zone_px if isinstance(zone_px, int) and 1 <= zone_px <= 50 else 5
     clean_index = screen_index if isinstance(screen_index, int) and screen_index >= 0 else 0
 
@@ -244,6 +244,14 @@ class EdgeDetector:
             at_edge = cursor_at_edge(pos.x, pos.y, sw, sh, config.edge, config.zone_px, sx, sy)
 
             if at_edge:
+                if config.dwell_ms == 0:
+                    self._state = DetectorState.PENDING
+                    logger.info(
+                        "Edge detector: instant trigger on %s edge (screen %d).",
+                        config.edge.value,
+                        config.screen_index,
+                    )
+                    return
                 if self._dwell_start is None:
                     self._dwell_start = time.monotonic()
                 elif (time.monotonic() - self._dwell_start) * 1000 >= config.dwell_ms:

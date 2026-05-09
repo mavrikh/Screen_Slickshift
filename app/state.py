@@ -19,3 +19,21 @@ class LockoutState:
 
 
 lockout_state = LockoutState()
+
+
+class TrustedConnectionsState:
+    def __init__(self) -> None:
+        self._enabled = True
+        self._lock = Lock()
+
+    def is_enabled(self) -> bool:
+        with self._lock:
+            return self._enabled
+
+    def set_enabled(self, value: bool) -> bool:
+        with self._lock:
+            self._enabled = value
+            return self._enabled
+
+
+trusted_connections_state = TrustedConnectionsState()

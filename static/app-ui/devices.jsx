@@ -115,6 +115,7 @@ function useDiscovery(active) {
   const [devices, setDevices] = useState([]);
   const [advertising, setAdvertising] = useState(false);
   const [browsing, setBrowsing] = useState(false);
+  const [trustedConnectionsEnabled, setTrustedConnectionsEnabled] = useState(true);
   const timerRef = useRef(null);
 
   const poll = useCallback(async () => {
@@ -123,6 +124,7 @@ function useDiscovery(active) {
       setDevices((d.devices || []).filter(x => !x.trusted));
       setAdvertising(!!d.advertising);
       setBrowsing(!!d.browsing);
+      setTrustedConnectionsEnabled(d.trusted_connections_enabled !== false);
     } catch {}
   }, []);
 
@@ -155,7 +157,18 @@ function useDiscovery(active) {
     } catch {}
   }
 
-  return { devices, advertising, browsing, toggleAdvertise, toggleBrowse, refresh: poll };
+  async function toggleTrustedConnections() {
+    try {
+      await SS.api("/api/trusted-connections", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: !trustedConnectionsEnabled }),
+      });
+      await poll();
+    } catch {}
+  }
+
+  return { devices, advertising, browsing, trustedConnectionsEnabled, toggleAdvertise, toggleBrowse, toggleTrustedConnections, refresh: poll };
 }
 
 // ── UI components ────────────────────────────────────────────────────────────
@@ -862,7 +875,7 @@ function ActiveControlOverlay({ deviceName, onStop }) {
 
 function DevicesSection() {
   const { thisDevice, paired, loading, error, load, unpair, setPerm } = useDeviceData();
-  const { devices: discovered, advertising, browsing, toggleAdvertise, toggleBrowse, refresh: discoveryRefresh } = useDiscovery(true);
+  const { devices: discovered, advertising, browsing, trustedConnectionsEnabled, toggleAdvertise, toggleBrowse, toggleTrustedConnections, refresh: discoveryRefresh } = useDiscovery(true);
   const [pairOpen, setPairOpen] = useState(false);
   const [pairTarget, setPairTarget] = useState(null);
   const [reconnectMsg, setReconnectMsg] = useState("");
@@ -1026,13 +1039,22 @@ function DevicesSection() {
                 <div style={{ fontSize: 11, color: "var(--muted)" }}>This device</div>
               </div>
             </div>
-            <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
-              <span style={{ fontSize: 12, color: advertising ? "var(--ok)" : "var(--muted)" }}>
-                {advertising ? "Visible" : "Hidden"}
-              </span>
-              <div className={"toggle " + (advertising ? "on" : "")} onClick={toggleAdvertise} />
-              <span style={{ fontSize: 12, color: "var(--text-dim)", marginLeft: 2 }}>Allow connections</span>
-            </label>
+            <div style={{ display: "flex", gap: 20, alignItems: "center" }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+                <span style={{ fontSize: 12, color: advertising ? "var(--ok)" : "var(--muted)" }}>
+                  {advertising ? "Visible" : "Hidden"}
+                </span>
+                <div className={"toggle " + (advertising ? "on" : "")} onClick={toggleAdvertise} />
+                <span style={{ fontSize: 12, color: "var(--text-dim)" }}>Allow connections</span>
+              </label>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+                <span style={{ fontSize: 12, color: trustedConnectionsEnabled ? "var(--ok)" : "var(--muted)" }}>
+                  {trustedConnectionsEnabled ? "On" : "Off"}
+                </span>
+                <div className={"toggle " + (trustedConnectionsEnabled ? "on" : "")} onClick={toggleTrustedConnections} />
+                <span style={{ fontSize: 12, color: "var(--text-dim)" }}>Trusted device connections</span>
+              </label>
+            </div>
           </div>
         </div>
       </div>
@@ -1070,6 +1092,14 @@ function OverviewSection() {
   const [dwellProgress, setDwellProgress] = useState(0);
   const connectingRef = useRef(false);
   const bridgeWarmRef = useRef(false);
+  const [overviewToast, setOverviewToast] = useState("");
+  const overviewToastTimer = useRef(null);
+
+  function showOverviewToast(msg) {
+    setOverviewToast(msg);
+    clearTimeout(overviewToastTimer.current);
+    overviewToastTimer.current = setTimeout(() => setOverviewToast(""), 6000);
+  }
 
   async function stopControl(keepBridgeForHandoff = false) {
     // Warp local cursor to center so it doesn't snap back to the edge
@@ -1117,12 +1147,14 @@ function OverviewSection() {
           await SS.api("/api/handoff/remote/arm-return", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ return_edge: returnEdge, dwell_ms: 50 }),
+            body: JSON.stringify({ return_edge: returnEdge, dwell_ms: 0 }),
           });
         } catch {}
       }
       setActiveControl({ deviceName: name });
-    } catch {} finally {
+    } catch (e) {
+      if (e?.message) showOverviewToast(e.message);
+    } finally {
       connectingRef.current = false;
     }
   }
@@ -1142,7 +1174,7 @@ function OverviewSection() {
     SS.api("/api/handoff/arm", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ edge: edgeRel.localEdge, dwell_ms: 50 }),
+      body: JSON.stringify({ edge: edgeRel.localEdge, dwell_ms: 0 }),
     }).catch(() => {});
   }, [edgeHandoff, edgeRel?.localEdge, !!activeControl]);
 
@@ -1265,6 +1297,18 @@ function OverviewSection() {
           dwellProgress={dwellProgress}
           activeControl={activeControl} />
       </div>
+
+      {overviewToast && (
+        <div style={{
+          position: "fixed", top: 20, right: 20, zIndex: 200,
+          background: "var(--panel-2)", border: "1px solid var(--border-strong)",
+          borderRadius: 10, padding: "10px 16px", maxWidth: 360,
+          color: "var(--warn)", fontSize: 13, fontWeight: 500,
+          boxShadow: "0 8px 24px rgba(0,0,0,0.45)",
+        }}>
+          {overviewToast}
+        </div>
+      )}
 
       <PairModal open={pairOpen} target={null}
         onClose={() => setPairOpen(false)}
