@@ -873,7 +873,7 @@ function DevicesSection() {
     await load();
     await discoveryRefresh();
 
-    // Auto-connect: start a session bridge if none is already active.
+    // Start bridge, warp cursor, enter active control.
     if (pairData?.session?.session_id && pairData?.session_token && connInfo?.host) {
       try {
         const status = await SS.api("/api/handoff/remote/status");
@@ -889,6 +889,8 @@ function DevicesSection() {
             }),
           });
         }
+        await SS.api("/api/handoff/remote/warp-cursor", { method: "POST" });
+        setActiveControl({ deviceName: connInfo.name || connInfo.host });
       } catch {}
     }
   }
@@ -1055,8 +1057,15 @@ function OverviewSection() {
   const { thisDevice, paired, loading, load, unpair } = useDeviceData();
   const { devices: discovered, refresh: discoveryRefresh } = useDiscovery(true);
   const [pairOpen, setPairOpen] = useState(false);
+  const [activeControl, setActiveControl] = useState(null);
+
+  async function stopControl() {
+    setActiveControl(null);
+    try { await SS.api("/api/handoff/remote/stop", { method: "POST" }); } catch {}
+  }
 
   async function handleConnect(device_id) {
+    const name = paired.find(d => d.id === device_id)?.name || device_id;
     let cred = null;
     try { const raw = localStorage.getItem(`slickshiftTrusted_${device_id}`); if (raw) cred = JSON.parse(raw); } catch {}
     if (!cred?.shared_secret) return;
@@ -1079,6 +1088,7 @@ function OverviewSection() {
         }
       }
       await SS.api("/api/handoff/remote/warp-cursor", { method: "POST" });
+      setActiveControl({ deviceName: name });
     } catch {}
   }
 
@@ -1152,10 +1162,13 @@ function OverviewSection() {
                   body: JSON.stringify({ host: connInfo.host, port: connInfo.port || 8765, session_id: pairData.session.session_id, session_token: pairData.session_token }),
                 });
               }
+              await SS.api("/api/handoff/remote/warp-cursor", { method: "POST" });
+              setActiveControl({ deviceName: connInfo.name || connInfo.host });
             } catch {}
           }
         }} />
       <PendingPairDisplay />
+      {activeControl && <ActiveControlOverlay deviceName={activeControl.deviceName} onStop={stopControl} />}
     </>
   );
 }
