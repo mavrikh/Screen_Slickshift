@@ -210,6 +210,10 @@ def configure_logging() -> None:
     logging.getLogger("websockets.client").setLevel(logging.WARNING)
     logging.getLogger("websockets.legacy.server").setLevel(logging.WARNING)
     logging.getLogger("websockets.legacy.client").setLevel(logging.WARNING)
+    # Prevent uvicorn's access logger from propagating to our root handler.
+    # The --no-access-log flag disables uvicorn's own handler but propagation
+    # to basicConfig's StreamHandler still occurs without this.
+    logging.getLogger("uvicorn.access").propagate = False
 
 
 configure_logging()

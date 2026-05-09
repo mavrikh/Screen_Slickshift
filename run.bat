@@ -48,6 +48,6 @@ echo  Press Ctrl+C to stop the server.
 echo ============================================================
 echo.
 
-python -m uvicorn app.main:app --host %HOST% --port %PORT% --no-access-log
+python -m uvicorn app.main:app --host %HOST% --port %PORT% --no-access-log --log-level warning
 
 pause
