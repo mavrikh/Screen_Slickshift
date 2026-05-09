@@ -350,5 +350,5 @@ Remaining gaps before a polished product:
 1. **TLS** — all traffic is plain HTTP/WS. User has not decided whether this is in scope.
 2. **Native packaging** — currently requires Python and a terminal. Phase 10, explicitly deferred.
 3. **Auto-reconnect on session drop** — if the session token expires during use, the bridge silently disconnects. A reconnect prompt using the stored shared secret would improve resilience.
-4. **Windows discovery** — mDNS (`zeroconf`) is cross-platform but has not been verified on Windows. The discovery flow should work; Bonjour Print Services must be installed on Windows for mDNS resolution to function.
+4. **Windows discovery** — mDNS (`zeroconf`) is cross-platform and pure Python — it does not require Apple Bonjour. Not yet verified on Windows. If devices don't appear, check that Windows Firewall allows inbound UDP on port 5353 (`netsh advfirewall firewall add rule name="Slickshift mDNS" protocol=UDP dir=in localport=5353 action=allow`).
 5. **Multi-monitor** — primary screen detection works on macOS via `NSScreen` and Windows via `EnumDisplayMonitors`. Not tested on multi-monitor hardware yet.
