@@ -225,12 +225,13 @@ discovery_service = DiscoveryService()
 discovery_code_book = PairingCodeBook(ttl_seconds=45)
 _pending_pair_request: Optional[PendingPairRequest] = None
 
-# Safe default: the frontend is served by this same app, so no cross-origin browser
-# access is needed. If you later split the frontend onto another host, add only that
-# exact origin here.
+# Allow all origins: this is a LAN-only tool and security comes from the pairing
+# token, not the Origin header. Starlette's CORS middleware blocks WebSocket
+# connections with 403 when allow_origins=[] and a browser sends an Origin header
+# (always the case when accessing via LAN IP rather than localhost).
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=list(settings.allowed_origins),
+    allow_origins=settings.allowed_origins or ["*"],
     allow_credentials=False,
     allow_methods=["GET", "POST"],
     allow_headers=["X-Pairing-Token", "Content-Type"],
