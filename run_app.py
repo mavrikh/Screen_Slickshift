@@ -171,8 +171,6 @@ def main() -> None:
         height=800,
         min_size=(900, 620),
         resizable=True,
-        frameless=True,
-        easy_drag=False,   # we handle drag via -webkit-app-region in the HTML
         js_api=api,
     )
     webview.start()

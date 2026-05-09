@@ -65,6 +65,22 @@ body {
   mask-image: radial-gradient(ellipse at center, black 30%, transparent 75%);
 }
 
+/* ─── app-mode (pywebview desktop) ─────────────────── */
+/* Fill the native window exactly — no floating chrome, no scrolling */
+body.app-mode .stage {
+  padding: 0;
+  overflow: hidden;
+  display: block;
+}
+body.app-mode .win {
+  width: 100%;
+  height: 100%;
+  border-radius: 0;
+  box-shadow: none;
+  border: none;
+  grid-template-rows: 1fr;  /* no titlebar row */
+}
+
 /* ─── window chrome ─────────────────────────────────── */
 .win {
   width: 1180px; height: 760px;

@@ -46,6 +46,9 @@ function App() {
 
   useEffect(() => { applyAccent(accent); }, [accent]);
   useEffect(() => { document.documentElement.dataset.density = density; }, [density]);
+  useEffect(() => {
+    if (window.pywebview) document.body.classList.add("app-mode");
+  }, []);
 
   // Verify token on mount; in pywebview auto-inject the owner token
   useEffect(() => {
@@ -132,13 +135,16 @@ function App() {
   return (
     <div className="stage">
       <div className="win">
-        <div className="titlebar" style={{ WebkitAppRegion: "drag" }}>
-          <div className="win-title">Screen Slickshift</div>
-          <div className="win-rhs" style={{ WebkitAppRegion: "no-drag" }}>
-            <span className="dot" style={{ background: lockout ? "var(--danger)" : "var(--ok)" }} />
-            <span>{lockout ? "Lockout active" : `Connected · ${serverAddr}`}</span>
+        {!window.pywebview && (
+          <div className="titlebar">
+            <div className="tl"><span className="r" /><span className="y" /><span className="g" /></div>
+            <div className="win-title">Screen Slickshift</div>
+            <div className="win-rhs">
+              <span className="dot" style={{ background: lockout ? "var(--danger)" : "var(--ok)" }} />
+              <span>{lockout ? "Lockout active" : `Connected · ${serverAddr}`}</span>
+            </div>
           </div>
-        </div>
+        )}
 
         <aside className="side">
           <div className="side-brand">
