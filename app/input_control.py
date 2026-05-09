@@ -40,6 +40,22 @@ def click_mouse(button: str = "left") -> None:
     pyautogui.click(button=button)
 
 
+def mousedown_mouse(button: str = "left") -> None:
+    _ensure_enabled()
+    pyautogui = _pyautogui()
+    if button not in {"left", "right", "middle"}:
+        button = "left"
+    pyautogui.mouseDown(button=button)
+
+
+def mouseup_mouse(button: str = "left") -> None:
+    _ensure_enabled()
+    pyautogui = _pyautogui()
+    if button not in {"left", "right", "middle"}:
+        button = "left"
+    pyautogui.mouseUp(button=button)
+
+
 def scroll_mouse(amount: int) -> None:
     _ensure_enabled()
     pyautogui = _pyautogui()

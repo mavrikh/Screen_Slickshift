@@ -1212,11 +1212,10 @@ function startActiveLayer(event) {
   if (event.target.closest("button")) return;
   if (handoffState.mode !== "active_remote" || !handoffState.remoteConnected) return;
   if (handoffState.pointerLocked) {
-    // In pointer lock mode the cursor is captured — route physical clicks directly
-    // to the remote instead of starting a drag session.
-    if (event.button === 0) clickRemoteMouse("left");
-    else if (event.button === 2) clickRemoteMouse("right");
-    else if (event.button === 1) clickRemoteMouse("middle");
+    // Pointer lock: mirror physical button state so the user can click-and-drag
+    // on the remote. down:true on press, down:false on release (endActiveLayer).
+    const button = event.button === 2 ? "right" : event.button === 1 ? "middle" : "left";
+    sendRemoteEvent({ type: "mouse_button", button, down: true });
     return;
   }
   handoffState.activeLayerDragging = true;
@@ -1240,7 +1239,11 @@ function sendActiveLayerMovement(event) {
   sendRemoteEvent({ type: "mouse_move", dx: dx * 1.3, dy: dy * 1.3 });
 }
 
-function endActiveLayer() {
+function endActiveLayer(event) {
+  if (handoffState.pointerLocked && event && handoffState.mode === "active_remote" && handoffState.remoteConnected) {
+    const button = event.button === 2 ? "right" : event.button === 1 ? "middle" : "left";
+    sendRemoteEvent({ type: "mouse_button", button, down: false });
+  }
   handoffState.activeLayerDragging = false;
 }
 
@@ -1270,8 +1273,9 @@ function updateActivePointerLock() {
   renderState();
 }
 
-function clickRemoteMouse(button) {
-  sendRemoteEvent({ type: "mouse_button", button, down: true });
+async function clickRemoteMouse(button) {
+  await sendRemoteEvent({ type: "mouse_button", button, down: true });
+  await sendRemoteEvent({ type: "mouse_button", button, down: false });
 }
 
 async function wiggleRemoteMouse() {
