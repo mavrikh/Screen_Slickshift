@@ -1192,7 +1192,7 @@ function OverviewSection() {
       } catch {}
     };
     poll();
-    const t = setInterval(poll, 200);
+    const t = setInterval(poll, 16);
     return () => { alive = false; clearInterval(t); };
   }, [edgeHandoff, edgeRel?.localEdge, edgeRel?.remoteId, !!activeControl]);
 
