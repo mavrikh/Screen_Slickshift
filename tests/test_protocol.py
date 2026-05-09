@@ -23,7 +23,7 @@ def test_parse_mouse_move() -> None:
 def test_protocol_capabilities_reports_supported_subset() -> None:
     assert protocol_capabilities() == {
         "version": SUPPORTED_PROTOCOL_VERSION,
-        "input_events": ["mouse_move", "mouse_button", "scroll", "ping"],
+        "input_events": ["mouse_move", "mouse_button", "scroll", "keyboard", "ping"],
         "legacy_aliases": ["move", "click"],
         "envelope": "v1-payload",
         "limits": {
@@ -136,7 +136,7 @@ def test_macos_receiver_status_reports_protocol_capabilities() -> None:
     assert response.status_code == 200
     protocol = response.json()["protocol"]
     assert protocol["version"] == SUPPORTED_PROTOCOL_VERSION
-    assert protocol["input_events"] == ["mouse_move", "mouse_button", "scroll", "ping"]
+    assert protocol["input_events"] == ["mouse_move", "mouse_button", "scroll", "keyboard", "ping"]
     assert protocol["legacy_aliases"] == ["move", "click"]
     assert protocol["envelope"] == "v1-payload"
     assert protocol["limits"] == {

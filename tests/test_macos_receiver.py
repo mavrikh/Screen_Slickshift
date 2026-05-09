@@ -32,7 +32,7 @@ def test_receiver_status_payload_keeps_screen_capture_out_of_scope() -> None:
     assert payload["disabled"] is False
     assert payload["input_allowed"] is True
     assert payload["screen_capture"] is False
-    assert payload["protocol"]["input_events"] == ["mouse_move", "mouse_button", "scroll", "ping"]
+    assert payload["protocol"]["input_events"] == ["mouse_move", "mouse_button", "scroll", "keyboard", "ping"]
     assert payload["capabilities"]["receive_input"] is True
     assert payload["capabilities"]["screen_capture"] is False
     assert payload["auth"]["websocket"]["preferred"] == "first-message"

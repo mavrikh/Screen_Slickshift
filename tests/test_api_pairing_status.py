@@ -43,7 +43,7 @@ def test_status_endpoint_reports_protocol_capabilities(tmp_path, monkeypatch) ->
     assert response.status_code == 200
     protocol = response.json()["protocol"]
     assert protocol["version"] == 1
-    assert protocol["input_events"] == ["mouse_move", "mouse_button", "scroll", "ping"]
+    assert protocol["input_events"] == ["mouse_move", "mouse_button", "scroll", "keyboard", "ping"]
     assert protocol["legacy_aliases"] == ["move", "click"]
     assert protocol["envelope"] == "v1-payload"
     assert protocol["limits"] == {
@@ -1648,7 +1648,7 @@ def test_handoff_remote_event_sends_mouse_event(tmp_path, monkeypatch) -> None:
     )
 
     assert response.status_code == 200
-    assert bridge.events == [{"type": "mouse_move", "dx": 4.0, "dy": -2.0, "button": "left", "down": True, "amount": 0}]
+    assert bridge.events == [{"type": "mouse_move", "dx": 4.0, "dy": -2.0, "button": "left", "down": True, "amount": 0, "key": "", "ctrl": False, "alt": False, "shift": False, "meta": False}]
 
 
 def test_handoff_remote_stop_closes_bridge(tmp_path, monkeypatch) -> None:
@@ -1670,7 +1670,7 @@ class FakeRemoteBridge:
     def __init__(self, start_status: RemoteStatus | None = None) -> None:
         self.start_status = start_status or RemoteStatus(
             reachable=True,
-            input_events=("mouse_move", "mouse_button", "scroll", "ping"),
+            input_events=("mouse_move", "mouse_button", "scroll", "keyboard", "ping"),
         )
         self.started = None
         self.events = []

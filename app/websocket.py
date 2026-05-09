@@ -6,7 +6,7 @@ from typing import Optional
 
 from fastapi import WebSocket, WebSocketDisconnect
 
-from app.input_control import click_mouse, mousedown_mouse, mouseup_mouse, move_mouse, scroll_mouse
+from app.input_control import click_mouse, mousedown_mouse, mouseup_mouse, move_mouse, press_key, scroll_mouse
 from app.protocol import parse_event
 
 
@@ -21,6 +21,7 @@ async def handle_touchpad_socket(
     websocket: WebSocket,
     accepted: bool = False,
     authorize_mouse: Optional[MouseAuthorizer] = None,
+    authorize_keyboard: Optional[MouseAuthorizer] = None,
     mark_session_active: Optional[SessionActivityMarker] = None,
 ) -> None:
     if not accepted:
@@ -50,6 +51,12 @@ async def handle_touchpad_socket(
                     return
                 scroll_mouse(event.amount)
                 _mark_session_active(mark_session_active)
+            elif event.type == "keyboard":
+                if authorize_keyboard is not None and not authorize_keyboard():
+                    continue
+                if event.key:
+                    press_key(event.key, ctrl=event.ctrl, alt=event.alt, shift=event.shift, meta=event.meta)
+                    _mark_session_active(mark_session_active)
             elif event.type == "ping":
                 continue
             else:

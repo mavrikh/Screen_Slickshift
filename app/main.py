@@ -124,6 +124,11 @@ class RemoteHandoffEventRequest(BaseModel):
     button: str = "left"
     down: bool = True
     amount: int = 0
+    key: str = ""
+    ctrl: bool = False
+    alt: bool = False
+    shift: bool = False
+    meta: bool = False
 
 
 class HandoffArmRequest(BaseModel):
@@ -1161,14 +1166,13 @@ async def touchpad(websocket: WebSocket, token: Optional[str] = Query(default=No
             websocket,
             accepted=True,
             authorize_mouse=lambda: pairing_session_book.verify_session_permission(
-                session_id,
-                session_token,
-                "mouse",
-            )
-            is not None,
+                session_id, session_token, "mouse",
+            ) is not None,
+            authorize_keyboard=lambda: pairing_session_book.verify_session_permission(
+                session_id, session_token, "keyboard",
+            ) is not None,
             mark_session_active=lambda: pairing_session_book.mark_session_active(
-                session_id,
-                session_token,
+                session_id, session_token,
             ),
         )
         return

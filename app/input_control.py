@@ -62,6 +62,43 @@ def scroll_mouse(amount: int) -> None:
     pyautogui.scroll(int(amount))
 
 
+_SPECIAL_KEYS = frozenset({
+    "enter", "tab", "backspace", "delete", "up", "down", "left", "right",
+    "home", "end", "pageup", "pagedown", "insert", "escape", "esc", "space",
+    "capslock", "numlock", "scrolllock",
+    "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12",
+})
+
+
+def press_key(
+    key: str,
+    ctrl: bool = False,
+    alt: bool = False,
+    shift: bool = False,
+    meta: bool = False,
+) -> None:
+    _ensure_enabled()
+    if not key:
+        return
+    pyautogui = _pyautogui()
+    modifiers = []
+    if ctrl:
+        modifiers.append("ctrl")
+    if alt:
+        modifiers.append("alt")
+    if shift:
+        modifiers.append("shift")
+    if meta:
+        modifiers.append("command" if sys.platform == "darwin" else "win")
+    pg_key = key.lower() if key.lower() in _SPECIAL_KEYS else key
+    if modifiers:
+        pyautogui.hotkey(*modifiers, pg_key)
+    elif len(key) == 1:
+        pyautogui.write(key)
+    elif pg_key in _SPECIAL_KEYS:
+        pyautogui.press(pg_key)
+
+
 def send_text_to_pc(text: str) -> None:
     _ensure_enabled()
     if not text:

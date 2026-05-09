@@ -132,6 +132,15 @@ class RemoteHandoffBridge:
             outbound = {"type": "mouse_button", "button": event.button, "down": event.down}
         elif event.type == "scroll":
             outbound = {"type": "scroll", "amount": event.amount}
+        elif event.type == "keyboard":
+            outbound = {
+                "type": "keyboard",
+                "key": event.key,
+                "ctrl": event.ctrl,
+                "alt": event.alt,
+                "shift": event.shift,
+                "meta": event.meta,
+            }
         else:
             outbound = {"type": "ping"}
 

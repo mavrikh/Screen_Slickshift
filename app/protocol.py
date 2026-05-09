@@ -6,19 +6,29 @@ from typing import Any, Literal
 
 
 SUPPORTED_PROTOCOL_VERSION = 1
-SUPPORTED_INPUT_EVENTS = ["mouse_move", "mouse_button", "scroll", "ping"]
+SUPPORTED_INPUT_EVENTS = ["mouse_move", "mouse_button", "scroll", "keyboard", "ping"]
 LEGACY_INPUT_ALIASES = ["move", "click"]
 SUPPORTED_ENVELOPE = "v1-payload"
 MAX_MOUSE_DELTA = 5000
 MAX_SCROLL_AMOUNT = 1000
+MAX_KEY_LENGTH = 16
 MouseButton = Literal["left", "right", "middle"]
 ProtocolEventType = Literal[
     "mouse_move",
     "mouse_button",
     "scroll",
+    "keyboard",
     "ping",
     "unknown",
 ]
+
+# Keys the protocol accepts by name; single printable characters are also allowed.
+_ALLOWED_NAMED_KEYS = frozenset({
+    "enter", "tab", "backspace", "delete", "up", "down", "left", "right",
+    "home", "end", "pageup", "pagedown", "insert", "escape", "esc", "space",
+    "capslock", "numlock", "scrolllock",
+    "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12",
+})
 
 
 @dataclass(frozen=True)
@@ -30,6 +40,11 @@ class ProtocolEvent:
     button: MouseButton = "left"
     down: bool = True
     amount: int = 0
+    key: str = ""
+    ctrl: bool = False
+    alt: bool = False
+    shift: bool = False
+    meta: bool = False
     raw_type: str = ""
     supported_version: bool = True
 
@@ -78,6 +93,20 @@ def parse_event(message: dict[str, Any]) -> ProtocolEvent:
             type="scroll",
             version=parsed.version,
             amount=_int(payload.get("amount"), min_value=-MAX_SCROLL_AMOUNT, max_value=MAX_SCROLL_AMOUNT),
+            raw_type=event_type,
+        )
+
+    if event_type == "keyboard":
+        raw_key = str(payload.get("key", ""))[:MAX_KEY_LENGTH]
+        key = raw_key if (len(raw_key) == 1 or raw_key.lower() in _ALLOWED_NAMED_KEYS) else ""
+        return ProtocolEvent(
+            type="keyboard",
+            version=parsed.version,
+            key=key,
+            ctrl=_bool(payload.get("ctrl"), default=False),
+            alt=_bool(payload.get("alt"), default=False),
+            shift=_bool(payload.get("shift"), default=False),
+            meta=_bool(payload.get("meta"), default=False),
             raw_type=event_type,
         )
 

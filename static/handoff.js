@@ -62,6 +62,15 @@ const handoffState = {
 
 const OPPOSITE_EDGE = { left: "right", right: "left", top: "bottom", bottom: "top" };
 
+const REMOTE_KEY_MAP = {
+  Enter: "enter", Tab: "tab", Backspace: "backspace", Delete: "delete",
+  ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right",
+  Home: "home", End: "end", PageUp: "pageup", PageDown: "pagedown",
+  Insert: "insert", CapsLock: "capslock", NumLock: "numlock", ScrollLock: "scrolllock",
+  F1: "f1", F2: "f2", F3: "f3", F4: "f4", F5: "f5", F6: "f6",
+  F7: "f7", F8: "f8", F9: "f9", F10: "f10", F11: "f11", F12: "f12",
+};
+
 const handoffTokenInput = document.getElementById("handoffTokenInput");
 const handoffConnectButton = document.getElementById("handoffConnectButton");
 const handoffStatus = document.getElementById("handoffStatus");
@@ -1880,6 +1889,23 @@ document.addEventListener("keydown", (event) => {
   if (!handoffState.remoteConnected && handoffState.mode === "idle") return;
   event.preventDefault();
   stopHandoff();
+});
+
+document.addEventListener("keydown", (event) => {
+  if (handoffState.mode !== "active_remote" || !handoffState.remoteConnected) return;
+  if (event.key === "Escape") return; // handled by stop-handoff listener
+  if (["Control", "Alt", "Shift", "Meta"].includes(event.key)) return; // modifier-only
+  const key = REMOTE_KEY_MAP[event.key] ?? (event.key.length === 1 ? event.key : null);
+  if (!key) return;
+  event.preventDefault();
+  sendRemoteEvent({
+    type: "keyboard",
+    key,
+    ctrl: event.ctrlKey,
+    alt: event.altKey,
+    shift: event.shiftKey,
+    meta: event.metaKey,
+  });
 });
 layoutCanvas.addEventListener("pointerdown", startPan);
 layoutCanvas.addEventListener("pointermove", handleDrag);
