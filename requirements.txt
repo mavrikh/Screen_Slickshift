@@ -11,3 +11,4 @@ httpx==0.28.1
 websockets==14.1
 openai==1.58.1
 zeroconf==0.148.0
+pywebview>=4.4.1
