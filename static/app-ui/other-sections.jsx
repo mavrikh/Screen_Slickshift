@@ -22,9 +22,28 @@ function Toggle({ on, onChange }) {
   );
 }
 
+// ── Settings persistence ─────────────────────────────────────────────────────
+// Shares the ss_ui_prefs blob used by app.jsx for accent/density/section.
+
+function usePersistedSetting(key, defaultValue) {
+  const [value, setValue] = useOS(() => {
+    try {
+      const obj = JSON.parse(localStorage.getItem("ss_ui_prefs") || "{}");
+      return key in obj ? obj[key] : defaultValue;
+    } catch { return defaultValue; }
+  });
+  function setAndPersist(newVal) {
+    setValue(newVal);
+    try {
+      const obj = JSON.parse(localStorage.getItem("ss_ui_prefs") || "{}");
+      obj[key] = newVal;
+      localStorage.setItem("ss_ui_prefs", JSON.stringify(obj));
+    } catch {}
+  }
+  return [value, setAndPersist];
+}
+
 // ── Settings section ─────────────────────────────────────────────────────────
-// Settings are UI-local for now (no backend persistence); they will persist
-// in the native shell config once packaging is decided.
 
 function SettingsSection({ accent, density, onAccent, onDensity }) {
   const ACCENT_PALETTES = [
@@ -96,11 +115,11 @@ function SettingsSection({ accent, density, onAccent, onDensity }) {
 }
 
 function MouseSectionBody() {
-  const [tracking, setTracking] = useOS(60);
-  const [scroll, setScroll] = useOS(45);
-  const [natural, setNatural] = useOS(true);
-  const [keyboard, setKeyboard] = useOS(true);
-  const [pointerMode, setPointerMode] = useOS("relative");
+  const [tracking, setTracking] = usePersistedSetting("trackingSpeed", 60);
+  const [scroll, setScroll] = usePersistedSetting("scrollSpeed", 45);
+  const [natural, setNatural] = usePersistedSetting("naturalScrolling", true);
+  const [keyboard, setKeyboard] = usePersistedSetting("forwardKeystrokes", true);
+  const [pointerMode, setPointerMode] = usePersistedSetting("pointerMode", "relative");
   return (
     <>
       <div className="panel">
@@ -134,7 +153,7 @@ function MouseSectionBody() {
 }
 
 function EdgesSectionBody() {
-  const [returnEdge, setReturnEdge] = useOS(true);
+  const [returnEdge, setReturnEdge] = usePersistedSetting("autoReturnEdge", true);
   return (
     <div className="panel">
       <div className="panel-h"><h2>Behaviour</h2><span className="h-sub">Layout lives on the Overview screen</span></div>
@@ -146,8 +165,8 @@ function EdgesSectionBody() {
 }
 
 function ClipboardSectionBody() {
-  const [share, setShare] = useOS(true);
-  const [textOnly, setTextOnly] = useOS(true);
+  const [share, setShare] = usePersistedSetting("clipboardShare", true);
+  const [textOnly, setTextOnly] = usePersistedSetting("clipboardTextOnly", true);
   return (
     <div className="panel">
       <div className="panel-h"><h2>Sharing</h2></div>
