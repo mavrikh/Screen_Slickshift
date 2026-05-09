@@ -73,6 +73,7 @@ class DiscoveryService:
         self._browser: Optional[AsyncServiceBrowser] = None
         self._found: dict[str, DiscoveredDevice] = {}
         self._advertising = False
+        self._browsing = False
         self._own_device_id: Optional[str] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
@@ -80,28 +81,46 @@ class DiscoveryService:
     def advertising(self) -> bool:
         return self._advertising
 
+    @property
+    def browsing(self) -> bool:
+        return self._browsing
+
     def get_discovered(self) -> list[DiscoveredDevice]:
         return list(self._found.values())
 
     def public_dict(self) -> dict[str, Any]:
         return {
             "advertising": self._advertising,
+            "browsing": self._browsing,
             "discovered": [d.public_dict() for d in self.get_discovered()],
         }
 
-    async def start(self, port: int, device_name: str, device_id: str) -> None:
-        if self._zc is not None:
+    async def _ensure_zc_and_browser(self) -> None:
+        if self._zc is None:
+            self._loop = asyncio.get_event_loop()
+            self._zc = AsyncZeroconf()
+        if self._browser is None:
+            self._browser = AsyncServiceBrowser(
+                self._zc.zeroconf,
+                SERVICE_TYPE,
+                handlers=[self._on_service_state_change],
+            )
+
+    async def start_browse(self, device_id: str) -> None:
+        if self._browsing:
             return
         self._own_device_id = device_id
-        self._loop = asyncio.get_event_loop()
+        await self._ensure_zc_and_browser()
+        self._browsing = True
+        logger.info("Discovery: browsing started")
 
+    async def start_advertise(self, port: int, device_name: str, device_id: str) -> None:
+        if self._advertising:
+            return
+        self._own_device_id = device_id
+        await self._ensure_zc_and_browser()
+        self._browsing = True
         local_ip = get_local_ip()
-        logger.info(
-            "Discovery: advertising %s (%s) at %s:%d",
-            device_name, device_id, local_ip, port,
-        )
-
-        self._zc = AsyncZeroconf()
         self._info = AsyncServiceInfo(
             SERVICE_TYPE,
             f"{device_name}.{SERVICE_TYPE}",
@@ -114,12 +133,26 @@ class DiscoveryService:
         )
         await self._zc.async_register_service(self._info)
         self._advertising = True
-
-        self._browser = AsyncServiceBrowser(
-            self._zc.zeroconf,
-            SERVICE_TYPE,
-            handlers=[self._on_service_state_change],
+        logger.info(
+            "Discovery: advertising %s (%s) at %s:%d",
+            device_name, device_id, local_ip, port,
         )
+
+    async def stop_advertise(self) -> None:
+        if not self._advertising or self._zc is None:
+            return
+        if self._info is not None:
+            try:
+                await self._zc.async_unregister_service(self._info)
+            except Exception as exc:
+                logger.debug("Discovery: unregister error: %s", exc)
+            self._info = None
+        self._advertising = False
+        logger.info("Discovery: advertising stopped, browsing continues")
+
+    async def start(self, port: int, device_name: str, device_id: str) -> None:
+        await self.start_browse(device_id)
+        await self.start_advertise(port, device_name, device_id)
 
     async def stop(self) -> None:
         if self._zc is None:
@@ -137,6 +170,7 @@ class DiscoveryService:
         self._info = None
         self._browser = None
         self._advertising = False
+        self._browsing = False
         self._found.clear()
         logger.info("Discovery stopped.")
 

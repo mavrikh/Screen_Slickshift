@@ -114,7 +114,7 @@ function useDeviceData() {
 function useDiscovery(active) {
   const [devices, setDevices] = useState([]);
   const [advertising, setAdvertising] = useState(false);
-  const [scanning, setScanning] = useState(false);
+  const [browsing, setBrowsing] = useState(false);
   const timerRef = useRef(null);
 
   const poll = useCallback(async () => {
@@ -122,24 +122,32 @@ function useDiscovery(active) {
       const d = await SS.api("/api/discovery/browse");
       setDevices((d.devices || []).filter(x => !x.trusted));
       setAdvertising(!!d.advertising);
+      setBrowsing(!!d.browsing);
     } catch {}
   }, []);
 
   useEffect(() => {
     if (!active) return;
-    setScanning(true);
     poll();
     timerRef.current = setInterval(poll, 3000);
-    return () => {
-      clearInterval(timerRef.current);
-      setScanning(false);
-    };
+    return () => clearInterval(timerRef.current);
   }, [active, poll]);
+
+  async function toggleBrowse() {
+    try {
+      if (browsing) {
+        await SS.api("/api/discovery/browse/stop", { method: "POST" });
+      } else {
+        await SS.api("/api/discovery/browse/start", { method: "POST" });
+      }
+      await poll();
+    } catch {}
+  }
 
   async function toggleAdvertise() {
     try {
       if (advertising) {
-        await SS.api("/api/discovery/stop", { method: "POST" });
+        await SS.api("/api/discovery/advertise/stop", { method: "POST" });
       } else {
         await SS.api("/api/discovery/advertise", { method: "POST" });
       }
@@ -147,7 +155,7 @@ function useDiscovery(active) {
     } catch {}
   }
 
-  return { devices, advertising, scanning, toggleAdvertise, refresh: poll };
+  return { devices, advertising, browsing, toggleAdvertise, toggleBrowse, refresh: poll };
 }
 
 // ── UI components ────────────────────────────────────────────────────────────
@@ -521,11 +529,11 @@ function PairModal({ open, target, onClose, onComplete, discoveredDevices = [] }
             clipboard_write: perms.clipboard,
             file_receive: perms.files,
           },
-          remember_device: false,
+          remember_device: true,
         }),
       });
-      if (data.trusted && data.shared_secret && deviceId) {
-        try { localStorage.setItem(`slickshiftTrusted_${deviceId}`, JSON.stringify({ shared_secret: data.shared_secret })); } catch {}
+      if (data.shared_secret && deviceId) {
+        try { localStorage.setItem(`slickshiftTrusted_${deviceId}`, JSON.stringify({ shared_secret: data.shared_secret, host, port })); } catch {}
       }
       // Record Screen B in Screen A's own trusted-device store so it appears
       // in this machine's trusted list (pairing only writes to Screen B's store
@@ -854,7 +862,7 @@ function ActiveControlOverlay({ deviceName, onStop }) {
 
 function DevicesSection() {
   const { thisDevice, paired, loading, error, load, unpair, setPerm } = useDeviceData();
-  const { devices: discovered, advertising, toggleAdvertise, refresh: discoveryRefresh } = useDiscovery(true);
+  const { devices: discovered, advertising, browsing, toggleAdvertise, toggleBrowse, refresh: discoveryRefresh } = useDiscovery(true);
   const [pairOpen, setPairOpen] = useState(false);
   const [pairTarget, setPairTarget] = useState(null);
   const [reconnectMsg, setReconnectMsg] = useState("");
@@ -908,9 +916,10 @@ function DevicesSection() {
           setReconnectMsg(`${name} is not on the network yet. Make sure Screen Slickshift is running on it.`);
           return;
         }
-        const found = discovered.find(d => d.device_id === device_id);
+        const found = discovered.find(d => d.device_id === device_id)
+          || (cred?.host ? { host: cred.host, port: cred.port || 8765 } : null);
         if (!found) {
-          setReconnectMsg(`${name} not found on the network. Make sure Screen Slickshift is running on it and Search is enabled.`);
+          setReconnectMsg(`${name} not found on the network. Make sure Screen Slickshift is running on it.`);
           return;
         }
         const data = await SS.api("/api/discovery/remote/reconnect", {
@@ -947,12 +956,9 @@ function DevicesSection() {
           <h1>Devices</h1>
           <div className="sub">Devices you trust to share input, clipboard, and files.</div>
         </div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <button type="button" className="btn-ghost" onClick={load}><Icons.Refresh size={14} />Refresh</button>
-          <button type="button" className="btn-primary" onClick={() => { setPairTarget(null); setPairOpen(true); }}>
-            <Icons.Plus size={14} />Add device
-          </button>
-        </div>
+        <button type="button" className="btn-primary" onClick={() => { setPairTarget(null); setPairOpen(true); }}>
+          <Icons.Plus size={14} />Add device
+        </button>
       </div>
 
       {error && <div style={{ color: "var(--danger)", fontSize: 13, marginBottom: 12 }}>{error}</div>}
@@ -984,14 +990,14 @@ function DevicesSection() {
         <div className="panel-h">
           <h2>Search for available devices</h2>
           <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
-            <span style={{ fontSize: 12, color: advertising ? "var(--ok)" : "var(--muted)" }}>
-              {advertising ? "On" : "Off"}
+            <span style={{ fontSize: 12, color: browsing ? "var(--ok)" : "var(--muted)" }}>
+              {browsing ? "On" : "Off"}
             </span>
-            <div className={"toggle " + (advertising ? "on" : "")} onClick={toggleAdvertise} />
+            <div className={"toggle " + (browsing ? "on" : "")} onClick={toggleBrowse} />
           </label>
         </div>
         <div className="panel-body">
-          {!advertising ? (
+          {!browsing ? (
             <div style={{ color: "var(--muted)", fontSize: 13, padding: "8px 0" }}>
               Enable search to find nearby devices running Screen Slickshift.
             </div>
@@ -1058,19 +1064,27 @@ function OverviewSection() {
   const { devices: discovered, refresh: discoveryRefresh } = useDiscovery(true);
   const [pairOpen, setPairOpen] = useState(false);
   const [activeControl, setActiveControl] = useState(null);
+  const [edgeHandoff, setEdgeHandoff] = useState(false);
+  const [edgeRel, setEdgeRel] = useState(null);
+  const [detectorState, setDetectorState] = useState("idle");
+  const [dwellProgress, setDwellProgress] = useState(0);
+  const connectingRef = useRef(false);
 
   async function stopControl() {
     setActiveControl(null);
     try { await SS.api("/api/handoff/remote/stop", { method: "POST" }); } catch {}
   }
 
-  async function handleConnect(device_id) {
+  async function handleConnect(device_id, returnEdge = null) {
+    if (connectingRef.current) return;
+    connectingRef.current = true;
     const name = paired.find(d => d.id === device_id)?.name || device_id;
     let cred = null;
     try { const raw = localStorage.getItem(`slickshiftTrusted_${device_id}`); if (raw) cred = JSON.parse(raw); } catch {}
-    if (!cred?.shared_secret) return;
-    const found = discovered.find(d => d.device_id === device_id);
-    if (!found) return;
+    if (!cred?.shared_secret) { connectingRef.current = false; return; }
+    const found = discovered.find(d => d.device_id === device_id)
+      || (cred?.host ? { host: cred.host, port: cred.port || 8765 } : null);
+    if (!found) { connectingRef.current = false; return; }
     try {
       const status = await SS.api("/api/handoff/remote/status");
       if (!status.connected) {
@@ -1088,16 +1102,67 @@ function OverviewSection() {
         }
       }
       await SS.api("/api/handoff/remote/warp-cursor", { method: "POST" });
+      if (returnEdge) {
+        try {
+          await SS.api("/api/handoff/remote/arm-return", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ return_edge: returnEdge, dwell_ms: 400 }),
+          });
+        } catch {}
+      }
       setActiveControl({ deviceName: name });
-    } catch {}
+    } catch {} finally {
+      connectingRef.current = false;
+    }
   }
 
-  const selfRow = thisDevice ? [{
-    id: "__self__", self: true,
-    name: thisDevice.name,
-    platform: osToPlatform(thisDevice.os || ""),
-    model: thisDevice.name,
-  }] : [];
+  // Arm local edge detector when handoff is on, screens are adjacent, and not currently controlling
+  useEffect(() => {
+    if (!edgeHandoff || !edgeRel || activeControl) {
+      if (edgeHandoff) SS.api("/api/handoff/disarm", { method: "POST" }).catch(() => {});
+      setDetectorState("idle");
+      setDwellProgress(0);
+      return;
+    }
+    SS.api("/api/handoff/arm", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ edge: edgeRel.localEdge, dwell_ms: 400 }),
+    }).catch(() => {});
+  }, [edgeHandoff, edgeRel?.localEdge, !!activeControl]);
+
+  // Poll local detector — trigger connect when cursor dwells at the armed edge
+  useEffect(() => {
+    if (!edgeHandoff || !edgeRel || activeControl) return;
+    let alive = true;
+    const poll = async () => {
+      try {
+        const d = await SS.api("/api/handoff/detector/state");
+        if (!alive) return;
+        setDetectorState(d.state || "idle");
+        setDwellProgress(d.dwell_progress ?? 0);
+        if (d.state === "pending") handleConnect(edgeRel.remoteId, edgeRel.returnEdge);
+      } catch {}
+    };
+    poll();
+    const t = setInterval(poll, 200);
+    return () => { alive = false; clearInterval(t); };
+  }, [edgeHandoff, edgeRel?.localEdge, edgeRel?.remoteId, !!activeControl]);
+
+  // Poll remote return detector — auto-disconnect when cursor dwells at the return edge
+  useEffect(() => {
+    if (!edgeHandoff || !activeControl) return;
+    let alive = true;
+    const t = setInterval(async () => {
+      try {
+        const d = await SS.api("/api/handoff/remote/return-state");
+        if (!alive) return;
+        if (d.state === "pending") stopControl();
+      } catch {}
+    }, 200);
+    return () => { alive = false; clearInterval(t); };
+  }, [edgeHandoff, !!activeControl]);
 
   return (
     <>
@@ -1120,11 +1185,10 @@ function OverviewSection() {
           <div className="panel-body">
             {loading ? (
               <div style={{ color: "var(--muted)", fontSize: 13, padding: "8px 0" }}>Loading…</div>
+            ) : paired.length === 0 ? (
+              <div style={{ color: "var(--muted)", fontSize: 13, padding: "8px 0" }}>No paired devices yet.</div>
             ) : (
-              <>
-                {selfRow.map(d => <DeviceRow key={d.id} d={d} compact />)}
-                {paired.map(d => <DeviceRow key={d.id} d={d} onUnpair={unpair} onConnect={handleConnect} compact />)}
-              </>
+              paired.map(d => <DeviceRow key={d.id} d={d} onUnpair={unpair} onConnect={handleConnect} compact />)
             )}
           </div>
           {discovered.length > 0 && (
@@ -1145,7 +1209,13 @@ function OverviewSection() {
           )}
         </div>
 
-        <OverviewEdges paired={paired} thisDevice={thisDevice} />
+        <OverviewEdges paired={paired} thisDevice={thisDevice}
+          onEdgeChange={setEdgeRel}
+          edgeHandoff={edgeHandoff}
+          onToggleEdgeHandoff={() => setEdgeHandoff(v => !v)}
+          detectorState={detectorState}
+          dwellProgress={dwellProgress}
+          activeControl={activeControl} />
       </div>
 
       <PairModal open={pairOpen} target={null}
@@ -1173,9 +1243,27 @@ function OverviewSection() {
   );
 }
 
+// ── Edge relationship helper ─────────────────────────────────────────────────
+
+function computeEdgeRel(tiles) {
+  const local = tiles.find(t => t.role === "local");
+  const remote = tiles.find(t => t.role === "target");
+  if (!local || !remote) return null;
+  const SNAP = 16;
+  if (Math.abs((local.x + local.w) - remote.x) < SNAP)
+    return { localEdge: "right", returnEdge: "left", remoteId: remote.id, remoteName: remote.name };
+  if (Math.abs(local.x - (remote.x + remote.w)) < SNAP)
+    return { localEdge: "left", returnEdge: "right", remoteId: remote.id, remoteName: remote.name };
+  if (Math.abs((local.y + local.h) - remote.y) < SNAP)
+    return { localEdge: "bottom", returnEdge: "top", remoteId: remote.id, remoteName: remote.name };
+  if (Math.abs(local.y - (remote.y + remote.h)) < SNAP)
+    return { localEdge: "top", returnEdge: "bottom", remoteId: remote.id, remoteName: remote.name };
+  return null;
+}
+
 // ── Overview edge canvas ─────────────────────────────────────────────────────
 
-function OverviewEdges({ paired, thisDevice }) {
+function OverviewEdges({ paired, thisDevice, onEdgeChange, edgeHandoff, onToggleEdgeHandoff, detectorState, dwellProgress, activeControl }) {
   const W = 360, H = 220;
   const [tiles, setTiles] = useState([]);
   const [drag, setDrag] = useState(null);
@@ -1185,8 +1273,7 @@ function OverviewEdges({ paired, thisDevice }) {
     if (thisDevice) {
       baseTiles.push({ id: "local", name: thisDevice.name, role: "local", x: 36, y: 56, w: 130, h: 80, label: "" });
     }
-    const online = paired.filter(d => d.status === "connected").slice(0, 3);
-    online.forEach((d, i) => {
+    paired.slice(0, 3).forEach((d, i) => {
       baseTiles.push({ id: d.id, name: d.name, role: "target", x: 178 + i * 16, y: 50 + i * 8, w: 150, h: 92, label: "" });
     });
     if (baseTiles.length === 0) {
@@ -1197,6 +1284,11 @@ function OverviewEdges({ paired, thisDevice }) {
     }
     setTiles(baseTiles);
   }, [thisDevice, paired]);
+
+  // Report edge relationship to parent whenever tiles are repositioned
+  useEffect(() => {
+    onEdgeChange && onEdgeChange(computeEdgeRel(tiles));
+  }, [tiles]);
 
   function onDown(id, e) {
     const t = tiles.find(x => x.id === id);
@@ -1226,11 +1318,36 @@ function OverviewEdges({ paired, thisDevice }) {
     }
   }
 
+  const edgeRel = computeEdgeRel(tiles);
+
   return (
     <div className="panel">
       <div className="panel-h">
-        <h2>Screen edges</h2>
-        <span className="h-sub">Drag to arrange · cursor hands off where edges touch</span>
+        <div>
+          <h2>Screen edges</h2>
+          <span className="h-sub">
+            {edgeHandoff && edgeRel
+              ? `${edgeRel.localEdge} edge → ${edgeRel.remoteName}`
+              : "Drag to arrange · snap edges to enable handoff"}
+          </span>
+        </div>
+        <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+          {edgeHandoff && edgeRel && !activeControl && detectorState === "armed" && dwellProgress > 0 && (
+            <div style={{ width: 48, height: 4, borderRadius: 2, background: "var(--border-strong)", overflow: "hidden" }}>
+              <div style={{ width: `${dwellProgress * 100}%`, height: "100%", background: "var(--accent)", transition: "width 0.1s linear" }} />
+            </div>
+          )}
+          {edgeHandoff && activeControl && (
+            <span style={{ fontSize: 11, color: "var(--ok)" }}>Active</span>
+          )}
+          {edgeHandoff && !edgeRel && (
+            <span style={{ fontSize: 11, color: "var(--warn)" }}>Snap screens first</span>
+          )}
+          <span style={{ fontSize: 12, color: edgeHandoff ? (edgeRel ? "var(--ok)" : "var(--warn)") : "var(--muted)" }}>
+            {edgeHandoff ? "On" : "Off"}
+          </span>
+          <div className={"toggle " + (edgeHandoff ? "on" : "")} onClick={onToggleEdgeHandoff} />
+        </label>
       </div>
       <div className="edges-canvas" onMouseMove={onMove} onMouseUp={onUp} onMouseLeave={onUp}
            style={{ height: H, margin: "0 18px 18px" }}>

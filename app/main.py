@@ -772,10 +772,29 @@ async def consume_pairing_code(payload: ConsumePairingCodeRequest) -> dict:
     }
 
 
+@app.post("/api/discovery/browse/start", dependencies=[Depends(verify_token)])
+async def discovery_browse_start() -> dict:
+    identity = get_or_create_device_identity()
+    await discovery_service.start_browse(device_id=identity.device_id)
+    return discovery_service.public_dict()
+
+
+@app.post("/api/discovery/browse/stop", dependencies=[Depends(verify_token)])
+async def discovery_browse_stop() -> dict:
+    await discovery_service.stop()
+    return discovery_service.public_dict()
+
+
 @app.post("/api/discovery/advertise", dependencies=[Depends(verify_token)])
 async def discovery_advertise() -> dict:
     identity = get_or_create_device_identity()
-    await discovery_service.start(port=8765, device_name=identity.name, device_id=identity.device_id)
+    await discovery_service.start_advertise(port=8765, device_name=identity.name, device_id=identity.device_id)
+    return discovery_service.public_dict()
+
+
+@app.post("/api/discovery/advertise/stop", dependencies=[Depends(verify_token)])
+async def discovery_advertise_stop() -> dict:
+    await discovery_service.stop_advertise()
     return discovery_service.public_dict()
 
 
@@ -793,7 +812,11 @@ async def discovery_browse() -> dict:
         entry = d.public_dict()
         entry["trusted"] = store.get_device(d.device_id) is not None
         devices.append(entry)
-    return {"advertising": discovery_service.advertising, "devices": devices}
+    return {
+        "advertising": discovery_service.advertising,
+        "browsing": discovery_service.browsing,
+        "devices": devices,
+    }
 
 
 @app.post("/api/discovery/request-pair")
