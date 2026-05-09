@@ -500,6 +500,18 @@ function PairModal({ open, target, onClose, onComplete, discoveredDevices = [] }
       if (data.trusted && data.shared_secret && deviceId) {
         try { localStorage.setItem(`slickshiftTrusted_${deviceId}`, JSON.stringify({ shared_secret: data.shared_secret })); } catch {}
       }
+      // Record Screen B in Screen A's own trusted-device store so it appears
+      // in this machine's trusted list (pairing only writes to Screen B's store
+      // by default — this call writes the symmetric record on Screen A).
+      if (deviceId) {
+        try {
+          await SS.api("/api/trusted-devices/record", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ device_id: deviceId, name: deviceName }),
+          });
+        } catch {}
+      }
       // Close modal immediately — parent shows a toast and starts the connection
       onComplete && onComplete({ host, port, device_id: deviceId, name: deviceName }, perms, data);
       onClose();

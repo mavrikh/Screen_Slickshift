@@ -82,6 +82,12 @@ class TrustedDevicePermissionsRequest(BaseModel):
     permissions: dict[str, bool]
 
 
+class RecordTrustedDeviceRequest(BaseModel):
+    device_id: str
+    name: str
+    permissions: Optional[dict[str, bool]] = None
+
+
 class TrustReviewRequest(BaseModel):
     keep_trust: bool
 
@@ -588,6 +594,17 @@ async def clear_file_transfer_records() -> dict:
 async def device() -> dict:
     identity = get_or_create_device_identity()
     return {"device": identity.to_dict()}
+
+
+@app.post("/api/trusted-devices/record", dependencies=[Depends(verify_token)])
+async def record_trusted_device(payload: RecordTrustedDeviceRequest) -> dict:
+    store = TrustedDeviceStore()
+    existing = store.get_device(payload.device_id)
+    if existing is not None:
+        return {"ok": True, "device": existing.public_dict(), "created": False}
+    credential = store.trust_device(payload.device_id, payload.name, payload.permissions)
+    logger.info("Recorded trusted device %s (%s).", payload.device_id, payload.name)
+    return {"ok": True, "device": credential.device.public_dict(), "created": True}
 
 
 @app.get("/api/trusted-devices", dependencies=[Depends(verify_token)])
