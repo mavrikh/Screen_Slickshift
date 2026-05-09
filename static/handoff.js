@@ -1212,16 +1212,8 @@ function startRemotePad(event) {
   remoteMousePad.setPointerCapture(event.pointerId);
 }
 
-function moveRemotePad(event) {
-  if (!handoffState.remoteConnected || !handoffState.remoteDragging) return;
-  const now = performance.now();
-  if (now - handoffState.lastRemoteMoveAt < 12) return;
-  handoffState.lastRemoteMoveAt = now;
-  const { dx, dy } = _moveDelta(event, _lastPadClientX, _lastPadClientY);
-  _lastPadClientX = event.clientX;
-  _lastPadClientY = event.clientY;
-  if (dx === 0 && dy === 0) return;
-  sendRemoteEvent({ type: "mouse_move", dx: dx * 1.3, dy: dy * 1.3 });
+function moveRemotePad() {
+  // Movement handled by document.mousemove — see consolidated handler below.
 }
 
 function endRemotePad() {
@@ -1246,29 +1238,12 @@ function startActiveLayer(event) {
   activeHandoffLayer.setPointerCapture(event.pointerId);
 }
 
-function moveActiveLayer(event) {
-  if (handoffState.mode !== "active_remote" || !handoffState.remoteConnected) return;
-  if (handoffState.pointerLocked) return;
-  if (!handoffState.activeLayerDragging) return;
-  sendActiveLayerMovement(event);
+function moveActiveLayer() {
+  // Movement handled by document.mousemove — see consolidated handler below.
 }
 
-function sendActiveLayerMovement(event) {
-  const now = performance.now();
-  if (now - handoffState.lastRemoteMoveAt < 12) return;
-  handoffState.lastRemoteMoveAt = now;
-  // Pointer lock always has accurate movementX/Y; non-lock falls back to clientX/Y delta.
-  let dx, dy;
-  if (handoffState.pointerLocked) {
-    dx = event.movementX || 0;
-    dy = event.movementY || 0;
-  } else {
-    ({ dx, dy } = _moveDelta(event, _lastLayerClientX, _lastLayerClientY));
-    _lastLayerClientX = event.clientX;
-    _lastLayerClientY = event.clientY;
-  }
-  if (dx === 0 && dy === 0) return;
-  sendRemoteEvent({ type: "mouse_move", dx: dx * 1.3, dy: dy * 1.3 });
+function sendActiveLayerMovement() {
+  // Kept for compatibility; document.mousemove now drives all movement.
 }
 
 function endActiveLayer(event) {
@@ -1851,9 +1826,46 @@ activeHandoffLayer.addEventListener("wheel", (event) => {
   sendRemoteEvent({ type: "scroll", amount: event.deltaY > 0 ? -8 : 8 });
 });
 document.addEventListener("pointerlockchange", updateActivePointerLock);
+
+// Consolidated movement handler. MouseEvent.movementX/Y from document.mousemove
+// is reliably computed by the browser on all platforms (including physical mice on
+// Windows). PointerEvent.movementX/Y outside pointer lock is unreliable on Windows.
 document.addEventListener("mousemove", (event) => {
-  if (document.pointerLockElement !== activeHandoffLayer) return;
-  sendActiveLayerMovement(event);
+  if (!handoffState.remoteConnected) return;
+  const now = performance.now();
+  if (now - handoffState.lastRemoteMoveAt < 12) return;
+
+  let dx = event.movementX || 0;
+  let dy = event.movementY || 0;
+
+  if (handoffState.remoteDragging) {
+    if (dx === 0 && dy === 0 && _lastPadClientX !== null) {
+      dx = event.clientX - _lastPadClientX;
+      dy = event.clientY - _lastPadClientY;
+    }
+    _lastPadClientX = event.clientX;
+    _lastPadClientY = event.clientY;
+    if (dx === 0 && dy === 0) return;
+    handoffState.lastRemoteMoveAt = now;
+    sendRemoteEvent({ type: "mouse_move", dx: dx * 1.3, dy: dy * 1.3 });
+    return;
+  }
+
+  if (handoffState.mode !== "active_remote") return;
+  if (!handoffState.pointerLocked && !handoffState.activeLayerDragging) return;
+
+  if (!handoffState.pointerLocked) {
+    if (dx === 0 && dy === 0 && _lastLayerClientX !== null) {
+      dx = event.clientX - _lastLayerClientX;
+      dy = event.clientY - _lastLayerClientY;
+    }
+    _lastLayerClientX = event.clientX;
+    _lastLayerClientY = event.clientY;
+  }
+
+  if (dx === 0 && dy === 0) return;
+  handoffState.lastRemoteMoveAt = now;
+  sendRemoteEvent({ type: "mouse_move", dx: dx * 1.3, dy: dy * 1.3 });
 });
 targetSelect.addEventListener("change", () => {
   handoffState.activeTargetId = targetSelect.value;

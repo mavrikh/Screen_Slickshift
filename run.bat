@@ -33,8 +33,8 @@ if errorlevel 1 (
 )
 
 echo Installing/updating dependencies...
-python -m pip install --upgrade pip --quiet
-python -m pip install -r requirements.txt --quiet
+python -m pip install --upgrade pip -qq
+python -m pip install -r requirements.txt -qq
 if errorlevel 1 (
     echo ERROR: Dependency installation failed.
     pause
