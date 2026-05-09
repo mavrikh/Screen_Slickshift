@@ -242,21 +242,125 @@ function DiscoveredRow({ d, onPair }) {
   );
 }
 
-// ── Pair modal ───────────────────────────────────────────────────────────────
-// Phase 1: "Enter a code" path is wired; "Show a code" path shows guidance
-// to use the Handoff page (where the pending-pair modal already exists).
+// ── Pending pair display (Device A side) ────────────────────────────────────
+// Polls for incoming pairing requests. When another device sends a
+// request-pair to this machine, this component shows the 6-digit code.
+
+function PendingPairDisplay() {
+  const [pending, setPending] = useState(null);
+  const [secondsLeft, setSecondsLeft] = useState(0);
+  const pollRef = useRef(null);
+  const tickRef = useRef(null);
+
+  useEffect(() => {
+    async function poll() {
+      try {
+        const d = await SS.api("/api/discovery/pending-request");
+        if (d.pending && d.code) {
+          setPending(prev => {
+            if (prev?.code !== d.code) setSecondsLeft(d.seconds_remaining || 45);
+            return d;
+          });
+        } else {
+          setPending(null);
+        }
+      } catch {}
+    }
+    poll();
+    pollRef.current = setInterval(poll, 2000);
+    return () => clearInterval(pollRef.current);
+  }, []);
+
+  useEffect(() => {
+    if (!pending) { clearInterval(tickRef.current); return; }
+    clearInterval(tickRef.current);
+    tickRef.current = setInterval(() => {
+      setSecondsLeft(s => {
+        if (s <= 1) { clearInterval(tickRef.current); setPending(null); return 0; }
+        return s - 1;
+      });
+    }, 1000);
+    return () => clearInterval(tickRef.current);
+  }, [pending?.code]);
+
+  async function dismiss() {
+    try { await SS.api("/api/discovery/dismiss-request", { method: "POST" }); } catch {}
+    setPending(null);
+  }
+
+  if (!pending) return null;
+  const totalSecs = 45;
+  return (
+    <div className="modal-overlay">
+      <div className="modal">
+        <div className="modal-h">
+          <h2>Incoming pairing request</h2>
+          <p>
+            <strong style={{ color: "var(--text)" }}>{pending.requester_name || "Another device"}</strong>
+            {" "}wants to pair with this machine. Show them this code.
+          </p>
+        </div>
+        <div className="modal-body" style={{ textAlign: "center" }}>
+          <div className="pin-display">
+            {String(pending.code).split("").map((c, i) => (
+              <div key={i} className="pin-cell glow">{c}</div>
+            ))}
+          </div>
+          <div className="countdown">
+            <span>0:{String(secondsLeft).padStart(2, "0")}</span>
+            <div className="countdown-bar">
+              <div style={{ width: `${Math.max(0, (secondsLeft / totalSecs) * 100)}%` }} />
+            </div>
+            <span>0:{String(totalSecs).padStart(2, "0")}</span>
+          </div>
+          <div style={{ color: "var(--text-dim)", fontSize: 12, marginTop: 12 }}>
+            Code expires automatically. Only accept requests from devices you recognise.
+          </div>
+        </div>
+        <div className="modal-foot">
+          <button type="button" className="btn-ghost" onClick={dismiss}>Dismiss</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Pair modal (Device B side) ───────────────────────────────────────────────
+// When target is a discovered device, automatically sends a request-pair to it
+// and moves straight to PIN entry. When opened manually (Add device), shows
+// a host input so the user can enter a known device's address.
 
 function PairModal({ open, target, onClose, onComplete }) {
-  const [step, setStep] = useState("method");
+  // steps: requesting | enter | manual-host | connecting | success | failed
+  const [step, setStep] = useState("idle");
   const [pin, setPin] = useState(["", "", "", "", "", ""]);
+  const [manualHost, setManualHost] = useState("");
+  const [manualPort, setManualPort] = useState("8765");
   const [perms, setPerms] = useState({ mouse: true, keyboard: true, clipboard: true, files: false });
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   const inputRefs = useRef([]);
 
+  // Reset and kick off the right flow when modal opens
   useEffect(() => {
-    if (open) { setStep(target ? "enter" : "method"); setPin(["","","","","",""]); setErr(""); }
-  }, [open, target]);
+    if (!open) return;
+    setPin(["","","","","",""]);
+    setErr("");
+    setBusy(false);
+    if (target) {
+      // Discovery path: send request-pair to the target device, then ask for the code
+      setStep("requesting");
+      SS.api("/api/discovery/remote/request-pair", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ host: target.host, port: target.port || 8765 }),
+      }).then(() => setStep("enter"))
+        .catch(e => { setErr(e.message || "Could not reach device."); setStep("failed"); });
+    } else {
+      // Manual path: user needs to provide the host first
+      setStep("manual-host");
+    }
+  }, [open]);
 
   function handlePinChange(i, v) {
     const c = v.replace(/\D/g, "").slice(0, 1);
@@ -271,14 +375,33 @@ function PairModal({ open, target, onClose, onComplete }) {
     if (e.key === "Backspace" && !pin[i] && i > 0) inputRefs.current[i - 1]?.focus();
   }
 
+  async function startManualRequest(e) {
+    e.preventDefault();
+    if (!manualHost.trim()) return;
+    setErr("");
+    setStep("requesting");
+    try {
+      await SS.api("/api/discovery/remote/request-pair", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ host: manualHost.trim(), port: Number(manualPort) || 8765 }),
+      });
+      setStep("enter");
+    } catch (e2) {
+      setErr(e2.message || "Could not reach device.");
+      setStep("manual-host");
+    }
+  }
+
   async function submitPin(code) {
     if (busy) return;
     setBusy(true);
     setErr("");
     setStep("connecting");
+    const host = target?.host || manualHost.trim();
+    const port = target?.port || Number(manualPort) || 8765;
+    const deviceId = target?.device_id;
     try {
-      const host = target?.host || "";
-      const port = target?.port || 8765;
       const data = await SS.api("/api/discovery/remote/pair", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -294,13 +417,13 @@ function PairModal({ open, target, onClose, onComplete }) {
           remember_device: true,
         }),
       });
-      if (data.trusted && data.shared_secret) {
-        try { localStorage.setItem(`slickshiftTrusted_${target?.device_id}`, JSON.stringify({ shared_secret: data.shared_secret })); } catch {}
+      if (data.trusted && data.shared_secret && deviceId) {
+        try { localStorage.setItem(`slickshiftTrusted_${deviceId}`, JSON.stringify({ shared_secret: data.shared_secret })); } catch {}
       }
       setStep("success");
       onComplete && onComplete(target, perms);
-    } catch (e) {
-      setErr(e.message || "Pairing failed.");
+    } catch (e2) {
+      setErr(e2.message || "Pairing failed — check the code and try again.");
       setStep("enter");
       setPin(["","","","","",""]);
     } finally {
@@ -310,27 +433,44 @@ function PairModal({ open, target, onClose, onComplete }) {
 
   if (!open) return null;
   return (
-    <div className="modal-overlay" onClick={onClose}>
+    <div className="modal-overlay" onClick={step === "success" ? undefined : onClose}>
       <div className="modal" onClick={e => e.stopPropagation()}>
 
-        {step === "method" && (
+        {step === "requesting" && (
+          <div className="modal-body connecting">
+            <div className="spinner" />
+            <div style={{ fontSize: 14, color: "var(--text-dim)" }}>
+              Sending request to {target?.name || manualHost}…
+            </div>
+          </div>
+        )}
+
+        {step === "manual-host" && (
           <>
             <div className="modal-h">
-              <h2>Pair a new device</h2>
-              <p>Both devices must be on the same local network.</p>
+              <h2>Add device</h2>
+              <p>Enter the IP address of the device running Screen Slickshift. It must be on the same network.</p>
             </div>
             <div className="modal-body">
-              <div className="method">
-                <button type="button" className="method-card" onClick={() => setStep("enter")}>
-                  <div className="m-ico"><Icons.Key size={16} /></div>
-                  <strong>Enter a code</strong>
-                  <span>The other device is showing a 6-digit pairing code.</span>
-                </button>
-                <button type="button" className="method-card" onClick={() => setStep("show-guide")}>
-                  <div className="m-ico"><Icons.QR size={16} /></div>
-                  <strong>Show a code</strong>
-                  <span>Let the other device enter your code.</span>
-                </button>
+              <form onSubmit={startManualRequest}>
+                <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+                  <input
+                    type="text" value={manualHost} onChange={e => setManualHost(e.target.value)}
+                    placeholder="192.168.1.x"
+                    autoFocus
+                    style={{ flex: 1, padding: "8px 10px", background: "var(--panel-2)", border: "1px solid var(--border-strong)", borderRadius: 8, color: "var(--text)", fontSize: 14, fontFamily: "var(--mono)", outline: "none" }}
+                  />
+                  <input
+                    type="text" value={manualPort} onChange={e => setManualPort(e.target.value)}
+                    placeholder="8765"
+                    style={{ width: 72, padding: "8px 10px", background: "var(--panel-2)", border: "1px solid var(--border-strong)", borderRadius: 8, color: "var(--text)", fontSize: 14, fontFamily: "var(--mono)", outline: "none" }}
+                  />
+                </div>
+                {err && <div style={{ color: "var(--danger)", fontSize: 12, marginBottom: 10 }}>{err}</div>}
+                <button type="submit" className="btn-primary" style={{ width: "100%" }}>Request pairing code</button>
+              </form>
+              <div style={{ color: "var(--text-dim)", fontSize: 12, marginTop: 12, lineHeight: 1.6 }}>
+                Tip: devices advertising on the same network appear automatically in the list below. Start Advertising on the other device to avoid entering an IP.
               </div>
             </div>
             <div className="modal-foot">
@@ -343,7 +483,12 @@ function PairModal({ open, target, onClose, onComplete }) {
           <>
             <div className="modal-h">
               <h2>Enter pairing code</h2>
-              <p>{target ? <>Pairing with <strong style={{ color: "var(--text)" }}>{target.name}</strong>. Type the 6 digits shown on it.</> : "Type the 6 digits shown on the other device."}</p>
+              <p>
+                {target
+                  ? <>A 6-digit code is now appearing on <strong style={{ color: "var(--text)" }}>{target.name}</strong>. Enter it here.</>
+                  : <>A 6-digit code is now appearing on {manualHost}. Enter it here.</>
+                }
+              </p>
             </div>
             <div className="modal-body">
               <div className="pin-input">
@@ -374,23 +519,18 @@ function PairModal({ open, target, onClose, onComplete }) {
               </div>
             </div>
             <div className="modal-foot">
-              <button type="button" className="btn-ghost" onClick={() => setStep("method")}>Back</button>
               <button type="button" className="btn-ghost" onClick={onClose}>Cancel</button>
             </div>
           </>
         )}
 
-        {step === "show-guide" && (
+        {step === "failed" && (
           <>
             <div className="modal-h">
-              <h2>Show a code</h2>
-              <p>Use the <strong style={{ color: "var(--text)" }}>Handoff page</strong> to display a code for another device to enter.</p>
-            </div>
-            <div className="modal-body" style={{ color: "var(--text-dim)", fontSize: 13, lineHeight: 1.6 }}>
-              Open <code style={{ color: "var(--accent)", fontFamily: "var(--mono)" }}>/handoff</code> in a browser on this machine, navigate to the Discovery tab, and click <strong>Start Advertising</strong>. The incoming pairing modal will show the code.
+              <h2>Could not connect</h2>
+              <p style={{ color: "var(--danger)" }}>{err}</p>
             </div>
             <div className="modal-foot">
-              <button type="button" className="btn-ghost" onClick={() => setStep("method")}>Back</button>
               <button type="button" className="btn-ghost" onClick={onClose}>Close</button>
             </div>
           </>
@@ -408,7 +548,9 @@ function PairModal({ open, target, onClose, onComplete }) {
           <>
             <div className="modal-body connecting">
               <div className="success-mark"><Icons.Check size={32} /></div>
-              <div style={{ fontSize: 16, fontWeight: 600 }}>{target ? `Paired with ${target.name}` : "Device paired"}</div>
+              <div style={{ fontSize: 16, fontWeight: 600 }}>
+                {target ? `Paired with ${target.name}` : `Paired with ${manualHost}`}
+              </div>
               <div className="connecting-msg" style={{ marginTop: 8 }}>This device is now in your trusted list.</div>
             </div>
             <div className="modal-foot">
@@ -536,6 +678,7 @@ function DevicesSection() {
 
       <PairModal open={pairOpen} target={pairTarget}
         onClose={() => setPairOpen(false)} onComplete={completePair} />
+      <PendingPairDisplay />
     </>
   );
 }
@@ -620,6 +763,7 @@ function OverviewSection() {
 
       <PairModal open={pairOpen} target={null}
         onClose={() => setPairOpen(false)} onComplete={async () => { setPairOpen(false); await load(); }} />
+      <PendingPairDisplay />
     </>
   );
 }
