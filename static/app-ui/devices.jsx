@@ -789,6 +789,13 @@ function ActiveControlOverlay({ deviceName, onStop }) {
   const [softCapture, setSoftCapture] = useState(false);
   const lastMoveRef = useRef(0);
   const lastPosRef = useRef({ x: 0, y: 0 });
+  const physCenterRef = useRef({ x: 0, y: 0 });
+
+  // Minimize app window on mount, restore on unmount
+  useEffect(() => {
+    window.pywebview?.api?.minimize?.()?.catch?.(() => {});
+    return () => { window.pywebview?.api?.restore?.()?.catch?.(() => {}); };
+  }, []);
 
   // Pointer lock change/error listeners
   useEffect(() => {
@@ -816,21 +823,32 @@ function ActiveControlOverlay({ deviceName, onStop }) {
   }
 
   function _warpToWindowCenter() {
-    const dpr = window.devicePixelRatio || 1;
-    const px = Math.round((window.screenX + window.innerWidth / 2) * dpr);
-    const py = Math.round((window.screenY + window.innerHeight / 2) * dpr);
-    window.pywebview?.api?.cursor_warp_to_physical(px, py)?.catch?.(() => {});
+    window.pywebview?.api?.cursor_warp_to_physical(
+      physCenterRef.current.x, physCenterRef.current.y
+    )?.catch?.(() => {});
+    // After warp, the cursor is at physCenterRef which maps to css_ref in the overlay.
+    // The next mousemove event will report clientX/Y relative to where the cursor actually is.
+    // Reset lastPos to the CSS ref so the next delta is measured from there.
     lastPosRef.current = { x: window.innerWidth / 2, y: window.innerHeight / 2 };
   }
 
-  function requestLock() {
-    // In pywebview (WKWebView) pointer lock is unreliable. Use soft-capture instead:
-    // track mouse deltas from the window centre and warp the OS cursor back after
-    // each move so it never escapes the window.
+  async function requestLock() {
     if (window.pywebview) {
-      lastPosRef.current = { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+      // Python handles all coordinate maths (AppKit vs pyautogui Y-axis difference).
+      // One async call to get the window centre; subsequent warps are fire-and-forget.
+      try {
+        const r = await window.pywebview.api.warp_to_center();
+        if (r?.ok) {
+          physCenterRef.current = { x: r.phys_x, y: r.phys_y };
+          lastPosRef.current = { x: r.css_ref_x, y: r.css_ref_y };
+        } else {
+          // Fallback: use reported window dimensions
+          lastPosRef.current = { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+        }
+      } catch {
+        lastPosRef.current = { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+      }
       setSoftCapture(true);
-      _warpToWindowCenter();
       return;
     }
     const el = overlayRef.current;

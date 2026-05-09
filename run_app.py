@@ -49,12 +49,86 @@ def _wait_for_server(timeout: float = 15.0) -> bool:
 class _AppAPI:
     """Python functions exposed to the webview JavaScript context as window.pywebview.api.*"""
 
+    def __init__(self) -> None:
+        self._win = None  # set to the pywebview Window after creation
+
+    def warp_to_center(self) -> dict:
+        """Warp the OS cursor to the centre of the pywebview window.
+        Handles AppKit vs pyautogui coordinate differences on macOS.
+        Returns CSS reference coords (content-area relative) for delta tracking."""
+        try:
+            import pyautogui
+            import sys
+            if sys.platform == "darwin":
+                from AppKit import NSScreen, NSApp  # type: ignore[import]
+                screen = NSScreen.mainScreen()
+                screen_h_logical = screen.frame().size.height
+                dpr = float(screen.backingScaleFactor())
+                win = NSApp.mainWindow() or NSApp.keyWindow()
+                if win is None:
+                    visible = [w for w in NSApp.windows() if w.isVisible()]
+                    win = visible[0] if visible else None
+                if win is None:
+                    raise RuntimeError("no window")
+                frame = win.frame()
+                content_h = win.contentView().frame().size.height
+                # AppKit origin is bottom-left; centre in AppKit logical coords:
+                cx_logical = frame.origin.x + frame.size.width / 2
+                cy_appkit   = frame.origin.y + frame.size.height / 2
+                # Convert to pyautogui (top-left origin):
+                phys_x = int(cx_logical * dpr)
+                phys_y = int((screen_h_logical - cy_appkit) * dpr)
+                pyautogui.moveTo(phys_x, phys_y, duration=0)
+                return {
+                    "ok": True,
+                    "phys_x": phys_x, "phys_y": phys_y,
+                    "css_ref_x": frame.size.width / 2,
+                    "css_ref_y": content_h / 2,
+                }
+            else:
+                # Windows / Linux: window.screenX/Y are already top-left CSS coords
+                if self._win is not None:
+                    dpr = 1  # Windows pyautogui uses logical coords on most setups
+                    cx = self._win.x + self._win.width // 2
+                    cy = self._win.y + self._win.height // 2
+                    pyautogui.moveTo(cx, cy, duration=0)
+                    return {
+                        "ok": True,
+                        "phys_x": cx, "phys_y": cy,
+                        "css_ref_x": self._win.width / 2,
+                        "css_ref_y": self._win.height / 2,
+                    }
+                raise RuntimeError("no window ref")
+        except Exception as exc:
+            try:
+                import pyautogui
+                sw, sh = pyautogui.size()
+                pyautogui.moveTo(sw // 2, sh // 2, duration=0)
+            except Exception:
+                pass
+            return {"ok": False, "error": str(exc)}
+
     def cursor_warp_to_physical(self, x: int, y: int) -> None:
-        """Move the OS cursor to physical screen coordinates (x, y).
-        Called by the soft-capture mouse-tracking fallback in the overlay."""
+        """Fire-and-forget cursor warp to pre-computed physical coordinates."""
         try:
             import pyautogui
             pyautogui.moveTo(int(x), int(y), duration=0)
+        except Exception:
+            pass
+
+    def minimize(self) -> None:
+        """Minimize the app window (called when entering active control)."""
+        try:
+            if self._win is not None:
+                self._win.minimize()
+        except Exception:
+            pass
+
+    def restore(self) -> None:
+        """Restore the app window (called when leaving active control)."""
+        try:
+            if self._win is not None:
+                self._win.restore()
         except Exception:
             pass
 
@@ -75,14 +149,15 @@ def main() -> None:
     if not _wait_for_server():
         raise SystemExit("Server did not start within 15 seconds.")
 
-    webview.create_window(
+    api = _AppAPI()
+    api._win = webview.create_window(
         "Screen Slickshift",
         _URL,
         width=1220,
         height=800,
         min_size=(900, 620),
         resizable=True,
-        js_api=_AppAPI(),
+        js_api=api,
     )
     webview.start()
 
