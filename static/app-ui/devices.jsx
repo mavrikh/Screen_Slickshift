@@ -147,7 +147,7 @@ function useDiscovery(active) {
     } catch {}
   }
 
-  return { devices, advertising, scanning, toggleAdvertise };
+  return { devices, advertising, scanning, toggleAdvertise, refresh: poll };
 }
 
 // ── UI components ────────────────────────────────────────────────────────────
@@ -424,7 +424,7 @@ function PairModal({ open, target, onClose, onComplete }) {
         try { localStorage.setItem(`slickshiftTrusted_${deviceId}`, JSON.stringify({ shared_secret: data.shared_secret })); } catch {}
       }
       setStep("success");
-      onComplete && onComplete(target, perms);
+      onComplete && onComplete({ host, port, device_id: deviceId, name: target?.name || host }, perms, data);
     } catch (e2) {
       setErr(e2.message || "Pairing failed — check the code and try again.");
       setStep("enter");
@@ -577,20 +577,35 @@ function PairModal({ open, target, onClose, onComplete }) {
 
 function DevicesSection() {
   const { thisDevice, paired, loading, error, load, unpair, setPerm } = useDeviceData();
-  const { devices: discovered, advertising, scanning, toggleAdvertise } = useDiscovery(true);
+  const { devices: discovered, advertising, toggleAdvertise, refresh: discoveryRefresh } = useDiscovery(true);
   const [pairOpen, setPairOpen] = useState(false);
   const [pairTarget, setPairTarget] = useState(null);
   const [reconnectMsg, setReconnectMsg] = useState("");
 
-  const selfRow = thisDevice ? [{
-    id: "__self__", self: true,
-    name: thisDevice.name,
-    platform: osToPlatform(thisDevice.os || ""),
-    model: thisDevice.name,
-  }] : [];
-
-  async function completePair() {
+  async function completePair(connInfo, _perms, pairData) {
+    // Reload trusted list then immediately refresh discovery so the newly
+    // paired device disappears from "available" and appears in "trusted".
     await load();
+    await discoveryRefresh();
+
+    // Auto-connect: start a session bridge if none is already active.
+    if (pairData?.session?.session_id && pairData?.session_token && connInfo?.host) {
+      try {
+        const status = await SS.api("/api/handoff/remote/status");
+        if (!status.connected) {
+          await SS.api("/api/handoff/remote/start-session", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              host: connInfo.host,
+              port: connInfo.port || 8765,
+              session_id: pairData.session.session_id,
+              session_token: pairData.session_token,
+            }),
+          });
+        }
+      } catch {}
+    }
   }
 
   async function handleReconnect(device_id) {
@@ -598,7 +613,7 @@ function DevicesSection() {
     let cred = null;
     try { const raw = localStorage.getItem(`slickshiftTrusted_${device_id}`); if (raw) cred = JSON.parse(raw); } catch {}
     if (!cred?.shared_secret) {
-      setReconnectMsg("No stored credential for this device. Pair it again to enable silent reconnect.");
+      setReconnectMsg("No stored credential. Pair the device again to enable silent reconnect.");
       return;
     }
     const found = discovered.find(d => d.device_id === device_id);
@@ -607,11 +622,21 @@ function DevicesSection() {
       return;
     }
     try {
-      await SS.api("/api/discovery/remote/reconnect", {
+      const data = await SS.api("/api/discovery/remote/reconnect", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ host: found.host, port: found.port || 8765, shared_secret: cred.shared_secret }),
       });
+      // Auto-start bridge with the fresh session
+      if (data?.session?.session_id && data?.session_token) {
+        try {
+          await SS.api("/api/handoff/remote/start-session", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ host: found.host, port: found.port || 8765, session_id: data.session.session_id, session_token: data.session_token }),
+          });
+        } catch {}
+      }
       const name = paired.find(d => d.id === device_id)?.name || device_id;
       setReconnectMsg(`Reconnected to ${name}.`);
     } catch (e) {
@@ -637,6 +662,7 @@ function DevicesSection() {
       {error && <div style={{ color: "var(--danger)", fontSize: 13, marginBottom: 12 }}>{error}</div>}
       {reconnectMsg && <div style={{ color: reconnectMsg.startsWith("Reconnected") ? "var(--ok)" : "var(--warn)", fontSize: 13, marginBottom: 12 }}>{reconnectMsg}</div>}
 
+      {/* Trusted devices — This Device excluded, lives at bottom */}
       <div className="panel">
         <div className="panel-h">
           <h2>Trusted devices</h2>
@@ -645,36 +671,38 @@ function DevicesSection() {
         <div className="panel-body">
           {loading ? (
             <div style={{ color: "var(--muted)", fontSize: 13, padding: "12px 0" }}>Loading…</div>
+          ) : paired.length === 0 ? (
+            <div style={{ color: "var(--muted)", fontSize: 13, padding: "12px 0" }}>
+              No paired devices yet. Click Add device to pair one.
+            </div>
           ) : (
-            <>
-              {selfRow.map(d => <DeviceRow key={d.id} d={d} />)}
-              {paired.length === 0 && !loading ? (
-                <div style={{ color: "var(--muted)", fontSize: 13, padding: "12px 0" }}>
-                  No paired devices yet. Click Add device to pair one.
-                </div>
-              ) : (
-                paired.map(d => <DeviceRow key={d.id} d={d} onUnpair={unpair} onPerm={setPerm} onReconnect={handleReconnect} />)
-              )}
-            </>
+            paired.map(d => (
+              <DeviceRow key={d.id} d={d} onUnpair={unpair} onPerm={setPerm} onReconnect={handleReconnect} />
+            ))
           )}
         </div>
       </div>
 
+      {/* Available devices — toggle-gated search */}
       <div className="panel">
         <div className="panel-h">
-          <h2>Available on this network</h2>
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            {scanning && <span className="h-sub"><span className="scan-dot" style={{ display: "inline-block", marginRight: 6 }} />Scanning…</span>}
-            <button type="button" className="btn-ghost" style={{ height: 26, fontSize: 12 }} onClick={toggleAdvertise}>
-              {advertising ? "Stop advertising" : "Start advertising"}
-            </button>
-          </div>
+          <h2>Search for available devices</h2>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+            <span style={{ fontSize: 12, color: advertising ? "var(--ok)" : "var(--muted)" }}>
+              {advertising ? "On" : "Off"}
+            </span>
+            <div className={"toggle " + (advertising ? "on" : "")} onClick={toggleAdvertise} />
+          </label>
         </div>
         <div className="panel-body">
-          {discovered.length === 0 ? (
+          {!advertising ? (
+            <div style={{ color: "var(--muted)", fontSize: 13, padding: "8px 0" }}>
+              Enable search to find nearby devices running Screen Slickshift.
+            </div>
+          ) : discovered.length === 0 ? (
             <div className="disc-empty">
-              <div className="scan"><span className="scan-dot" />Looking for nearby devices…</div>
-              <div>Make sure Screen Slickshift is running on the other device and both are on the same network.</div>
+              <div className="scan"><span className="scan-dot" />Scanning the network…</div>
+              <div>Make sure Screen Slickshift is running on the other device.</div>
             </div>
           ) : (
             discovered.map(d => (
@@ -682,6 +710,28 @@ function DevicesSection() {
                 onPair={dev => { setPairTarget(dev); setPairOpen(true); }} />
             ))
           )}
+        </div>
+      </div>
+
+      {/* This device — anchored at bottom */}
+      <div style={{ position: "sticky", bottom: "var(--pad)", marginTop: 8, zIndex: 1 }}>
+        <div className="panel" style={{ background: "var(--panel-2)" }}>
+          <div className="panel-h">
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              {thisDevice && platformIcon(osToPlatform(thisDevice.os || ""), 18)}
+              <div>
+                <div style={{ fontWeight: 600, fontSize: 13 }}>{thisDevice?.name || "This device"}</div>
+                <div style={{ fontSize: 11, color: "var(--muted)" }}>This device</div>
+              </div>
+            </div>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+              <span style={{ fontSize: 12, color: advertising ? "var(--ok)" : "var(--muted)" }}>
+                {advertising ? "Visible" : "Hidden"}
+              </span>
+              <div className={"toggle " + (advertising ? "on" : "")} onClick={toggleAdvertise} />
+              <span style={{ fontSize: 12, color: "var(--text-dim)", marginLeft: 2 }}>Allow connections</span>
+            </label>
+          </div>
         </div>
       </div>
 
@@ -696,7 +746,7 @@ function DevicesSection() {
 
 function OverviewSection() {
   const { thisDevice, paired, loading, load, unpair } = useDeviceData();
-  const { devices: discovered } = useDiscovery(true);
+  const { devices: discovered, refresh: discoveryRefresh } = useDiscovery(true);
   const [pairOpen, setPairOpen] = useState(false);
 
   async function handleReconnect(device_id) {
@@ -771,7 +821,22 @@ function OverviewSection() {
       </div>
 
       <PairModal open={pairOpen} target={null}
-        onClose={() => setPairOpen(false)} onComplete={async () => { await load(); }} />
+        onClose={() => setPairOpen(false)}
+        onComplete={async (connInfo, _p, pairData) => {
+          await load();
+          await discoveryRefresh();
+          if (pairData?.session?.session_id && pairData?.session_token && connInfo?.host) {
+            try {
+              const st = await SS.api("/api/handoff/remote/status");
+              if (!st.connected) {
+                await SS.api("/api/handoff/remote/start-session", {
+                  method: "POST", headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ host: connInfo.host, port: connInfo.port || 8765, session_id: pairData.session.session_id, session_token: pairData.session_token }),
+                });
+              }
+            } catch {}
+          }
+        }} />
       <PendingPairDisplay />
     </>
   );
