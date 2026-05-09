@@ -26,8 +26,10 @@ from app.handoff_remote import (
     remote_pair,
     remote_request_pair,
     remote_trusted_reconnect,
+    warp_remote_cursor,
+    warp_remote_cursor_session,
 )
-from app.input_control import input_control_status, send_text_to_pc
+from app.input_control import input_control_status, send_text_to_pc, warp_cursor_to_center
 from app.llm import generate_text
 from app.pairing import PairingCodeBook, PairingSessionBook, TrustedDeviceStore
 from app.protocol import parse_message, protocol_capabilities
@@ -545,6 +547,23 @@ async def handoff_detector_state() -> dict:
     return edge_detector.public_dict()
 
 
+@app.post("/api/handoff/warp-cursor", dependencies=[Depends(verify_token)])
+async def handoff_warp_cursor() -> dict:
+    try:
+        x, y = await asyncio.to_thread(warp_cursor_to_center)
+        return {"ok": True, "x": x, "y": y}
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/api/handoff/remote/warp-cursor", dependencies=[Depends(verify_token)])
+async def handoff_remote_warp_cursor() -> dict:
+    try:
+        return await remote_handoff_bridge.warp_cursor()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @app.post("/api/session/screen/info")
 async def session_screen_info(payload: SessionRequest) -> dict:
     if pairing_session_book.verify_session(payload.session_id, payload.session_token) is None:
@@ -580,6 +599,19 @@ async def session_handoff_detector_state(payload: SessionRequest) -> dict:
     if pairing_session_book.verify_session(payload.session_id, payload.session_token) is None:
         raise HTTPException(status_code=401, detail="Invalid or expired session.")
     return edge_detector.public_dict()
+
+
+@app.post("/api/session/handoff/warp-cursor")
+async def session_handoff_warp_cursor(payload: SessionRequest) -> dict:
+    if pairing_session_book.verify_session_permission(
+        payload.session_id, payload.session_token, "mouse"
+    ) is None:
+        raise HTTPException(status_code=401, detail="Invalid session or mouse permission required.")
+    try:
+        x, y = await asyncio.to_thread(warp_cursor_to_center)
+        return {"ok": True, "x": x, "y": y}
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @app.delete("/api/file-transfer/transfers", dependencies=[Depends(verify_token)])

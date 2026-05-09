@@ -176,7 +176,7 @@ function statusTag(d) {
   if (d.status === "connected")
     return <span className="tag" style={{ color: "var(--ok)", borderColor: "rgba(74,222,128,0.3)" }}>Online</span>;
   if (d.status === "paired")
-    return <span className="tag">Paired</span>;
+    return <span className="tag">Saved</span>;
   if (d.review_required)
     return <span className="tag" style={{ color: "var(--warn)", borderColor: "rgba(251,191,36,0.3)" }}>Review required</span>;
   return null;
@@ -192,7 +192,7 @@ function PermPill({ label, on, onChange }) {
   );
 }
 
-function DeviceRow({ d, onUnpair, onPerm, onReconnect, compact }) {
+function DeviceRow({ d, onUnpair, onPerm, onConnect, compact }) {
   return (
     <div className={"dev-row" + (compact ? " compact" : "")}>
       <div className={"dev-icon " + (d.self ? "self" : "")}>
@@ -218,8 +218,8 @@ function DeviceRow({ d, onUnpair, onPerm, onReconnect, compact }) {
                 <PermPill label="Macros"    on={d.perms.macros}    onChange={v => onPerm && onPerm(d.id, "macros", v)} />
               </div>
             )}
-            <button type="button" className="btn-ghost" onClick={() => onReconnect && onReconnect(d.id)}>Reconnect</button>
-            <button type="button" className="btn-ghost" onClick={() => onUnpair && onUnpair(d.id)}>Unpair</button>
+            <button type="button" className="btn-secondary" onClick={() => onConnect && onConnect(d.id)}>Connect</button>
+            <button type="button" className="btn-ghost" onClick={() => onUnpair && onUnpair(d.id)}>Remove</button>
           </>
         )}
       </div>
@@ -236,7 +236,7 @@ function DiscoveredRow({ d, onPair }) {
         <div className="dev-meta">{d.host} · advertising on LAN</div>
       </div>
       <div className="dev-actions">
-        <button type="button" className="btn-secondary" onClick={() => onPair(d)}>Pair</button>
+        <button type="button" className="btn-secondary" onClick={() => onPair(d)}>Save</button>
       </div>
     </div>
   );
@@ -321,9 +321,15 @@ function PendingPairDisplay() {
     setPending(null);
   }
 
-  async function removeTrust() {
+  async function saveTrust() {
     if (trustPrompt?.device_id) {
-      try { await SS.api(`/api/trusted-devices/${trustPrompt.device_id}`, { method: "DELETE" }); } catch {}
+      try {
+        await SS.api("/api/trusted-devices/record", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ device_id: trustPrompt.device_id, name: trustPrompt.name }),
+        });
+      } catch {}
     }
     setTrustPrompt(null);
   }
@@ -341,8 +347,8 @@ function PendingPairDisplay() {
             </p>
           </div>
           <div className="modal-foot">
-            <button type="button" className="btn-primary" onClick={() => setTrustPrompt(null)}>Keep trusted</button>
-            <button type="button" className="btn-ghost" onClick={removeTrust}>Remove</button>
+            <button type="button" className="btn-primary" onClick={saveTrust}>Save as trusted</button>
+            <button type="button" className="btn-ghost" onClick={() => setTrustPrompt(null)}>Dismiss</button>
           </div>
         </div>
       </div>
@@ -494,7 +500,7 @@ function PairModal({ open, target, onClose, onComplete, discoveredDevices = [] }
             clipboard_write: perms.clipboard,
             file_receive: perms.files,
           },
-          remember_device: true,
+          remember_device: false,
         }),
       });
       if (data.trusted && data.shared_secret && deviceId) {
@@ -720,39 +726,42 @@ function DevicesSection() {
     }
   }
 
-  async function handleReconnect(device_id) {
+  async function handleConnect(device_id) {
     setReconnectMsg("");
-    let cred = null;
-    try { const raw = localStorage.getItem(`slickshiftTrusted_${device_id}`); if (raw) cred = JSON.parse(raw); } catch {}
-    if (!cred?.shared_secret) {
-      setReconnectMsg("No stored credential. Pair the device again to enable silent reconnect.");
-      return;
-    }
-    const found = discovered.find(d => d.device_id === device_id);
-    if (!found) {
-      setReconnectMsg("Device not found on the network. Make sure Screen Slickshift is running on it.");
-      return;
-    }
+    const name = paired.find(d => d.id === device_id)?.name || device_id;
     try {
-      const data = await SS.api("/api/discovery/remote/reconnect", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ host: found.host, port: found.port || 8765, shared_secret: cred.shared_secret }),
-      });
-      // Auto-start bridge with the fresh session
-      if (data?.session?.session_id && data?.session_token) {
-        try {
+      // Check if bridge is already active for this device; if not, establish it.
+      const status = await SS.api("/api/handoff/remote/status");
+      if (!status.connected) {
+        let cred = null;
+        try { const raw = localStorage.getItem(`slickshiftTrusted_${device_id}`); if (raw) cred = JSON.parse(raw); } catch {}
+        if (!cred?.shared_secret) {
+          setReconnectMsg(`${name} is not on the network yet. Make sure Screen Slickshift is running on it.`);
+          return;
+        }
+        const found = discovered.find(d => d.device_id === device_id);
+        if (!found) {
+          setReconnectMsg(`${name} not found on the network. Make sure Screen Slickshift is running on it and Search is enabled.`);
+          return;
+        }
+        const data = await SS.api("/api/discovery/remote/reconnect", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ host: found.host, port: found.port || 8765, shared_secret: cred.shared_secret }),
+        });
+        if (data?.session?.session_id && data?.session_token) {
           await SS.api("/api/handoff/remote/start-session", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ host: found.host, port: found.port || 8765, session_id: data.session.session_id, session_token: data.session_token }),
           });
-        } catch {}
+        }
       }
-      const name = paired.find(d => d.id === device_id)?.name || device_id;
-      setReconnectMsg(`Reconnected to ${name}.`);
+      // Warp the remote cursor to the centre of its screen.
+      await SS.api("/api/handoff/remote/warp-cursor", { method: "POST" });
+      setReconnectMsg(`Connected — cursor placed at centre of ${name}'s screen.`);
     } catch (e) {
-      setReconnectMsg(`Reconnect failed: ${e.message}`);
+      setReconnectMsg(`Connect failed: ${e.message}`);
     }
   }
 
@@ -789,7 +798,7 @@ function DevicesSection() {
             </div>
           ) : (
             paired.map(d => (
-              <DeviceRow key={d.id} d={d} onUnpair={unpair} onPerm={setPerm} onReconnect={handleReconnect} />
+              <DeviceRow key={d.id} d={d} onUnpair={unpair} onPerm={setPerm} onConnect={handleConnect} />
             ))
           )}
         </div>
@@ -873,18 +882,29 @@ function OverviewSection() {
   const { devices: discovered, refresh: discoveryRefresh } = useDiscovery(true);
   const [pairOpen, setPairOpen] = useState(false);
 
-  async function handleReconnect(device_id) {
+  async function handleConnect(device_id) {
     let cred = null;
     try { const raw = localStorage.getItem(`slickshiftTrusted_${device_id}`); if (raw) cred = JSON.parse(raw); } catch {}
     if (!cred?.shared_secret) return;
     const found = discovered.find(d => d.device_id === device_id);
     if (!found) return;
     try {
-      await SS.api("/api/discovery/remote/reconnect", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ host: found.host, port: found.port || 8765, shared_secret: cred.shared_secret }),
-      });
+      const status = await SS.api("/api/handoff/remote/status");
+      if (!status.connected) {
+        const data = await SS.api("/api/discovery/remote/reconnect", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ host: found.host, port: found.port || 8765, shared_secret: cred.shared_secret }),
+        });
+        if (data?.session?.session_id && data?.session_token) {
+          await SS.api("/api/handoff/remote/start-session", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ host: found.host, port: found.port || 8765, session_id: data.session.session_id, session_token: data.session_token }),
+          });
+        }
+      }
+      await SS.api("/api/handoff/remote/warp-cursor", { method: "POST" });
     } catch {}
   }
 
@@ -919,7 +939,7 @@ function OverviewSection() {
             ) : (
               <>
                 {selfRow.map(d => <DeviceRow key={d.id} d={d} compact />)}
-                {paired.map(d => <DeviceRow key={d.id} d={d} onUnpair={unpair} onReconnect={handleReconnect} compact />)}
+                {paired.map(d => <DeviceRow key={d.id} d={d} onUnpair={unpair} onConnect={handleConnect} compact />)}
               </>
             )}
           </div>

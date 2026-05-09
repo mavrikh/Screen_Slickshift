@@ -99,6 +99,15 @@ def press_key(
         pyautogui.press(pg_key)
 
 
+def warp_cursor_to_center() -> tuple[int, int]:
+    _ensure_enabled()
+    pyautogui = _pyautogui()
+    w, h = pyautogui.size()
+    x, y = w // 2, h // 2
+    pyautogui.moveTo(x, y, duration=0)
+    return x, y
+
+
 def send_text_to_pc(text: str) -> None:
     _ensure_enabled()
     if not text:

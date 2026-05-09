@@ -218,6 +218,18 @@ class RemoteHandoffBridge:
         except RuntimeError:
             return {"ok": True}
 
+    async def warp_cursor(self) -> dict[str, Any]:
+        async with self._lock:
+            if self._target is None:
+                raise RuntimeError("Remote handoff is not connected.")
+            target, token = self._target, self._token
+            sid, stok = self._session_id, self._session_token
+        if token is not None:
+            return await asyncio.to_thread(warp_remote_cursor, target, token)
+        if sid is not None and stok is not None:
+            return await asyncio.to_thread(warp_remote_cursor_session, target, sid, stok)
+        raise RuntimeError("Remote handoff is not connected.")
+
     async def _close_locked(self) -> None:
         websocket = self._websocket
         self._websocket = None
@@ -537,6 +549,46 @@ def remote_trusted_reconnect(
     }).encode("utf-8")
     request = Request(
         f"http://{target.host}:{target.port}/api/pairing/trusted-reconnect",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        raise RuntimeError(_extract_http_error_detail(exc)) from exc
+    except (OSError, URLError, json.JSONDecodeError) as exc:
+        raise RuntimeError(str(exc)) from exc
+
+
+def warp_remote_cursor(
+    target: RemoteTarget, token: str, timeout: float = 3.0
+) -> dict[str, Any]:
+    request = Request(
+        f"http://{target.host}:{target.port}/api/handoff/warp-cursor",
+        data=b"",
+        headers={"X-Pairing-Token": token},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        raise RuntimeError(_extract_http_error_detail(exc)) from exc
+    except (OSError, URLError, json.JSONDecodeError) as exc:
+        raise RuntimeError(str(exc)) from exc
+
+
+def warp_remote_cursor_session(
+    target: RemoteTarget,
+    session_id: str,
+    session_token: str,
+    timeout: float = 3.0,
+) -> dict[str, Any]:
+    body = json.dumps({"session_id": session_id, "session_token": session_token}).encode("utf-8")
+    request = Request(
+        f"http://{target.host}:{target.port}/api/session/handoff/warp-cursor",
         data=body,
         headers={"Content-Type": "application/json"},
         method="POST",
