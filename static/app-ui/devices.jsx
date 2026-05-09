@@ -368,11 +368,14 @@ function PairModal({ open, target, onClose, onComplete }) {
     next[i] = c;
     setPin(next);
     if (c && i < 5) inputRefs.current[i + 1]?.focus();
-    if (next.every(x => x)) submitPin(next.join(""));
   }
 
   function handlePinKey(i, e) {
     if (e.key === "Backspace" && !pin[i] && i > 0) inputRefs.current[i - 1]?.focus();
+    if (e.key === "Enter") {
+      const full = [...pin.slice(0, i), pin[i] || "", ...pin.slice(i + 1)];
+      if (full.every(c => c)) submitPin(full.join(""));
+    }
   }
 
   async function startManualRequest(e) {
@@ -519,6 +522,13 @@ function PairModal({ open, target, onClose, onComplete }) {
               </div>
             </div>
             <div className="modal-foot">
+              <button
+                type="button" className="btn-primary"
+                disabled={!pin.every(c => c) || busy}
+                onClick={() => submitPin(pin.join(""))}
+              >
+                {busy ? "Confirming…" : "Confirm"}
+              </button>
               <button type="button" className="btn-ghost" onClick={onClose}>Cancel</button>
             </div>
           </>
@@ -580,7 +590,6 @@ function DevicesSection() {
   }] : [];
 
   async function completePair() {
-    setPairOpen(false);
     await load();
   }
 
@@ -762,7 +771,7 @@ function OverviewSection() {
       </div>
 
       <PairModal open={pairOpen} target={null}
-        onClose={() => setPairOpen(false)} onComplete={async () => { setPairOpen(false); await load(); }} />
+        onClose={() => setPairOpen(false)} onComplete={async () => { await load(); }} />
       <PendingPairDisplay />
     </>
   );
