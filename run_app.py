@@ -14,9 +14,10 @@ import time
 import urllib.request
 import urllib.error
 
-_HOST = "127.0.0.1"
+_SERVER_HOST = "0.0.0.0"   # listen on all interfaces so LAN devices can connect
+_UI_HOST = "127.0.0.1"    # webview connects via localhost
 _PORT = 8765
-_URL = f"http://{_HOST}:{_PORT}"
+_URL = f"http://{_UI_HOST}:{_PORT}"
 
 
 def _start_server() -> None:
@@ -27,7 +28,7 @@ def _start_server() -> None:
 
     uvicorn.run(
         "app.main:app",
-        host=_HOST,
+        host=_SERVER_HOST,
         port=_PORT,
         access_log=False,
         log_level="warning",
