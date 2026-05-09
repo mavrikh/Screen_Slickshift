@@ -796,6 +796,17 @@ function ActiveControlOverlay({ deviceName, onStop }) {
     return () => { window.pywebview?.api?.restore?.()?.catch?.(() => {}); };
   }, []);
 
+  // Auto-stop cursor control when the app window is un-minimized / brought to foreground
+  useEffect(() => {
+    if (!softCapture && !pointerLocked) return;
+    function onFocus() {
+      releaseCapture();
+      onStop();
+    }
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [softCapture, pointerLocked]);
+
   // Pointer lock change/error listeners
   useEffect(() => {
     overlayRef.current?.focus();
@@ -1200,7 +1211,7 @@ function OverviewSection() {
   // Fall back to right→left when tiles aren't snapped in the canvas
   const effectiveEdgeRel = useMemo(() =>
     edgeRel || (edgeHandoff && paired.length > 0 ? {
-      localEdge: "right", returnEdge: "left",
+      localEdge: "right", returnEdge: "right",
       remoteId: paired[0].id, remoteName: paired[0].name,
     } : null),
   [edgeRel, edgeHandoff, paired]);
