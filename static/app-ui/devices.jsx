@@ -242,41 +242,73 @@ function DiscoveredRow({ d, onPair }) {
   );
 }
 
-// ── Pending pair display (Device A side) ────────────────────────────────────
-// Polls for incoming pairing requests. When another device sends a
-// request-pair to this machine, this component shows the 6-digit code.
+// ── Pending pair display (this device — receives the request) ────────────────
+// Shows the 6-digit code when another device requests to pair.
+// After the code is consumed and the session eventually ends, asks the owner
+// whether to keep or remove the remote device's trust record.
 
 function PendingPairDisplay() {
   const [pending, setPending] = useState(null);
   const [secondsLeft, setSecondsLeft] = useState(0);
+  const [trustPrompt, setTrustPrompt] = useState(null); // {name, device_id}
+
+  const pendingRef = useRef(null);
+  const dismissedRef = useRef(false);
   const pollRef = useRef(null);
   const tickRef = useRef(null);
+  const sessionMonitorRef = useRef(null);
 
   useEffect(() => {
     async function poll() {
       try {
         const d = await SS.api("/api/discovery/pending-request");
+        const wasPending = pendingRef.current;
+
         if (d.pending && d.code) {
+          dismissedRef.current = false;
+          pendingRef.current = d;
           setPending(prev => {
-            if (prev?.code !== d.code) setSecondsLeft(d.seconds_remaining || 45);
+            if (!prev || prev.code !== d.code) setSecondsLeft(d.seconds_remaining || 45);
             return d;
           });
         } else {
+          pendingRef.current = null;
           setPending(null);
+          // Pending cleared and not dismissed — check if it was consumed
+          if (wasPending && !dismissedRef.current) {
+            try {
+              const sessData = await SS.api("/api/pairing-sessions");
+              const sess = (sessData.sessions || []).find(s => s.device_id === wasPending.requester_id);
+              if (sess) monitorSession(sess.session_id, wasPending.requester_name, wasPending.requester_id);
+            } catch {}
+          }
         }
       } catch {}
     }
     poll();
     pollRef.current = setInterval(poll, 2000);
-    return () => clearInterval(pollRef.current);
+    return () => { clearInterval(pollRef.current); clearInterval(sessionMonitorRef.current); };
   }, []);
+
+  function monitorSession(session_id, name, device_id) {
+    clearInterval(sessionMonitorRef.current);
+    sessionMonitorRef.current = setInterval(async () => {
+      try {
+        const sessData = await SS.api("/api/pairing-sessions");
+        if (!(sessData.sessions || []).some(s => s.session_id === session_id)) {
+          clearInterval(sessionMonitorRef.current);
+          setTrustPrompt({ name, device_id });
+        }
+      } catch {}
+    }, 3000);
+  }
 
   useEffect(() => {
     if (!pending) { clearInterval(tickRef.current); return; }
     clearInterval(tickRef.current);
     tickRef.current = setInterval(() => {
       setSecondsLeft(s => {
-        if (s <= 1) { clearInterval(tickRef.current); setPending(null); return 0; }
+        if (s <= 1) { clearInterval(tickRef.current); return 0; }
         return s - 1;
       });
     }, 1000);
@@ -284,8 +316,37 @@ function PendingPairDisplay() {
   }, [pending?.code]);
 
   async function dismiss() {
+    dismissedRef.current = true;
     try { await SS.api("/api/discovery/dismiss-request", { method: "POST" }); } catch {}
     setPending(null);
+  }
+
+  async function removeTrust() {
+    if (trustPrompt?.device_id) {
+      try { await SS.api(`/api/trusted-devices/${trustPrompt.device_id}`, { method: "DELETE" }); } catch {}
+    }
+    setTrustPrompt(null);
+  }
+
+  // Trust prompt — shown after the controlled session ends
+  if (trustPrompt) {
+    return (
+      <div className="modal-overlay">
+        <div className="modal">
+          <div className="modal-h">
+            <h2>Session ended</h2>
+            <p>
+              <strong style={{ color: "var(--text)" }}>{trustPrompt.name}</strong>
+              {" "}just controlled this device. Add them as a trusted device to allow future connections without re-pairing?
+            </p>
+          </div>
+          <div className="modal-foot">
+            <button type="button" className="btn-primary" onClick={() => setTrustPrompt(null)}>Keep trusted</button>
+            <button type="button" className="btn-ghost" onClick={removeTrust}>Remove</button>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   if (!pending) return null;
@@ -325,17 +386,19 @@ function PendingPairDisplay() {
   );
 }
 
-// ── Pair modal (Device B side) ───────────────────────────────────────────────
-// When target is a discovered device, automatically sends a request-pair to it
-// and moves straight to PIN entry. When opened manually (Add device), shows
-// a host input so the user can enter a known device's address.
+// ── Pair modal (initiating device side) ─────────────────────────────────────
+// When target is a discovered device: auto-requests pair, goes straight to PIN.
+// When opened via Add device: shows discovered devices first as quick options,
+// with manual IP entry as a fallback.
 
-function PairModal({ open, target, onClose, onComplete }) {
-  // steps: requesting | enter | manual-host | connecting | success | failed
+function PairModal({ open, target, onClose, onComplete, discoveredDevices = [] }) {
+  // steps: pick | requesting | enter | manual-host | connecting | failed
+  // (no success step — modal closes immediately, parent shows a toast)
   const [step, setStep] = useState("idle");
   const [pin, setPin] = useState(["", "", "", "", "", ""]);
   const [manualHost, setManualHost] = useState("");
   const [manualPort, setManualPort] = useState("8765");
+  const [pickedDevice, setPickedDevice] = useState(null);
   const [perms, setPerms] = useState({ mouse: true, keyboard: true, clipboard: true, files: false });
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
@@ -347,8 +410,9 @@ function PairModal({ open, target, onClose, onComplete }) {
     setPin(["","","","","",""]);
     setErr("");
     setBusy(false);
+    setPickedDevice(null);
     if (target) {
-      // Discovery path: send request-pair to the target device, then ask for the code
+      // Clicked Pair on a discovered row — auto-request
       setStep("requesting");
       SS.api("/api/discovery/remote/request-pair", {
         method: "POST",
@@ -357,8 +421,8 @@ function PairModal({ open, target, onClose, onComplete }) {
       }).then(() => setStep("enter"))
         .catch(e => { setErr(e.message || "Could not reach device."); setStep("failed"); });
     } else {
-      // Manual path: user needs to provide the host first
-      setStep("manual-host");
+      // Add device button — show discovered devices first
+      setStep("pick");
     }
   }, [open]);
 
@@ -376,6 +440,17 @@ function PairModal({ open, target, onClose, onComplete }) {
       const full = [...pin.slice(0, i), pin[i] || "", ...pin.slice(i + 1)];
       if (full.every(c => c)) submitPin(full.join(""));
     }
+  }
+
+  function quickPair(d) {
+    setPickedDevice(d);
+    setStep("requesting");
+    SS.api("/api/discovery/remote/request-pair", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ host: d.host, port: d.port || 8765 }),
+    }).then(() => setStep("enter"))
+      .catch(e => { setErr(e.message || "Could not reach device."); setPickedDevice(null); setStep("pick"); });
   }
 
   async function startManualRequest(e) {
@@ -401,9 +476,11 @@ function PairModal({ open, target, onClose, onComplete }) {
     setBusy(true);
     setErr("");
     setStep("connecting");
-    const host = target?.host || manualHost.trim();
-    const port = target?.port || Number(manualPort) || 8765;
-    const deviceId = target?.device_id;
+    const eff = target || pickedDevice;
+    const host = eff?.host || manualHost.trim();
+    const port = eff?.port || Number(manualPort) || 8765;
+    const deviceId = eff?.device_id;
+    const deviceName = eff?.name || host;
     try {
       const data = await SS.api("/api/discovery/remote/pair", {
         method: "POST",
@@ -423,8 +500,9 @@ function PairModal({ open, target, onClose, onComplete }) {
       if (data.trusted && data.shared_secret && deviceId) {
         try { localStorage.setItem(`slickshiftTrusted_${deviceId}`, JSON.stringify({ shared_secret: data.shared_secret })); } catch {}
       }
-      setStep("success");
-      onComplete && onComplete({ host, port, device_id: deviceId, name: target?.name || host }, perms, data);
+      // Close modal immediately — parent shows a toast and starts the connection
+      onComplete && onComplete({ host, port, device_id: deviceId, name: deviceName }, perms, data);
+      onClose();
     } catch (e2) {
       setErr(e2.message || "Pairing failed — check the code and try again.");
       setStep("enter");
@@ -434,16 +512,59 @@ function PairModal({ open, target, onClose, onComplete }) {
     }
   }
 
+  const effName = (target || pickedDevice)?.name || manualHost;
+
   if (!open) return null;
   return (
-    <div className="modal-overlay" onClick={step === "success" ? undefined : onClose}>
+    <div className="modal-overlay" onClick={step === "connecting" ? undefined : onClose}>
       <div className="modal" onClick={e => e.stopPropagation()}>
+
+        {/* Pick step — shown when "Add device" is clicked with no specific target */}
+        {step === "pick" && (
+          <>
+            <div className="modal-h">
+              <h2>Add device</h2>
+              <p>Select a device on your network, or enter an IP address manually.</p>
+            </div>
+            <div className="modal-body">
+              {discoveredDevices.length > 0 ? (
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  {discoveredDevices.map(d => (
+                    <button key={d.device_id} type="button"
+                      style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 14px", background: "var(--panel-2)", border: "1px solid var(--border)", borderRadius: 8, cursor: "pointer", textAlign: "left" }}
+                      onClick={() => quickPair(d)}>
+                      {platformIcon(d.platform || "other", 20)}
+                      <div>
+                        <div style={{ fontWeight: 600, fontSize: 13, color: "var(--text)" }}>{d.name}</div>
+                        <div style={{ fontSize: 11, color: "var(--muted)" }}>{d.host}</div>
+                      </div>
+                      <span style={{ marginLeft: "auto", fontSize: 12, color: "var(--accent)" }}>Pair →</span>
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <div style={{ color: "var(--muted)", fontSize: 13, marginBottom: 12 }}>
+                  No devices found yet. Enable "Allow connections" and "Search" on the other device.
+                </div>
+              )}
+              {err && <div style={{ color: "var(--danger)", fontSize: 12, marginTop: 8 }}>{err}</div>}
+              <button type="button" className="btn-ghost"
+                style={{ marginTop: 14, width: "100%", justifyContent: "center" }}
+                onClick={() => setStep("manual-host")}>
+                Enter IP address manually…
+              </button>
+            </div>
+            <div className="modal-foot">
+              <button type="button" className="btn-ghost" onClick={onClose}>Cancel</button>
+            </div>
+          </>
+        )}
 
         {step === "requesting" && (
           <div className="modal-body connecting">
             <div className="spinner" />
             <div style={{ fontSize: 14, color: "var(--text-dim)" }}>
-              Sending request to {target?.name || manualHost}…
+              Sending request to {target?.name || pickedDevice?.name || manualHost}…
             </div>
           </div>
         )}
@@ -451,32 +572,25 @@ function PairModal({ open, target, onClose, onComplete }) {
         {step === "manual-host" && (
           <>
             <div className="modal-h">
-              <h2>Add device</h2>
-              <p>Enter the IP address of the device running Screen Slickshift. It must be on the same network.</p>
+              <h2>Enter IP address</h2>
+              <p>The device must be on the same network and have Screen Slickshift running.</p>
             </div>
             <div className="modal-body">
               <form onSubmit={startManualRequest}>
                 <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-                  <input
-                    type="text" value={manualHost} onChange={e => setManualHost(e.target.value)}
-                    placeholder="192.168.1.x"
-                    autoFocus
-                    style={{ flex: 1, padding: "8px 10px", background: "var(--panel-2)", border: "1px solid var(--border-strong)", borderRadius: 8, color: "var(--text)", fontSize: 14, fontFamily: "var(--mono)", outline: "none" }}
-                  />
-                  <input
-                    type="text" value={manualPort} onChange={e => setManualPort(e.target.value)}
+                  <input type="text" value={manualHost} onChange={e => setManualHost(e.target.value)}
+                    placeholder="192.168.1.x" autoFocus
+                    style={{ flex: 1, padding: "8px 10px", background: "var(--panel-2)", border: "1px solid var(--border-strong)", borderRadius: 8, color: "var(--text)", fontSize: 14, fontFamily: "var(--mono)", outline: "none" }} />
+                  <input type="text" value={manualPort} onChange={e => setManualPort(e.target.value)}
                     placeholder="8765"
-                    style={{ width: 72, padding: "8px 10px", background: "var(--panel-2)", border: "1px solid var(--border-strong)", borderRadius: 8, color: "var(--text)", fontSize: 14, fontFamily: "var(--mono)", outline: "none" }}
-                  />
+                    style={{ width: 72, padding: "8px 10px", background: "var(--panel-2)", border: "1px solid var(--border-strong)", borderRadius: 8, color: "var(--text)", fontSize: 14, fontFamily: "var(--mono)", outline: "none" }} />
                 </div>
                 {err && <div style={{ color: "var(--danger)", fontSize: 12, marginBottom: 10 }}>{err}</div>}
                 <button type="submit" className="btn-primary" style={{ width: "100%" }}>Request pairing code</button>
               </form>
-              <div style={{ color: "var(--text-dim)", fontSize: 12, marginTop: 12, lineHeight: 1.6 }}>
-                Tip: devices advertising on the same network appear automatically in the list below. Start Advertising on the other device to avoid entering an IP.
-              </div>
             </div>
             <div className="modal-foot">
+              <button type="button" className="btn-ghost" onClick={() => setStep("pick")}>Back</button>
               <button type="button" className="btn-ghost" onClick={onClose}>Cancel</button>
             </div>
           </>
@@ -486,12 +600,7 @@ function PairModal({ open, target, onClose, onComplete }) {
           <>
             <div className="modal-h">
               <h2>Enter pairing code</h2>
-              <p>
-                {target
-                  ? <>A 6-digit code is now appearing on <strong style={{ color: "var(--text)" }}>{target.name}</strong>. Enter it here.</>
-                  : <>A 6-digit code is now appearing on {manualHost}. Enter it here.</>
-                }
-              </p>
+              <p>A 6-digit code is now appearing on <strong style={{ color: "var(--text)" }}>{effName}</strong>. Enter it here.</p>
             </div>
             <div className="modal-body">
               <div className="pin-input">
@@ -522,11 +631,9 @@ function PairModal({ open, target, onClose, onComplete }) {
               </div>
             </div>
             <div className="modal-foot">
-              <button
-                type="button" className="btn-primary"
+              <button type="button" className="btn-primary"
                 disabled={!pin.every(c => c) || busy}
-                onClick={() => submitPin(pin.join(""))}
-              >
+                onClick={() => submitPin(pin.join(""))}>
                 {busy ? "Confirming…" : "Confirm"}
               </button>
               <button type="button" className="btn-ghost" onClick={onClose}>Cancel</button>
@@ -541,6 +648,7 @@ function PairModal({ open, target, onClose, onComplete }) {
               <p style={{ color: "var(--danger)" }}>{err}</p>
             </div>
             <div className="modal-foot">
+              <button type="button" className="btn-ghost" onClick={() => setStep("pick")}>Back</button>
               <button type="button" className="btn-ghost" onClick={onClose}>Close</button>
             </div>
           </>
@@ -552,21 +660,6 @@ function PairModal({ open, target, onClose, onComplete }) {
             <div style={{ fontSize: 15, fontWeight: 600 }}>Establishing trust…</div>
             <div className="connecting-msg">Verifying code over the LAN</div>
           </div>
-        )}
-
-        {step === "success" && (
-          <>
-            <div className="modal-body connecting">
-              <div className="success-mark"><Icons.Check size={32} /></div>
-              <div style={{ fontSize: 16, fontWeight: 600 }}>
-                {target ? `Paired with ${target.name}` : `Paired with ${manualHost}`}
-              </div>
-              <div className="connecting-msg" style={{ marginTop: 8 }}>This device is now in your trusted list.</div>
-            </div>
-            <div className="modal-foot">
-              <button type="button" className="btn-primary" onClick={onClose}>Done</button>
-            </div>
-          </>
         )}
       </div>
     </div>
@@ -581,10 +674,17 @@ function DevicesSection() {
   const [pairOpen, setPairOpen] = useState(false);
   const [pairTarget, setPairTarget] = useState(null);
   const [reconnectMsg, setReconnectMsg] = useState("");
+  const [toast, setToast] = useState("");
+  const toastTimer = useRef(null);
+
+  function showToast(msg) {
+    setToast(msg);
+    clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(""), 4000);
+  }
 
   async function completePair(connInfo, _perms, pairData) {
-    // Reload trusted list then immediately refresh discovery so the newly
-    // paired device disappears from "available" and appears in "trusted".
+    showToast(`Paired with ${connInfo?.name || connInfo?.host || "device"}`);
     await load();
     await discoveryRefresh();
 
@@ -735,9 +835,21 @@ function DevicesSection() {
         </div>
       </div>
 
-      <PairModal open={pairOpen} target={pairTarget}
+      <PairModal open={pairOpen} target={pairTarget} discoveredDevices={discovered}
         onClose={() => setPairOpen(false)} onComplete={completePair} />
       <PendingPairDisplay />
+
+      {toast && (
+        <div style={{
+          position: "fixed", top: 20, right: 20, zIndex: 200,
+          background: "var(--panel-2)", border: "1px solid var(--border-strong)",
+          borderRadius: 10, padding: "10px 16px", display: "flex", alignItems: "center", gap: 8,
+          color: "var(--ok)", fontSize: 13, fontWeight: 500,
+          boxShadow: "0 8px 24px rgba(0,0,0,0.45)",
+        }}>
+          <Icons.Check size={14} />{toast}
+        </div>
+      )}
     </>
   );
 }
