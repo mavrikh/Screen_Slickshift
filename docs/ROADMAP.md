@@ -272,48 +272,25 @@ Current status:
 
 ## Phase 9: Edge Handoff
 
+Status: **complete**.
+
 Goal: support cursor handoff only after manual sender/receiver control is reliable.
 
-Possible work:
+Done:
 
-- Configure screen arrangement.
-- Detect controller cursor at a screen edge.
-- Hand off relative input to a target device.
-- Provide a hotkey/manual escape path.
-- Keep emergency stop always reachable.
-- Document the state machine before adding global capture. Started in `docs/EDGE_HANDOFF.md`.
-- Add a pure handoff config/state model. Done in `app/handoff.py`.
-- Add a pure monitor layout geometry model for the future drag-arrange tab. Done in `app/handoff.py`.
-- Add a browser simulation surface for layout and state. Started at `/handoff`.
-- Add state transition tests that do not capture real input. Started in `tests/test_handoff.py`.
-- Add an app-integrated manual remote mouse bridge. Started in `app/handoff_remote.py` and `/api/handoff/remote/*`.
-- Wire `/handoff` to remote mouse movement for Mac-Windows testing. Started with a manual remote touchpad.
-
-Done when:
-
-- Handoff can be tested reliably without trapping the user or hiding control state.
-
-Current status:
-
-- Phase 9 planning is started in `docs/EDGE_HANDOFF.md`.
-- Pure edge handoff config/state code exists.
-- Pure monitor layout geometry exists for draggable screen rectangles and adjacent-edge route derivation.
-- Prototype browser handoff page exists at `/handoff` for drag-layout and state simulation.
-- Prototype layout blocks overlapping monitor tiles and reports overlaps from the preview API.
-- Prototype layout snaps nearby screen sides edge-to-edge and supports zooming/panning the layout view, with Reset View fitting all screens.
-- Prototype layout forces nearest-side snapping on release unless Freeform mode is enabled, and turning Freeform off snaps all screens inward.
-- Prototype layout supports disabling a monitor from edge routing.
-- Prototype layout supports multiple monitors per device and up to five devices in the simulation.
-- Prototype Add Machine/Add Monitor use non-overlap placement.
-- Prototype remote handoff APIs can connect this app to another Screen Slickshift receiver and send mouse movement, click, scroll, or ping events.
-- Prototype `/handoff` page has remote host/IP, port, and token fields plus a manual remote touchpad for real mouse testing against another running app.
-- Mac-to-Windows and Windows-to-Mac remote mouse movement are physically verified with both machines running the main app.
-- No global input capture code exists.
-- No pointer-edge detector exists.
-- No automatic handoff network sender loop exists.
-- Manual remote touchpad and the internal CLI manual sender remain the proving tools.
-- Keyboard capture remains deferred.
-- The next implementation slice should move toward visible/manual handoff activation and return behavior before adding OS-level edge detection or global capture.
+- OS-level edge detector at 60Hz with configurable dwell timer (`app/edge_detector.py`). Transitions idle → armed → pending.
+- Multi-monitor support: `get_monitors()` enumerates all displays via `NSScreen` (macOS) and `EnumDisplayMonitors` (Windows). `DetectorConfig` stores the target monitor rect at arm time. `cursor_at_edge()` enforces screen-bounds check to prevent multi-monitor false positives.
+- `/handoff` page: draggable monitor layout, zoom/pan, layout persistence via localStorage, nearest-side snap, freeform mode, real screen dimensions normalized to max 20% size ratio.
+- Active remote overlay with pointer lock, scroll, click buttons, Escape stop.
+- Return edge detection: sender arms receiver's opposite edge; polling detects return dwell and exits active mode automatically.
+- Go Active button bypasses simulation steps when remote is connected.
+- mDNS device discovery: `DiscoveryService` advertises and browses `_slickshift._tcp.local.` using `zeroconf`. Devices appear in the Discovery tab after ~2s.
+- PIN pairing flow: request-pair → pending modal with 45s countdown → pair with code → session token + optional shared secret for future trusted reconnect.
+- CORS proxy routes: A's browser calls A's server which proxies to B, injecting A's identity.
+- Session-based remote bridge: `start_with_session()` stores session credentials; all remote operations (screen info, arm/disarm, detector state) use session auth when owner token is absent.
+- Session-authenticated endpoints on the receiver: `/api/session/screen/info`, `/api/session/handoff/arm` (mouse permission required), `/api/session/handoff/disarm`, `/api/session/handoff/detector/state`.
+- `/handoff` UI reorganized into State / Remote / Discovery tabs. Discovery badge on pending pair request. Remote tab auto-activates after discovery connect. "Add Monitor" uses real monitor data.
+- Mac-Mac, Mac-Windows, Windows-Mac physically verified.
 
 ## Phase 10: Packaging Decision
 

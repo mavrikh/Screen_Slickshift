@@ -6,6 +6,10 @@ import pytest
 from app.handoff_remote import (
     RemoteStatus,
     RemoteTarget,
+    arm_remote_detector,
+    disarm_remote_detector,
+    fetch_remote_screen_info,
+    get_remote_detector_state,
     normalize_host,
     normalize_path,
     normalize_port,
@@ -88,3 +92,166 @@ def test_remote_token_is_valid_rejects_http_error(monkeypatch) -> None:
     monkeypatch.setattr("app.handoff_remote.urlopen", fake_urlopen)
 
     assert not remote_token_is_valid(RemoteTarget.from_values("192.168.1.25", 8765), "wrong-token")
+
+
+# ---------------------------------------------------------------------------
+# arm_remote_detector
+# ---------------------------------------------------------------------------
+
+def test_arm_remote_detector_posts_to_arm_endpoint(monkeypatch) -> None:
+    calls = []
+
+    class FakeResponse:
+        def read(self):
+            return b'{"state": "armed"}'
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return False
+
+    def fake_urlopen(request, timeout):
+        calls.append(request)
+        return FakeResponse()
+
+    monkeypatch.setattr("app.handoff_remote.urlopen", fake_urlopen)
+
+    target = RemoteTarget.from_values("192.168.1.10", 8765)
+    result = arm_remote_detector(target, "token", "right", dwell_ms=500)
+
+    assert result == {"state": "armed"}
+    assert len(calls) == 1
+    req = calls[0]
+    assert req.full_url == "http://192.168.1.10:8765/api/handoff/arm"
+    assert req.headers["X-pairing-token"] == "token"
+    import json as _json
+    body = _json.loads(req.data.decode())
+    assert body["edge"] == "right"
+    assert body["dwell_ms"] == 500
+
+
+def test_arm_remote_detector_raises_on_error(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.handoff_remote.urlopen",
+        lambda req, timeout: (_ for _ in ()).throw(OSError("refused")),
+    )
+
+    with pytest.raises(RuntimeError):
+        arm_remote_detector(RemoteTarget.from_values("192.168.1.10", 8765), "token", "left")
+
+
+# ---------------------------------------------------------------------------
+# get_remote_detector_state
+# ---------------------------------------------------------------------------
+
+def test_get_remote_detector_state_calls_detector_state_endpoint(monkeypatch) -> None:
+    calls = []
+
+    class FakeResponse:
+        def read(self):
+            return b'{"state": "pending", "config": null}'
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return False
+
+    def fake_urlopen(request, timeout):
+        calls.append(request)
+        return FakeResponse()
+
+    monkeypatch.setattr("app.handoff_remote.urlopen", fake_urlopen)
+
+    target = RemoteTarget.from_values("192.168.1.10", 8765)
+    result = get_remote_detector_state(target, "token")
+
+    assert result == {"state": "pending", "config": None}
+    assert calls[0].full_url == "http://192.168.1.10:8765/api/handoff/detector/state"
+    assert calls[0].headers["X-pairing-token"] == "token"
+
+
+def test_get_remote_detector_state_raises_on_error(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.handoff_remote.urlopen",
+        lambda req, timeout: (_ for _ in ()).throw(OSError("refused")),
+    )
+
+    with pytest.raises(RuntimeError):
+        get_remote_detector_state(RemoteTarget.from_values("192.168.1.10", 8765), "token")
+
+
+# ---------------------------------------------------------------------------
+# disarm_remote_detector
+# ---------------------------------------------------------------------------
+
+def test_disarm_remote_detector_posts_to_disarm_endpoint(monkeypatch) -> None:
+    calls = []
+
+    class FakeResponse:
+        def read(self):
+            return b'{"state": "idle"}'
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return False
+
+    def fake_urlopen(request, timeout):
+        calls.append(request)
+        return FakeResponse()
+
+    monkeypatch.setattr("app.handoff_remote.urlopen", fake_urlopen)
+
+    target = RemoteTarget.from_values("192.168.1.10", 8765)
+    result = disarm_remote_detector(target, "token")
+
+    assert result == {"state": "idle"}
+    assert calls[0].full_url == "http://192.168.1.10:8765/api/handoff/disarm"
+    assert calls[0].headers["X-pairing-token"] == "token"
+
+
+def test_disarm_remote_detector_raises_on_error(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.handoff_remote.urlopen",
+        lambda req, timeout: (_ for _ in ()).throw(OSError("refused")),
+    )
+
+    with pytest.raises(RuntimeError):
+        disarm_remote_detector(RemoteTarget.from_values("192.168.1.10", 8765), "token")
+
+
+# ---------------------------------------------------------------------------
+# fetch_remote_screen_info
+# ---------------------------------------------------------------------------
+
+def test_fetch_remote_screen_info_calls_screen_info_endpoint(monkeypatch) -> None:
+    calls = []
+
+    class FakeResponse:
+        def read(self):
+            return b'{"width": 1920, "height": 1080, "cursor_x": 960, "cursor_y": 540, "error": ""}'
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return False
+
+    def fake_urlopen(request, timeout):
+        calls.append(request)
+        return FakeResponse()
+
+    monkeypatch.setattr("app.handoff_remote.urlopen", fake_urlopen)
+
+    target = RemoteTarget.from_values("192.168.1.10", 8765)
+    result = fetch_remote_screen_info(target, "token")
+
+    assert result["width"] == 1920
+    assert result["height"] == 1080
+    assert calls[0].full_url == "http://192.168.1.10:8765/api/screen/info"
+    assert calls[0].headers["X-pairing-token"] == "token"
+
+
+def test_fetch_remote_screen_info_raises_on_error(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.handoff_remote.urlopen",
+        lambda req, timeout: (_ for _ in ()).throw(OSError("refused")),
+    )
+
+    with pytest.raises(RuntimeError):
+        fetch_remote_screen_info(RemoteTarget.from_values("192.168.1.10", 8765), "token")

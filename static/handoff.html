@@ -45,53 +45,70 @@
         </div>
 
         <div class="panel handoff-control-panel">
-          <h2>State</h2>
-          <div class="state-list">
-            <div class="state-item">
-              <span>Selected Monitor</span>
-              <strong id="selectedScreenText">none</strong>
+          <div class="tab-bar" role="tablist">
+            <button class="tab-button active" data-tab="state" type="button" role="tab">State</button>
+            <button class="tab-button" data-tab="remote" type="button" role="tab">Remote</button>
+            <button class="tab-button" data-tab="discovery" type="button" role="tab">
+              Discovery<span id="discoveryBadge" class="tab-badge" hidden></span>
+            </button>
+          </div>
+
+          <div id="tabState" class="tab-panel">
+            <div class="state-list">
+              <div class="state-item">
+                <span>Selected Monitor</span>
+                <strong id="selectedScreenText">none</strong>
+              </div>
+              <div class="state-item">
+                <span>Mode</span>
+                <strong id="handoffModeText">idle</strong>
+              </div>
+              <div class="state-item">
+                <span>Target</span>
+                <strong id="handoffTargetText">none</strong>
+              </div>
+              <div class="state-item">
+                <span>Edge</span>
+                <strong id="handoffEdgeText">none</strong>
+              </div>
+              <div id="dwellProgressItem" class="dwell-progress-item" hidden>
+                <div class="dwell-progress-track">
+                  <div id="dwellProgressFill" class="dwell-progress-fill"></div>
+                </div>
+              </div>
+              <div class="state-item">
+                <span>Local Screen</span>
+                <strong id="localScreenText">unknown</strong>
+              </div>
             </div>
-            <div class="state-item">
-              <span>Mode</span>
-              <strong id="handoffModeText">idle</strong>
+
+            <label for="targetSelect">Target</label>
+            <select id="targetSelect"></select>
+
+            <label for="edgeSelect">Edge</label>
+            <select id="edgeSelect">
+              <option value="left">Left</option>
+              <option value="right">Right</option>
+              <option value="top">Top</option>
+              <option value="bottom">Bottom</option>
+            </select>
+
+            <div class="click-row">
+              <button id="armHandoffButton" type="button">Arm</button>
+              <button id="disarmHandoffButton" class="secondary" type="button">Disarm</button>
             </div>
-            <div class="state-item">
-              <span>Target</span>
-              <strong id="handoffTargetText">none</strong>
+            <div class="click-row">
+              <button id="addMachineButton" class="secondary" type="button">Add Machine</button>
+              <button id="addMonitorButton" class="secondary" type="button">Add Monitor</button>
             </div>
-            <div class="state-item">
-              <span>Edge</span>
-              <strong id="handoffEdgeText">none</strong>
+            <button id="toggleEdgeButton" class="secondary" type="button">Toggle Monitor Edges</button>
+            <div class="click-row">
+              <button id="simulateEdgeButton" class="secondary" type="button">Simulate Edge</button>
+              <button id="confirmHandoffButton" class="secondary" type="button">Confirm</button>
             </div>
           </div>
 
-          <label for="targetSelect">Target</label>
-          <select id="targetSelect"></select>
-
-          <label for="edgeSelect">Edge</label>
-          <select id="edgeSelect">
-            <option value="left">Left</option>
-            <option value="right">Right</option>
-            <option value="top">Top</option>
-            <option value="bottom">Bottom</option>
-          </select>
-
-          <div class="click-row">
-            <button id="armHandoffButton" type="button">Arm</button>
-            <button id="disarmHandoffButton" class="secondary" type="button">Disarm</button>
-          </div>
-          <div class="click-row">
-            <button id="addMachineButton" class="secondary" type="button">Add Machine</button>
-            <button id="addMonitorButton" class="secondary" type="button">Add Monitor</button>
-          </div>
-          <button id="toggleEdgeButton" class="secondary" type="button">Toggle Monitor Edges</button>
-          <div class="click-row">
-            <button id="simulateEdgeButton" class="secondary" type="button">Simulate Edge</button>
-            <button id="confirmHandoffButton" class="secondary" type="button">Confirm</button>
-          </div>
-
-          <div class="remote-control-block">
-            <h2>Remote Mouse</h2>
+          <div id="tabRemote" class="tab-panel" hidden>
             <label for="remoteHostInput">Host or IP</label>
             <input id="remoteHostInput" type="text" autocomplete="off" placeholder="192.168.1.25" />
 
@@ -109,6 +126,12 @@
               <span>Remote</span>
               <strong id="remoteStatusText">disconnected</strong>
             </div>
+            <div class="click-row">
+              <button id="remoteArmButton" class="secondary" type="button" disabled>Arm Handoff</button>
+              <button id="remotePreviewRoutesButton" class="secondary compact-button" type="button">Routes</button>
+            </div>
+            <div id="remoteRouteHint" class="remote-stop-hint"></div>
+            <button id="goActiveButton" type="button" disabled>Go Active</button>
             <div id="remoteMousePad" class="remote-mouse-pad" role="button" tabindex="0">
               <span>Remote touchpad</span>
             </div>
@@ -117,6 +140,16 @@
               <button id="remoteWiggleButton" class="secondary" type="button">Wiggle</button>
               <button id="remoteLeftClickButton" class="secondary" type="button">Left Click</button>
               <button id="remoteRightClickButton" class="secondary" type="button">Right Click</button>
+            </div>
+          </div>
+
+          <div id="tabDiscovery" class="tab-panel" hidden>
+            <div class="discovery-header">
+              <h2>Discovery</h2>
+              <button id="discoveryToggleButton" class="secondary compact-button" type="button">Start Advertising</button>
+            </div>
+            <div id="discoveryList" class="discovery-list">
+              <div class="empty-state">Start advertising to find nearby devices.</div>
             </div>
           </div>
 
@@ -135,13 +168,48 @@
 
     <div id="activeHandoffLayer" class="active-handoff-layer" tabindex="-1" hidden>
       <div class="active-handoff-bar">
-        <strong id="activeHandoffStatus">Remote handoff active</strong>
+        <div>
+          <strong id="activeHandoffStatus">Remote handoff active</strong>
+          <div class="remote-stop-hint">Drag to move &middot; Scroll to scroll &middot; Escape to stop</div>
+        </div>
         <div class="click-row">
           <button id="activeLayerCaptureButton" class="secondary" type="button">Capture Cursor</button>
           <button id="activeLayerLeftClickButton" class="secondary" type="button">Left Click</button>
           <button id="activeLayerRightClickButton" class="secondary" type="button">Right Click</button>
           <button id="activeLayerStopButton" class="danger" type="button">Stop</button>
         </div>
+      </div>
+    </div>
+
+    <div id="pairModal" class="modal-overlay" hidden>
+      <div class="modal">
+        <h2>Pair with <span id="pairModalTargetName"></span></h2>
+        <p>Enter the PIN shown on the target device's screen:</p>
+        <div class="pair-countdown-row">
+          <span>Expires in</span>
+          <strong id="pairCountdownText">—</strong>
+        </div>
+        <input id="pairPinInput" type="text" inputmode="numeric" maxlength="6" placeholder="6-digit PIN" autocomplete="off" />
+        <div class="permission-row">
+          <label class="permission-label"><input type="checkbox" id="permMouseCheck" checked /> Mouse</label>
+          <label class="permission-label"><input type="checkbox" id="permKeyboardCheck" /> Keyboard</label>
+        </div>
+        <label class="permission-label"><input type="checkbox" id="pairRememberCheck" checked /> Remember this device</label>
+        <div id="pairModalError" class="modal-error" hidden></div>
+        <div class="click-row">
+          <button id="pairConnectButton" type="button">Connect</button>
+          <button id="pairCancelButton" class="secondary" type="button">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="pendingPairModal" class="modal-overlay" hidden>
+      <div class="modal">
+        <h2>Pairing Request</h2>
+        <p><strong id="pendingRequesterName"></strong> wants to pair with this device.</p>
+        <p class="muted-text">Share this PIN with them (expires in <strong id="pendingPairCountdown">—</strong>s):</p>
+        <div id="pendingPairCode" class="pair-code-display">——————</div>
+        <button id="pendingDismissButton" class="secondary" type="button" style="margin-top:4px">Dismiss</button>
       </div>
     </div>
 

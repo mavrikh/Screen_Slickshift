@@ -71,7 +71,7 @@ python -m pytest
 Expected on the current macOS baseline:
 
 ```text
-275 passed, 2 warnings
+419 passed, 2 warnings
 ```
 
 The warnings are FastAPI `on_event` deprecation warnings and are intentionally deferred.
@@ -155,8 +155,29 @@ Working browser-control MVP:
 - Handoff layout page can connect to a remote Screen Slickshift receiver by host/IP, port, and remote token, then send mouse movement, clicks, and scroll through a manual remote touchpad.
 - Owner-token-protected remote handoff APIs: `/api/handoff/remote/status`, `/api/handoff/remote/start`, `/api/handoff/remote/event`, and `/api/handoff/remote/stop`.
 - Owner-token-protected input status API: `/api/input/status`, with optional backend import check for receiver diagnostics.
+- Go Active button on `/handoff` page that enters active_remote mode directly without the simulation arm/confirm steps.
+- Active handoff layer auto-stops and exits the overlay when the remote connection is lost during active_remote mode.
+- OS-level edge detector in `app/edge_detector.py`: polls `pyautogui.position()` at ~60 Hz when armed, fires after cursor dwells at the configured edge for 400 ms (configurable), transitions idle → armed → pending.
+- Owner-token-protected edge detector APIs: `POST /api/handoff/arm`, `POST /api/handoff/disarm`, `GET /api/handoff/detector/state`.
+- Owner-token-protected screen info API: `GET /api/screen/info` returns primary screen dimensions and current cursor position.
+- `/handoff` Arm button and route Arm buttons start real cursor polling via the Python backend.
+- `/handoff` polls detector state every 200 ms while armed; when pending fires and remote is connected, goes active automatically.
+- `/handoff` shows real local screen dimensions in the State panel after connecting.
+- Return edge: when active_remote mode starts, the sender arms the receiver's edge detector for the return edge (opposite of the exit edge, via `/api/handoff/remote/arm-return`). The sender polls `/api/handoff/remote/return-state` every 200ms. When the receiver's cursor dwells at the return edge for 400ms, the sender automatically stops and returns to local control. Stop and Escape also remain available.
+- Layout tiles are automatically updated with real screen dimensions after connecting: local tile from `/api/screen/info`, target tile from `/api/handoff/remote/screen-info` via the remote bridge.
 - Rotating server logs.
 - LLM text generation via `/api/generate-text` route, using local OpenAI-compatible API (LM Studio).
+- mDNS device discovery via `app/discovery.py` and `zeroconf`: `DiscoveryService` advertises and browses `_slickshift._tcp.local.` services, resolves device_id and screen host/port from TXT records.
+- Discovery pairing flow: unauthenticated `POST /api/discovery/request-pair` creates a time-limited (45s) pending pair request with a server-generated 6-digit code; the local owner reads the code from `GET /api/discovery/pending-request` (owner-token required). The remote device submits the code via `POST /api/discovery/pair` to obtain a session token and optional shared secret for trusted reconnects.
+- Trusted reconnect: `POST /api/pairing/trusted-reconnect` accepts device_id + shared_secret, issues a fresh session without a PIN.
+- CORS proxy routes: `POST /api/discovery/remote/request-pair`, `/remote/pair`, `/remote/reconnect` forward discovery API calls from A's browser through A's server to B's server, injecting A's device identity automatically.
+- Session-based remote bridge: `RemoteHandoffBridge.start_with_session()` connects to B's WebSocket using session credentials (`session_auth` message) instead of the owner token. Bridge stores both `_token` (owner) and `_session_id`/`_session_token` (session) and selects the available auth path automatically for all remote operations.
+- Session-authenticated remote operations on B: `POST /api/session/screen/info`, `/api/session/handoff/arm` (requires `mouse` permission), `/api/session/handoff/disarm`, `/api/session/handoff/detector/state` — all accept session credentials in the POST body, enabling return detection and screen-info fetching for discovery-paired connections.
+- Multi-monitor edge detection: `get_monitors()` in `app/edge_detector.py` enumerates all connected displays using `NSScreen` on macOS (with correct top-down coordinate conversion) and `EnumDisplayMonitors` on Windows. `DetectorConfig` stores the target monitor's full rect at arm time. `cursor_at_edge()` enforces a screen-bounds check before testing edges, preventing false positives when a cursor on a secondary monitor exceeds a primary screen's pixel range. `GET /api/screen/monitors` exposes the display list to the browser. `POST /api/handoff/arm` and `/api/session/handoff/arm` accept `screen_index` to target a specific monitor.
+- `/handoff` fetches all local monitors on connect, tags layout tiles with `monitor_index`, passes `screen_index` when arming, and shows monitor names as tile subtitles when multiple displays are present. `Add Monitor` uses real monitor data to add unrepresented displays with correct dimensions.
+- `/handoff` control panel reorganized into three tabs (State / Remote / Discovery). Discovery tab shows a badge when an incoming pair request is pending; Remote tab auto-activates after a discovery connection. Pending pair PIN modal has a real 1-second countdown independent of the discovery poll interval. Discovery list shows "Searching…" for 4 seconds after advertising starts.
+- Layout tiles show real screen dimensions normalized so the largest display is at most 20% bigger than the smallest. Layout is persisted to `localStorage` and restored on page reload.
+- `[hidden]` CSS guarantee: `[hidden] { display: none !important }` prevents author `display` values from overriding the HTML `hidden` attribute.
 
 Backend pairing/trust code implemented and tested:
 
@@ -217,14 +238,15 @@ Known security gaps or unclear areas:
 - Browser control still depends on possession of the global token.
 - Legacy WebSocket query-token compatibility still exists in the backend, but the browser UI now sends the token as the first WebSocket message.
 - No TLS or local certificate support is implemented.
-- No network discovery security model is implemented.
-- Nearby trusted-device send/broadcast flow is not implemented yet.
-- Trusted-device/session authorization is enforced for session-authenticated touchpad mouse actions, text, clipboard read/write, upload, and macros.
+- The discovery pairing flow is PIN-based (6-digit code displayed on the receiver's screen). No additional security beyond possession of the code and being on the local network.
+- Trusted-device shared secrets are stored in the browser's `localStorage` — suitable for LAN prototype, not for a hardened product.
+- Trusted-device/session authorization is enforced for session-authenticated touchpad mouse actions, text, clipboard read/write, upload, macros, handoff arm/disarm, and screen info.
 - The macOS receiver uses a temporary token but has no persistent trust model.
 - Remote handoff start is owner-token protected, preflights the target `/api/status`, refuses emergency-disabled receivers, and only sends mouse/ping protocol events.
 - Remote handoff start validates the target token through `/api/auth/check` before opening the remote WebSocket.
 - Remote handoff start checks target `/api/input/status?check_backend=true` when available and refuses targets that report input is blocked.
 - Remote handoff target tokens are not logged by the app and are not returned from API responses.
+- Session-based remote connections (discovery/trusted-reconnect path) skip the input-status pre-check; per-event mouse authorization is enforced server-side instead.
 
 ## 5. Platform-Specific Code
 
@@ -249,7 +271,7 @@ macOS-specific or macOS-oriented code:
 - Receiver `/ws/input` accepts `session_auth` with `mouse` permission and updates session activity only after accepted mouse input.
 - Receiver `/api/lockout` accepts `X-Pairing-Token` and still accepts query-token auth for compatibility.
 - Receiver status/index payloads advertise supported WebSocket and HTTP auth modes without exposing the token.
-- The main app's `/ws/touchpad` receiver path runs on macOS as the remote mouse target when Accessibility permission is granted. Windows-to-Mac remote mouse has been physically verified. Physical Mac-to-Mac verification is still pending.
+- The main app's `/ws/touchpad` receiver path runs on macOS as the remote mouse target when Accessibility permission is granted. Mac-to-Windows, Windows-to-Mac, and Mac-to-Mac remote mouse have all been physically verified.
 - Receiver emergency-disabled state blocks mouse/click/scroll while allowing ping.
 - `app/device_identity.py` maps `platform.system() == "Darwin"` to `macos`.
 
@@ -269,19 +291,21 @@ Edge handoff:
 - Pure monitor layout geometry exists in `app/handoff.py` for draggable screen rectangles and adjacent-edge route derivation.
 - Prototype browser handoff page exists at `/handoff` for drag-layout and state simulation.
 - Owner-token-protected `POST /api/handoff/layout/preview` returns sanitized screens and derived routes.
-- Handoff layout preview reports overlapping screens, and the `/handoff` drag UI blocks overlapping monitor tiles.
-- `/handoff` snaps nearby screen sides edge-to-edge while dragging.
-- `/handoff` forces screen tiles to snap to the nearest valid side when released unless Freeform mode is enabled.
-- `/handoff` has a Freeform mode that disables forced snapping while preview uses a larger side-search distance; turning Freeform off snaps all screens inward to nearest valid sides.
-- `/handoff` can toggle a selected monitor out of edge routing while keeping it visible in the layout.
-- `/handoff` can add multiple monitors per device and add machines up to the current prototype cap of five devices.
-- `/handoff` Add Machine/Add Monitor use non-overlap placement so new tiles are never created on top of existing tiles.
 - `/handoff` supports zoom controls, mouse-wheel zoom, fit-to-all Reset View, and panning by dragging empty layout space.
-- State transition tests exist in `tests/test_handoff.py`.
-- No global input capture code exists.
-- No pointer-edge detector exists.
-- No handoff network sender loop exists.
-- Manual sender and experimental receiver remain the proving tools.
+- `/handoff` Add Machine/Add Monitor place new tiles in a priority order (right → left → top → bottom of the reference screen) and never create overlapping tiles.
+- `/handoff` drag tiles freely through each other; on release the cursor position over the blocker determines which side to snap to for horizontal overlaps, and vertical overlaps always snap back.
+- Layout tiles are automatically updated with real screen dimensions on connect: local tile from `/api/screen/info`, remote tile from `/api/handoff/remote/screen-info`. Tile sizes are normalized so the largest screen is at most 20% bigger than the smallest.
+- OS-level edge detector in `app/edge_detector.py` polls `pyautogui.position()` at ~60 Hz when armed. Transitions idle → armed → pending after cursor dwells at the configured edge for 400 ms.
+- `/api/handoff/arm`, `/api/handoff/disarm`, `/api/handoff/detector/state`, and `/api/screen/info` are owner-token-protected endpoints that control and query the detector.
+- `/handoff` Arm button and route Arm buttons start real cursor polling. The browser polls every 100 ms; when the detector reaches pending and remote is connected, `goActive()` fires automatically.
+- A green dwell progress bar appears in the State panel while the cursor is in the edge zone, filling over 400 ms.
+- Active remote mode opens a full-window overlay with pointer lock capture, movement forwarding, scroll, click buttons, and a Stop button. Escape also stops.
+- Go Active button skips the simulation steps and enters active_remote directly when remote is connected.
+- Active layer auto-stops if the remote connection is lost.
+- Return edge: when going active, the sender arms the receiver's edge detector for the return edge (opposite of exit edge). The sender polls the receiver's detector state every 200 ms; when the receiver's cursor dwells at its return edge, the sender returns to local control automatically.
+- Mac-to-Windows, Windows-to-Mac, and Mac-to-Mac remote mouse have all been physically verified.
+- No global input capture code exists (cursor position reading does not require Accessibility permission on macOS).
+- Multi-monitor edge detection uses the primary screen only; multi-monitor support is deferred.
 - Keyboard capture remains deferred.
 
 ## 6. Incomplete Or Experimental Files
@@ -306,13 +330,25 @@ Unclear or incomplete:
 - The roadmap describes future native agents and edge handoff, but those are not implemented.
 - Cross-platform server startup exists through `run.py`, but desktop input behavior still depends on `pyautogui` support and OS permissions.
 
-## 7. Next Safest Development Step
+## 7. Current Status and Next Steps
 
-The next safest step is to move toward Phase 9 edge-handoff planning without adding global capture yet.
+Phase 9 edge handoff is complete. All originally-listed gaps are resolved:
 
-A small, testable sequence:
+| Item | Status |
+|---|---|
+| OS-level edge detection (60Hz, dwell timer) | ✅ Done |
+| Active remote overlay with pointer lock | ✅ Done |
+| Automatic return edge detection | ✅ Done |
+| Layout persistence (localStorage) | ✅ Done |
+| mDNS device discovery and PIN pairing | ✅ Done |
+| Session-based remote connection (no owner token needed) | ✅ Done |
+| Multi-monitor edge detection | ✅ Done |
+| Mac-Mac / Mac-Windows / Windows-Mac physically verified | ✅ Done |
 
-1. Keep manual sender/receiver control as the test bed.
-2. Add a prototype UI surface for layout/state simulation before OS capture.
-3. Reuse manual sender receiver-status checks from the handoff model.
-4. Keep local panic/stop behavior independent from the receiver.
+Remaining gaps before a polished product:
+
+1. **TLS** — all traffic is plain HTTP/WS. User has not decided whether this is in scope.
+2. **Native packaging** — currently requires Python and a terminal. Phase 10, explicitly deferred.
+3. **Auto-reconnect on session drop** — if the session token expires during use, the bridge silently disconnects. A reconnect prompt using the stored shared secret would improve resilience.
+4. **Windows discovery** — mDNS (`zeroconf`) is cross-platform but has not been verified on Windows. The discovery flow should work; Bonjour Print Services must be installed on Windows for mDNS resolution to function.
+5. **Multi-monitor** — primary screen detection works on macOS via `NSScreen` and Windows via `EnumDisplayMonitors`. Not tested on multi-monitor hardware yet.

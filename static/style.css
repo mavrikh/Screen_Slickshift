@@ -15,6 +15,10 @@
   box-sizing: border-box;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 body {
   margin: 0;
   min-height: 100vh;
@@ -364,6 +368,25 @@ button.text-danger:hover {
   font-size: 0.86rem;
 }
 
+.dwell-progress-item {
+  padding: 4px 2px;
+}
+
+.dwell-progress-track {
+  height: 5px;
+  background: var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.dwell-progress-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--accent);
+  border-radius: 3px;
+  transition: width 0.08s linear;
+}
+
 .active-handoff-layer {
   position: fixed;
   inset: 0;
@@ -634,6 +657,162 @@ button.text-danger:hover {
   margin: 0;
   color: var(--muted);
   white-space: pre-wrap;
+}
+
+.tab-bar {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+
+.tab-button {
+  flex: 1;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  color: var(--muted);
+  font-weight: 600;
+  min-height: 38px;
+  padding: 6px 8px;
+  font-size: 0.88rem;
+  position: relative;
+}
+
+.tab-button:hover {
+  background: var(--panel-strong);
+  color: var(--text);
+}
+
+.tab-button.active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+  background: transparent;
+}
+
+.tab-panel {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+}
+
+.tab-badge {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  background: var(--accent);
+  border-radius: 50%;
+  margin-left: 5px;
+  vertical-align: middle;
+  position: relative;
+  top: -1px;
+}
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+}
+
+.modal {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 22px 24px;
+  max-width: 380px;
+  width: calc(100% - 32px);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.modal h2 {
+  margin-bottom: 0;
+}
+
+.modal-error {
+  color: var(--danger);
+  font-size: 0.875rem;
+}
+
+.pair-code-display {
+  font-size: 2.4rem;
+  font-weight: 800;
+  letter-spacing: 0.18em;
+  text-align: center;
+  padding: 14px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-family: monospace;
+}
+
+.pair-countdown-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.875rem;
+  color: var(--muted);
+}
+
+.permission-row {
+  display: flex;
+  gap: 16px;
+}
+
+.permission-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+.muted-text {
+  display: block;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.discovery-block {
+  margin-top: 12px;
+}
+
+.discovery-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.discovery-header h2 {
+  margin-bottom: 0;
+}
+
+.discovery-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.discovery-device {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--panel-strong);
+  border-radius: 6px;
+}
+
+.discovery-device-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
 }
 
 @media (max-width: 760px) {

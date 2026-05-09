@@ -46,7 +46,14 @@ Current working shape:
 - The first app-integrated remote mouse bridge exists in `app/handoff_remote.py` and `/api/handoff/remote/*`. It connects to another running Screen Slickshift receiver and sends only mouse/ping protocol events.
 - `/handoff` now has remote host/IP, port, token fields, and a manual remote touchpad. This is the current Mac-Windows test path.
 - `/api/input/status` reports local receiver input state and can check whether the desktop input backend loads. Remote handoff start uses it when the target supports it.
-- No pointer-edge detector, automatic handoff loop, global capture code, packaging, TLS, or discovery exists yet.
+- OS-level edge detector exists in `app/edge_detector.py` (60 Hz polling, dwell timer, armed/pending states).
+- `/handoff` arms the detector on Arm button press, polls state at 100 ms, auto-fires goActive when pending.
+- Return edge detection: sender arms receiver's detector for the opposite edge; polls receiver state every 200 ms; auto-returns on dwell.
+- Dwell progress bar in the State panel fills green over 400 ms while cursor is in the edge zone.
+- Layout tiles auto-update with real screen dimensions on connect; tile sizes normalized to ≤20% size difference.
+- Drag-through behavior: tiles move freely during drag; on release, cursor position over blocker determines snap side.
+- Mac-to-Mac remote mouse physically verified (in addition to Mac-Windows and Windows-Mac).
+- No global input capture, native packaging, TLS, or discovery exists yet.
 
 Do not assume native cross-platform agents, edge handoff, TLS, discovery, screen capture, or trusted-device UI exist yet.
 
@@ -91,10 +98,10 @@ source .venv/bin/activate
 python -m pytest
 ```
 
-Expected as of the receiver status preflight:
+Expected as of the edge detector integration:
 
 ```text
-275 passed, 2 warnings
+341 passed, 2 warnings
 ```
 
 Focused remote handoff check:

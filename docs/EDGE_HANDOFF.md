@@ -268,14 +268,23 @@ When coding starts, keep the first slice small:
 - Windows to Mac remote mouse movement has been physically verified with both machines running the main app.
 - Mac to Mac remote mouse movement is expected to use the same path but still needs physical verification.
 - `/handoff` has a Stop button and an Escape key local stop path for the visible browser handoff flow.
-- Automatic edge detection and global input capture are still not implemented.
-- Prototype screen dragging snaps nearby sides edge-to-edge.
-- Prototype screen release forces snapping to the nearest valid side unless Freeform mode is enabled.
-- Prototype monitor tiles can be excluded from edge routing.
-- Prototype layout supports multiple monitors per device and up to five devices.
-- Prototype layout surface supports zooming and panning.
-- No global input capture code exists.
-- No pointer-edge detector exists.
-- No handoff network sender loop exists.
-- Manual sender and experimental receiver are the current proving tools.
+- Active layer auto-stops and exits the overlay when the remote connection is lost during active_remote mode.
+- `/handoff` has a direct Go Active button that enters active_remote without the simulation steps.
+- `app/edge_detector.py` contains a real OS-level edge detector with `cursor_at_edge()` geometry and an asyncio polling loop.
+- Edge detector polls `pyautogui.position()` and `pyautogui.size()` at ~60 Hz while armed.
+- Edge detector transitions idle → armed → pending after the cursor dwells at the configured edge for `dwell_ms` (default 400 ms).
+- `/api/handoff/arm` arms the detector with an edge and dwell config (owner-token protected).
+- `/api/handoff/disarm` stops the detector and resets to idle (owner-token protected).
+- `/api/handoff/detector/state` returns current detector state and config (owner-token protected).
+- `/api/screen/info` returns primary screen dimensions and current cursor position (owner-token protected).
+- `/handoff` Arm button and route Arm buttons now call `/api/handoff/arm` to start real cursor polling.
+- `/handoff` polls `/api/handoff/detector/state` every 200 ms while armed.
+- When the detector reaches `pending` and the remote is connected, the browser automatically calls `goActive()`.
+- When the detector reaches `pending` and no remote is connected, the browser transitions to `pending_handoff` with a connect prompt.
+- Stop and Disarm both call `/api/handoff/disarm` to cancel the polling task.
+- Edge detection requires `pyautogui` to be importable and running in a desktop session.
+- Edge detection uses only `pyautogui.position()` and `pyautogui.size()` — no input injection, no Accessibility permission needed for reading position on most platforms.
+- No global input capture code exists (input injection still requires Accessibility permission on macOS).
+- Multi-monitor edge detection is not yet implemented; the detector uses the primary screen bounds.
+- No handoff network sender loop exists (handoff still requires manual remote connection first).
 - Keyboard capture remains deferred.

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from logging.handlers import RotatingFileHandler
 from typing import Optional
 
@@ -15,8 +17,16 @@ from app.commands import public_macro_list, run_macro
 from app.config import LOG_DIR, STATIC_DIR, ensure_directories, get_or_create_pairing_token, get_receive_dir, set_receive_dir, settings
 from app.device_identity import get_or_create_device_identity
 from app.files import save_upload
-from app.handoff import make_handoff_layout, make_layout_screen
-from app.handoff_remote import RemoteHandoffBridge, RemoteTarget
+from app.discovery import DiscoveredDevice, DiscoveryService, PendingPairRequest
+from app.edge_detector import DetectorState, EdgeDetector, make_detector_config
+from app.handoff import make_handoff_layout, make_layout_screen, normalize_edge
+from app.handoff_remote import (
+    RemoteHandoffBridge,
+    RemoteTarget,
+    remote_pair,
+    remote_request_pair,
+    remote_trusted_reconnect,
+)
 from app.input_control import input_control_status, send_text_to_pc
 from app.llm import generate_text
 from app.pairing import PairingCodeBook, PairingSessionBook, TrustedDeviceStore
@@ -116,6 +126,74 @@ class RemoteHandoffEventRequest(BaseModel):
     amount: int = 0
 
 
+class HandoffArmRequest(BaseModel):
+    edge: str
+    dwell_ms: int = 400
+    zone_px: int = 5
+    screen_index: int = 0
+
+
+class RequestPairRequest(BaseModel):
+    device_id: str
+    name: str
+
+
+class DiscoveryPairRequest(BaseModel):
+    code: str
+    device_id: str
+    name: str
+    permissions: Optional[dict[str, bool]] = None
+    remember_device: bool = True
+    idle_timeout_seconds: int = 600
+
+
+class TrustedReconnectRequest(BaseModel):
+    device_id: str
+    shared_secret: str
+    idle_timeout_seconds: int = 600
+
+
+class HandoffReturnArmRequest(BaseModel):
+    return_edge: str
+    dwell_ms: int = 400
+
+
+class RemoteHandoffSessionStartRequest(BaseModel):
+    host: str
+    port: int = 8765
+    path: str = "/ws/touchpad"
+    session_id: str
+    session_token: str
+
+
+class RemoteDiscoveryTargetRequest(BaseModel):
+    host: str
+    port: int = 8765
+
+
+class RemoteDiscoveryPairPayload(BaseModel):
+    host: str
+    port: int = 8765
+    code: str
+    permissions: Optional[dict[str, bool]] = None
+    remember_device: bool = True
+    idle_timeout_seconds: int = 600
+
+
+class RemoteDiscoveryReconnectPayload(BaseModel):
+    host: str
+    port: int = 8765
+    shared_secret: str
+    idle_timeout_seconds: int = 600
+
+
+class SessionHandoffArmRequest(SessionRequest):
+    edge: str
+    dwell_ms: int = 400
+    zone_px: int = 5
+    screen_index: int = 0
+
+
 def configure_logging() -> None:
     ensure_directories()
     log_file = LOG_DIR / "server.log"
@@ -142,6 +220,10 @@ pairing_code_book = PairingCodeBook()
 pairing_session_book = PairingSessionBook()
 transfer_history = TransferHistory()
 remote_handoff_bridge = RemoteHandoffBridge()
+edge_detector = EdgeDetector()
+discovery_service = DiscoveryService()
+discovery_code_book = PairingCodeBook(ttl_seconds=45)
+_pending_pair_request: Optional[PendingPairRequest] = None
 
 # Safe default: the frontend is served by this same app, so no cross-origin browser
 # access is needed. If you later split the frontend onto another host, add only that
@@ -354,6 +436,124 @@ async def handoff_remote_stop() -> dict:
     return await remote_handoff_bridge.stop()
 
 
+@app.post("/api/handoff/remote/arm-return", dependencies=[Depends(verify_token)])
+async def handoff_remote_arm_return(payload: HandoffReturnArmRequest) -> dict:
+    try:
+        return await remote_handoff_bridge.arm_return_detector(payload.return_edge, payload.dwell_ms)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/api/handoff/remote/return-state", dependencies=[Depends(verify_token)])
+async def handoff_remote_return_state() -> dict:
+    try:
+        return await remote_handoff_bridge.get_return_state()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/handoff/remote/disarm-return", dependencies=[Depends(verify_token)])
+async def handoff_remote_disarm_return() -> dict:
+    return await remote_handoff_bridge.disarm_return_detector()
+
+
+@app.get("/api/handoff/remote/screen-info", dependencies=[Depends(verify_token)])
+async def handoff_remote_screen_info() -> dict:
+    try:
+        return await remote_handoff_bridge.get_remote_screen_info()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/api/screen/info", dependencies=[Depends(verify_token)])
+async def screen_info() -> dict:
+    try:
+        import pyautogui
+        size = await asyncio.to_thread(pyautogui.size)
+        pos = await asyncio.to_thread(pyautogui.position)
+        return {
+            "width": size.width,
+            "height": size.height,
+            "cursor_x": pos.x,
+            "cursor_y": pos.y,
+            "error": "",
+        }
+    except Exception as exc:
+        return {"width": None, "height": None, "cursor_x": None, "cursor_y": None, "error": str(exc)}
+
+
+@app.get("/api/screen/monitors", dependencies=[Depends(verify_token)])
+async def screen_monitors() -> dict:
+    try:
+        from app.edge_detector import get_monitors
+        monitors = await asyncio.to_thread(get_monitors)
+        return {"monitors": monitors}
+    except Exception as exc:
+        return {"monitors": [], "error": str(exc)}
+
+
+@app.post("/api/handoff/arm", dependencies=[Depends(verify_token)])
+async def handoff_arm(payload: HandoffArmRequest) -> dict:
+    config = make_detector_config(
+        edge=payload.edge,
+        dwell_ms=payload.dwell_ms,
+        zone_px=payload.zone_px,
+        screen_index=payload.screen_index,
+    )
+    if config is None:
+        raise HTTPException(status_code=400, detail=f"Invalid edge: {payload.edge!r}")
+    await edge_detector.arm(config)
+    return edge_detector.public_dict()
+
+
+@app.post("/api/handoff/disarm", dependencies=[Depends(verify_token)])
+async def handoff_disarm() -> dict:
+    await edge_detector.disarm()
+    return edge_detector.public_dict()
+
+
+@app.get("/api/handoff/detector/state", dependencies=[Depends(verify_token)])
+async def handoff_detector_state() -> dict:
+    return edge_detector.public_dict()
+
+
+@app.post("/api/session/screen/info")
+async def session_screen_info(payload: SessionRequest) -> dict:
+    if pairing_session_book.verify_session(payload.session_id, payload.session_token) is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired session.")
+    try:
+        import pyautogui
+        size = await asyncio.to_thread(pyautogui.size)
+        return {"width": size.width, "height": size.height, "error": ""}
+    except Exception as exc:
+        return {"width": None, "height": None, "error": str(exc)}
+
+
+@app.post("/api/session/handoff/arm")
+async def session_handoff_arm(payload: SessionHandoffArmRequest) -> dict:
+    verify_session_permission_or_403(payload.session_id, payload.session_token, "mouse")
+    config = make_detector_config(edge=payload.edge, dwell_ms=payload.dwell_ms, zone_px=payload.zone_px, screen_index=payload.screen_index)
+    if config is None:
+        raise HTTPException(status_code=400, detail=f"Invalid edge: {payload.edge!r}")
+    await edge_detector.arm(config)
+    return edge_detector.public_dict()
+
+
+@app.post("/api/session/handoff/disarm")
+async def session_handoff_disarm(payload: SessionRequest) -> dict:
+    if pairing_session_book.verify_session(payload.session_id, payload.session_token) is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired session.")
+    await edge_detector.disarm()
+    return edge_detector.public_dict()
+
+
+@app.post("/api/session/handoff/detector/state")
+async def session_handoff_detector_state(payload: SessionRequest) -> dict:
+    if pairing_session_book.verify_session(payload.session_id, payload.session_token) is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired session.")
+    return edge_detector.public_dict()
+
+
 @app.delete("/api/file-transfer/transfers", dependencies=[Depends(verify_token)])
 async def clear_file_transfer_records() -> dict:
     removed = len(transfer_history.list_records())
@@ -494,6 +694,205 @@ async def consume_pairing_code(payload: ConsumePairingCodeRequest) -> dict:
         "session": session_grant.session.public_dict(),
         "session_token": session_grant.session_token,
     }
+
+
+@app.post("/api/discovery/advertise", dependencies=[Depends(verify_token)])
+async def discovery_advertise() -> dict:
+    identity = get_or_create_device_identity()
+    await discovery_service.start(port=8765, device_name=identity.name, device_id=identity.device_id)
+    return discovery_service.public_dict()
+
+
+@app.post("/api/discovery/stop", dependencies=[Depends(verify_token)])
+async def discovery_stop() -> dict:
+    await discovery_service.stop()
+    return discovery_service.public_dict()
+
+
+@app.get("/api/discovery/browse", dependencies=[Depends(verify_token)])
+async def discovery_browse() -> dict:
+    store = TrustedDeviceStore()
+    devices = []
+    for d in discovery_service.get_discovered():
+        entry = d.public_dict()
+        entry["trusted"] = store.get_device(d.device_id) is not None
+        devices.append(entry)
+    return {"advertising": discovery_service.advertising, "devices": devices}
+
+
+@app.post("/api/discovery/request-pair")
+async def discovery_request_pair(payload: RequestPairRequest) -> dict:
+    global _pending_pair_request
+    if lockout_state.is_disabled():
+        raise HTTPException(status_code=503, detail="This device is in emergency lockout.")
+    pending = _pending_pair_request
+    if pending is not None and not pending.is_expired():
+        raise HTTPException(status_code=429, detail="A pairing request is already in progress.")
+    pairing_code = discovery_code_book.create_code(guest=False)
+    _pending_pair_request = PendingPairRequest(
+        requester_id=payload.device_id,
+        requester_name=payload.name,
+        code=pairing_code.code,
+        expires_at=pairing_code.expires_at,
+    )
+    logger.info("Discovery pairing requested by %s (%s).", payload.name, payload.device_id)
+    return {"ok": True, "expires_in": int(pairing_code.expires_at - time.time())}
+
+
+@app.get("/api/discovery/pending-request", dependencies=[Depends(verify_token)])
+async def discovery_pending_request() -> dict:
+    global _pending_pair_request
+    pending = _pending_pair_request
+    if pending is None or pending.is_expired():
+        _pending_pair_request = None
+        return {"pending": False}
+    return {"pending": True, **pending.public_dict()}
+
+
+@app.post("/api/discovery/dismiss-request", dependencies=[Depends(verify_token)])
+async def discovery_dismiss_request() -> dict:
+    global _pending_pair_request
+    _pending_pair_request = None
+    return {"ok": True}
+
+
+@app.post("/api/discovery/pair")
+async def discovery_pair(payload: DiscoveryPairRequest) -> dict:
+    global _pending_pair_request
+    if lockout_state.is_disabled():
+        raise HTTPException(status_code=503, detail="This device is in emergency lockout.")
+    consume_result = discovery_code_book.consume_code_result(payload.code)
+    if consume_result.rate_limited:
+        logger.warning("Discovery pairing: code rate-limited for device %s.", payload.device_id)
+        raise HTTPException(status_code=429, detail="Too many invalid attempts. Request a new pairing code.")
+    if consume_result.pairing_code is None:
+        raise HTTPException(status_code=400, detail="Invalid or expired pairing code.")
+    _pending_pair_request = None
+    idle_timeout = payload.idle_timeout_seconds if payload.idle_timeout_seconds in (60, 180, 300, 600, 1200, 1800) else 600
+    if not payload.remember_device:
+        session_grant = pairing_session_book.create_session(
+            device_id=payload.device_id,
+            guest=True,
+            permissions=payload.permissions,
+            idle_timeout_seconds=idle_timeout,
+        )
+        logger.info("Discovery guest session created for %s.", payload.device_id)
+        return {
+            "ok": True, "trusted": False, "guest": True,
+            "session": session_grant.session.public_dict(),
+            "session_token": session_grant.session_token,
+        }
+    credential = TrustedDeviceStore().trust_device(payload.device_id, payload.name, payload.permissions)
+    session_grant = pairing_session_book.create_session(
+        device_id=credential.device.device_id,
+        guest=False,
+        permissions=credential.device.permissions,
+        idle_timeout_seconds=idle_timeout,
+    )
+    logger.info("Discovery trusted session created for %s.", payload.device_id)
+    return {
+        "ok": True, "trusted": True, "guest": False,
+        "device": credential.device.public_dict(),
+        "shared_secret": credential.shared_secret,
+        "session": session_grant.session.public_dict(),
+        "session_token": session_grant.session_token,
+    }
+
+
+@app.post("/api/pairing/trusted-reconnect")
+async def trusted_reconnect(payload: TrustedReconnectRequest) -> dict:
+    if lockout_state.is_disabled():
+        raise HTTPException(status_code=503, detail="This device is in emergency lockout.")
+    device = TrustedDeviceStore().verify_and_mark_seen(payload.device_id, payload.shared_secret)
+    if device is None:
+        raise HTTPException(status_code=401, detail="Unknown device or invalid credentials.")
+    idle_timeout = payload.idle_timeout_seconds if payload.idle_timeout_seconds in (60, 180, 300, 600, 1200, 1800) else 600
+    session_grant = pairing_session_book.create_session(
+        device_id=device.device_id,
+        guest=False,
+        permissions=device.permissions,
+        idle_timeout_seconds=idle_timeout,
+    )
+    logger.info("Trusted reconnect accepted for device %s.", payload.device_id)
+    return {
+        "ok": True,
+        "device": device.public_dict(),
+        "session": session_grant.session.public_dict(),
+        "session_token": session_grant.session_token,
+    }
+
+
+@app.post("/api/handoff/remote/start-session", dependencies=[Depends(verify_token)])
+async def handoff_remote_start_session(payload: RemoteHandoffSessionStartRequest) -> dict:
+    try:
+        target = RemoteTarget.from_values(payload.host, payload.port, payload.path)
+        status = await remote_handoff_bridge.start_with_session(target, payload.session_id, payload.session_token)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.warning("Session-based remote handoff connection failed: %s", exc)
+        raise HTTPException(status_code=400, detail="Remote handoff connection failed.") from exc
+    if not status.reachable:
+        raise HTTPException(status_code=400, detail="Remote receiver is unreachable.")
+    if status.disabled:
+        raise HTTPException(status_code=409, detail="Remote receiver emergency stop is active.")
+    return {
+        "ok": True,
+        "connected": True,
+        "target": {"host": target.host, "port": target.port, "path": target.path},
+        "remote_status": status.public_dict(),
+    }
+
+
+@app.post("/api/discovery/remote/request-pair", dependencies=[Depends(verify_token)])
+async def discovery_remote_request_pair(payload: RemoteDiscoveryTargetRequest) -> dict:
+    identity = get_or_create_device_identity()
+    try:
+        target = RemoteTarget.from_values(payload.host, payload.port)
+        return await asyncio.to_thread(remote_request_pair, target, identity.device_id, identity.name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/discovery/remote/pair", dependencies=[Depends(verify_token)])
+async def discovery_remote_pair(payload: RemoteDiscoveryPairPayload) -> dict:
+    identity = get_or_create_device_identity()
+    try:
+        target = RemoteTarget.from_values(payload.host, payload.port)
+        return await asyncio.to_thread(
+            remote_pair,
+            target,
+            payload.code,
+            identity.device_id,
+            identity.name,
+            payload.permissions,
+            payload.remember_device,
+            payload.idle_timeout_seconds,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/discovery/remote/reconnect", dependencies=[Depends(verify_token)])
+async def discovery_remote_reconnect(payload: RemoteDiscoveryReconnectPayload) -> dict:
+    identity = get_or_create_device_identity()
+    try:
+        target = RemoteTarget.from_values(payload.host, payload.port)
+        return await asyncio.to_thread(
+            remote_trusted_reconnect,
+            target,
+            identity.device_id,
+            payload.shared_secret,
+            payload.idle_timeout_seconds,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/pairing-sessions", dependencies=[Depends(verify_token)])
