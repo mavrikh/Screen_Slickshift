@@ -141,6 +141,8 @@ def input_control_status(check_backend: bool = False) -> dict:
         "platform": sys.platform,
         "accessibility_required": sys.platform == "darwin",
         "screen_recording_required": False,
+        "pyautogui_failsafe": False,
+        "emergency_stop": "Screen Slickshift emergency lockout",
         "error": "",
     }
     if not check_backend:
@@ -172,7 +174,10 @@ def _pyautogui():
             "with the required OS permissions."
         ) from exc
 
-    pyautogui.FAILSAFE = True
+    # PyAutoGUI's corner fail-safe conflicts with normal KVM use because a
+    # remote cursor can legitimately move into any screen corner. Screen
+    # Slickshift uses its explicit emergency lockout instead.
+    pyautogui.FAILSAFE = False
     pyautogui.PAUSE = 0
     _pyautogui_backend = pyautogui
     return _pyautogui_backend

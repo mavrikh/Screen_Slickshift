@@ -307,6 +307,7 @@ Edge handoff:
 - Devices page includes temporary mouse diagnostics for isolating the current mouse-control failures: move this cursor, move the connected remote cursor, and show pywebview capture status.
 - In pywebview mode, active control starts the Python cursor capture loop directly at a screen-center anchor. The capture loop exposes diagnostic stats including move event count, warp count, pending events, anchor, and last error.
 - Logs tab now polls `/api/activity/mouse` every second and shows safe in-memory sent/received counters plus recent connection/control events for this server run. It does not record tokens, shared secrets, clipboard contents, file contents, or keystroke text.
+- Receiver input disables PyAutoGUI's corner fail-safe so remote mouse movement into screen corners does not tear down the WebSocket. Emergency stop behavior is handled by Screen Slickshift's lockout state instead.
 - No global input capture code exists (cursor position reading does not require Accessibility permission on macOS).
 - Multi-monitor edge detection uses the primary screen only; multi-monitor support is deferred.
 - Keyboard forwarding is implemented on both control surfaces: the `/handoff` active_remote overlay and the `/` main page touchpad session. Keystrokes are sent as `{type: "keyboard", key, ctrl, alt, shift, meta}` events over the existing WebSocket. Escape and modifier-only keys are not forwarded. Global OS-level keyboard capture remains out of scope.
