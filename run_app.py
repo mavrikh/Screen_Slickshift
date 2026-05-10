@@ -56,6 +56,7 @@ class _AppAPI:
         self._cap_events: list = []
         self._cap_lock = None
         self._cursor_hidden = False
+        self._hotkey_last_fired = 0.0
 
     def warp_to_center(self) -> dict:
         """Warp the OS cursor to the centre of the pywebview window.
@@ -136,20 +137,50 @@ class _AppAPI:
             _t.sleep(0.1)
         return ""
 
+    def _dispatch_main_darwin(self, func) -> None:
+        """Run func() on the macOS main thread via GCD dispatch_sync.
+        AppKit calls must happen on the main thread or the process crashes."""
+        try:
+            from Foundation import NSThread  # type: ignore[import]
+            if NSThread.isMainThread():
+                func()
+                return
+        except Exception:
+            pass
+        try:
+            import ctypes
+            lib = ctypes.CDLL("/usr/lib/system/libdispatch.dylib")
+            lib.dispatch_get_main_queue.restype = ctypes.c_void_p
+            lib.dispatch_sync_f.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+            FUNC_T = ctypes.CFUNCTYPE(None, ctypes.c_void_p)
+            cb = FUNC_T(lambda _: func())
+            lib.dispatch_sync_f(lib.dispatch_get_main_queue(), None, cb)
+        except Exception:
+            try:
+                func()
+            except Exception:
+                pass
+
     def _hide_cursor(self) -> None:
         if self._cursor_hidden:
             return
         import sys
-        try:
-            if sys.platform == "darwin":
-                from AppKit import NSCursor  # type: ignore[import]
-                NSCursor.hide()
-            elif sys.platform == "win32":
+        if sys.platform == "darwin":
+            def _do() -> None:
+                try:
+                    from AppKit import NSCursor  # type: ignore[import]
+                    NSCursor.hide()
+                    self._cursor_hidden = True
+                except Exception:
+                    pass
+            self._dispatch_main_darwin(_do)
+        elif sys.platform == "win32":
+            try:
                 import ctypes
                 ctypes.windll.user32.ShowCursor(False)
-            self._cursor_hidden = True
-        except Exception:
-            pass
+                self._cursor_hidden = True
+            except Exception:
+                pass
 
     def _hotkey_active(self) -> bool:
         """Returns True if Shift + ` is currently held (any focus state)."""
@@ -181,7 +212,11 @@ class _AppAPI:
         while True:
             try:
                 cur = self._hotkey_active()
-                if cur and not prev and not self._cap_running and self._win is not None:
+                now = time.monotonic()
+                if (cur and not prev and not self._cap_running
+                        and self._win is not None
+                        and now - self._hotkey_last_fired > 1.0):
+                    self._hotkey_last_fired = now
                     self._win.evaluate_js("window.slickshiftHotkey && window.slickshiftHotkey()")
                 prev = cur
             except Exception:
@@ -192,16 +227,22 @@ class _AppAPI:
         if not self._cursor_hidden:
             return
         import sys
-        try:
-            if sys.platform == "darwin":
-                from AppKit import NSCursor  # type: ignore[import]
-                NSCursor.unhide()
-            elif sys.platform == "win32":
+        if sys.platform == "darwin":
+            def _do() -> None:
+                try:
+                    from AppKit import NSCursor  # type: ignore[import]
+                    NSCursor.unhide()
+                    self._cursor_hidden = False
+                except Exception:
+                    pass
+            self._dispatch_main_darwin(_do)
+        elif sys.platform == "win32":
+            try:
                 import ctypes
                 ctypes.windll.user32.ShowCursor(True)
-            self._cursor_hidden = False
-        except Exception:
-            pass
+                self._cursor_hidden = False
+            except Exception:
+                pass
 
     def start_cursor_capture(self, center_x: int, center_y: int) -> dict:
         """Start an OS-level cursor capture loop.
@@ -265,6 +306,7 @@ class _AppAPI:
                         prev_r = r_dn
                     if hotkey and not prev_hotkey:
                         evs.append({"type": "hotkey_switch"})
+                        self._hotkey_last_fired = _time.monotonic()
                     prev_hotkey = hotkey
                     if evs:
                         with self._cap_lock:
