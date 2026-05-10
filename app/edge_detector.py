@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -50,6 +52,10 @@ def get_monitors() -> list[dict[str, Any]]:
     """Return list of {index, x, y, width, height, primary, name} for all displays."""
     try:
         if sys.platform == "darwin":
+            if "PYTEST_CURRENT_TEST" in os.environ:
+                raise RuntimeError("Skipping AppKit monitor enumeration under pytest.")
+            if threading.current_thread() is not threading.main_thread():
+                raise RuntimeError("macOS monitor enumeration requires the main thread.")
             return _get_monitors_macos()
         if sys.platform == "win32":
             return _get_monitors_windows()
@@ -116,7 +122,7 @@ def make_detector_config(
     clean_edge = normalize_edge(edge)
     if clean_edge is None:
         return None
-    clean_dwell = dwell_ms if isinstance(dwell_ms, int) and 0 <= dwell_ms <= 5000 else 400
+    clean_dwell = dwell_ms if isinstance(dwell_ms, int) and 100 <= dwell_ms <= 5000 else 400
     clean_zone = zone_px if isinstance(zone_px, int) and 1 <= zone_px <= 50 else 5
     clean_index = screen_index if isinstance(screen_index, int) and screen_index >= 0 else 0
 

@@ -304,6 +304,8 @@ Edge handoff:
 - Active layer auto-stops if the remote connection is lost.
 - Return edge: when going active, the sender arms the receiver's edge detector for the return edge (opposite of exit edge). The sender polls the receiver's detector state every 200 ms; when the receiver's cursor dwells at its return edge, the sender returns to local control automatically.
 - Mac-to-Windows, Windows-to-Mac, and Mac-to-Mac remote mouse have all been physically verified.
+- Devices page includes temporary mouse diagnostics for isolating the current mouse-control failures: move this cursor, move the connected remote cursor, and show pywebview capture status.
+- In pywebview mode, active control starts the Python cursor capture loop directly at a screen-center anchor. The capture loop exposes diagnostic stats including move event count, warp count, pending events, anchor, and last error.
 - No global input capture code exists (cursor position reading does not require Accessibility permission on macOS).
 - Multi-monitor edge detection uses the primary screen only; multi-monitor support is deferred.
 - Keyboard forwarding is implemented on both control surfaces: the `/handoff` active_remote overlay and the `/` main page touchpad session. Keystrokes are sent as `{type: "keyboard", key, ctrl, alt, shift, meta}` events over the existing WebSocket. Escape and modifier-only keys are not forwarded. Global OS-level keyboard capture remains out of scope.

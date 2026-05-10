@@ -33,7 +33,7 @@ from app.handoff_remote import (
     warp_remote_cursor,
     warp_remote_cursor_session,
 )
-from app.input_control import input_control_status, send_text_to_pc, warp_cursor_to_center
+from app.input_control import diagnostic_mouse_nudge, input_control_status, send_text_to_pc, warp_cursor_to_center
 from app.llm import generate_text
 from app.pairing import PairingCodeBook, PairingSessionBook, TrustedDeviceStore
 from app.protocol import parse_message, protocol_capabilities
@@ -163,6 +163,11 @@ class RemoteHandoffEventRequest(BaseModel):
     alt: bool = False
     shift: bool = False
     meta: bool = False
+
+
+class MouseDiagnosticRequest(BaseModel):
+    dx: float = 80
+    dy: float = 0
 
 
 class HandoffArmRequest(BaseModel):
@@ -588,6 +593,14 @@ async def handoff_warp_cursor() -> dict:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
+@app.post("/api/input/diagnostics/mouse-nudge", dependencies=[Depends(verify_token)])
+async def input_diagnostic_mouse_nudge(payload: MouseDiagnosticRequest) -> dict:
+    try:
+        return await asyncio.to_thread(diagnostic_mouse_nudge, payload.dx, payload.dy)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
 @app.post("/api/handoff/remote/warp-cursor", dependencies=[Depends(verify_token)])
 async def handoff_remote_warp_cursor() -> dict:
     try:
@@ -864,7 +877,11 @@ async def discovery_browse_stop() -> dict:
 @app.post("/api/discovery/advertise", dependencies=[Depends(verify_token)])
 async def discovery_advertise() -> dict:
     identity = get_or_create_device_identity()
-    await discovery_service.start_advertise(port=8765, device_name=identity.name, device_id=identity.device_id)
+    start_advertise = getattr(discovery_service, "start_advertise", None)
+    if start_advertise is not None:
+        await start_advertise(port=8765, device_name=identity.name, device_id=identity.device_id)
+    else:
+        await discovery_service.start(port=8765, device_name=identity.name, device_id=identity.device_id)
     return discovery_service.public_dict()
 
 
@@ -890,7 +907,7 @@ async def discovery_browse() -> dict:
         devices.append(entry)
     return {
         "advertising": discovery_service.advertising,
-        "browsing": discovery_service.browsing,
+        "browsing": getattr(discovery_service, "browsing", False),
         "trusted_connections_enabled": trusted_connections_state.is_enabled(),
         "devices": devices,
     }

@@ -108,6 +108,22 @@ def warp_cursor_to_center() -> tuple[int, int]:
     return x, y
 
 
+def diagnostic_mouse_nudge(dx: float = 80, dy: float = 0) -> dict:
+    """Move the local cursor once and report the observed before/after position."""
+    _ensure_enabled()
+    pyautogui = _pyautogui()
+    before = pyautogui.position()
+    pyautogui.moveRel(int(dx), int(dy), duration=0)
+    after = pyautogui.position()
+    return {
+        "ok": True,
+        "requested": {"dx": int(dx), "dy": int(dy)},
+        "before": {"x": int(before.x), "y": int(before.y)},
+        "after": {"x": int(after.x), "y": int(after.y)},
+        "observed": {"dx": int(after.x - before.x), "dy": int(after.y - before.y)},
+    }
+
+
 def send_text_to_pc(text: str) -> None:
     _ensure_enabled()
     if not text:

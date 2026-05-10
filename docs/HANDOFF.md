@@ -54,6 +54,8 @@ Current working shape:
 - Layout tiles auto-update with real screen dimensions on connect; tile sizes normalized to ≤20% size difference.
 - Drag-through behavior: tiles move freely during drag; on release, cursor position over blocker determines snap side.
 - Mac-to-Mac remote mouse physically verified (in addition to Mac-Windows and Windows-Mac).
+- v0.0004 adds temporary mouse diagnostics on the Devices page: local nudge, connected-remote nudge, and pywebview capture status.
+- pywebview cursor capture now starts directly from a screen-center anchor and reports capture stats (`move_events`, `warp_count`, pending events) instead of first warping to the pywebview window center.
 - Keyboard forwarding is active on both the `/handoff` active_remote overlay and the `/` main page touchpad session. Global OS-level keyboard capture does not exist.
 - No global input capture, native packaging, or TLS exists yet.
 - Native desktop app UI is designed but not yet built. The spec lives in `docs/UI_HANDOFFNEW.md`. Reference prototype files (React/JSX + CSS) are in `docs/UIFILES/`. The browser MVP in `static/` remains the working product.

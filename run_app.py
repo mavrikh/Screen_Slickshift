@@ -57,6 +57,17 @@ class _AppAPI:
         self._cap_lock = None
         self._cursor_hidden = False
         self._hotkey_last_fired = 0.0
+        self._cap_stats = {
+            "running": False,
+            "anchor": None,
+            "events_queued": 0,
+            "move_events": 0,
+            "button_events": 0,
+            "hotkey_events": 0,
+            "warp_count": 0,
+            "last_move": None,
+            "last_error": "",
+        }
 
     def warp_to_center(self) -> dict:
         """Warp the OS cursor to the centre of the pywebview window.
@@ -246,18 +257,28 @@ class _AppAPI:
 
     def start_cursor_capture(self, center_x: int, center_y: int) -> dict:
         """Start an OS-level cursor capture loop.
-        Polls cursor position at ~120 Hz, warps back to (center_x, center_y),
+        Polls cursor position at ~120 Hz, warps back to the screen center,
         and queues mouse_move / mouse_button events for get_cursor_events()."""
         import threading
         import sys
         import time as _time
 
         self._stop_capture()
-        cx, cy = int(center_x), int(center_y)
         self._cap_events = []
         self._cap_running = True
         import threading as _t
         self._cap_lock = _t.Lock()
+        self._cap_stats = {
+            "running": True,
+            "anchor": None,
+            "events_queued": 0,
+            "move_events": 0,
+            "button_events": 0,
+            "hotkey_events": 0,
+            "warp_count": 0,
+            "last_move": None,
+            "last_error": "",
+        }
 
         def _buttons():
             try:
@@ -287,6 +308,9 @@ class _AppAPI:
             sw, sh = pyautogui.size()
             acx, acy = sw // 2, sh // 2
             pyautogui.moveTo(acx, acy, duration=0)
+            with self._cap_lock:
+                self._cap_stats["anchor"] = {"x": int(acx), "y": int(acy)}
+                self._cap_stats["warp_count"] += 1
             prev_l = prev_r = prev_hotkey = False
             while self._cap_running:
                 try:
@@ -298,21 +322,29 @@ class _AppAPI:
                     if dx or dy:
                         evs.append({"type": "mouse_move", "dx": int(dx), "dy": int(dy)})
                         pyautogui.moveTo(acx, acy, duration=0)
+                        self._cap_stats["warp_count"] += 1
+                        self._cap_stats["move_events"] += 1
+                        self._cap_stats["last_move"] = {"dx": int(dx), "dy": int(dy)}
                     if l_dn != prev_l:
                         evs.append({"type": "mouse_button", "button": "left", "down": l_dn})
+                        self._cap_stats["button_events"] += 1
                         prev_l = l_dn
                     if r_dn != prev_r:
                         evs.append({"type": "mouse_button", "button": "right", "down": r_dn})
+                        self._cap_stats["button_events"] += 1
                         prev_r = r_dn
                     if hotkey and not prev_hotkey:
                         evs.append({"type": "hotkey_switch"})
+                        self._cap_stats["hotkey_events"] += 1
                         self._hotkey_last_fired = _time.monotonic()
                     prev_hotkey = hotkey
                     if evs:
                         with self._cap_lock:
                             self._cap_events.extend(evs)
-                except Exception:
-                    pass
+                            self._cap_stats["events_queued"] += len(evs)
+                except Exception as exc:
+                    with self._cap_lock:
+                        self._cap_stats["last_error"] = str(exc)
                 _time.sleep(0.008)
 
         self._hide_cursor()
@@ -329,6 +361,11 @@ class _AppAPI:
         self._cap_thread = None
         if t is not None and t.is_alive():
             t.join(timeout=0.15)
+        try:
+            with self._cap_lock:
+                self._cap_stats["running"] = False
+        except Exception:
+            self._cap_stats["running"] = False
         self._show_cursor()
 
     def get_cursor_events(self) -> list:
@@ -340,6 +377,17 @@ class _AppAPI:
                 return evs
         except Exception:
             return []
+
+    def get_cursor_capture_status(self) -> dict:
+        try:
+            with self._cap_lock:
+                stats = dict(self._cap_stats)
+                stats["pending_events"] = len(self._cap_events)
+                return stats
+        except Exception:
+            stats = dict(self._cap_stats)
+            stats["pending_events"] = len(self._cap_events) if self._cap_events else 0
+            return stats
 
     def minimize(self) -> None:
         try:

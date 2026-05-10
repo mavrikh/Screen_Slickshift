@@ -788,6 +788,7 @@ function ActiveControlOverlay({ deviceName, onStop }) {
   const [pointerLocked, setPointerLocked] = useState(false);
   const [softCapture, setSoftCapture] = useState(false);
   const [usePythonCapture, setUsePythonCapture] = useState(false);
+  const [captureStats, setCaptureStats] = useState(null);
   const lastMoveRef = useRef(0);
   const lastPosRef = useRef({ x: 0, y: 0 });
   const physCenterRef = useRef({ x: 0, y: 0 });
@@ -839,6 +840,8 @@ function ActiveControlOverlay({ deviceName, onStop }) {
           if (ev.type === "hotkey_switch") { onStop(); return; }
           sendEvent(ev);
         }
+        const stats = await window.pywebview.api.get_cursor_capture_status?.();
+        if (stats) setCaptureStats(stats);
       } catch {}
       if (alive) setTimeout(poll, 16);
     }
@@ -871,12 +874,13 @@ function ActiveControlOverlay({ deviceName, onStop }) {
       // Minimize so the app window doesn't sit over the controlled screen
       window.pywebview.api.minimize?.()?.catch?.(() => {});
       try {
-        const r = await window.pywebview.api.warp_to_center();
+        const r = await window.pywebview.api.start_cursor_capture(0, 0);
         if (r?.ok) {
-          physCenterRef.current = { x: r.phys_x, y: r.phys_y };
-          lastPosRef.current = { x: r.css_ref_x, y: r.css_ref_y };
-          // Hand off to Python: poll OS cursor at 120 Hz and queue deltas
-          await window.pywebview.api.start_cursor_capture(r.phys_x, r.phys_y);
+          const stats = await window.pywebview.api.get_cursor_capture_status?.();
+          if (stats) {
+            setCaptureStats(stats);
+            if (stats.anchor) physCenterRef.current = stats.anchor;
+          }
           setUsePythonCapture(true);
         } else {
           lastPosRef.current = { x: window.innerWidth / 2, y: window.innerHeight / 2 };
@@ -901,6 +905,7 @@ function ActiveControlOverlay({ deviceName, onStop }) {
     if (usePythonCapture) {
       window.pywebview?.api?.stop_cursor_capture?.()?.catch?.(() => {});
       setUsePythonCapture(false);
+      setCaptureStats(null);
     }
     if (softCapture) { setSoftCapture(false); return; }
     if (document.pointerLockElement) document.exitPointerLock();
@@ -986,7 +991,11 @@ function ActiveControlOverlay({ deviceName, onStop }) {
         <div style={{ flex: 1 }}>
           <span style={{ fontWeight: 600, fontSize: 14 }}>Controlling {deviceName}</span>
           <span style={{ marginLeft: 12, fontSize: 12, color: "var(--text-dim)" }}>
-            {captured ? "Sharing active · Esc to release" : "Click anywhere to start sharing"}
+            {captured ? (
+              usePythonCapture && captureStats
+                ? `Sharing active · moves ${captureStats.move_events || 0} · warps ${captureStats.warp_count || 0}`
+                : "Sharing active · Esc to release"
+            ) : "Click anywhere to start sharing"}
           </span>
         </div>
         <button type="button" className="btn-ghost" style={{ fontSize: 12 }} onClick={captured ? releaseCapture : requestLock}>
@@ -1033,6 +1042,7 @@ function DevicesSection() {
   const [pairOpen, setPairOpen] = useState(false);
   const [pairTarget, setPairTarget] = useState(null);
   const [reconnectMsg, setReconnectMsg] = useState("");
+  const [diagnosticMsg, setDiagnosticMsg] = useState("");
   const [toast, setToast] = useState("");
   const [activeControl, setActiveControl] = useState(null); // {deviceName}
   const toastTimer = useRef(null);
@@ -1127,6 +1137,49 @@ function DevicesSection() {
     showToast("Disconnected.");
   }
 
+  async function runLocalMouseDiagnostic() {
+    setDiagnosticMsg("Moving this cursor 80 px right…");
+    try {
+      const result = await SS.api("/api/input/diagnostics/mouse-nudge", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ dx: 80, dy: 0 }),
+      });
+      const obs = result?.observed || {};
+      setDiagnosticMsg(`Local mouse nudge observed dx=${obs.dx ?? "?"}, dy=${obs.dy ?? "?"}.`);
+    } catch (e) {
+      setDiagnosticMsg(`Local mouse diagnostic failed: ${e.message}`);
+    }
+  }
+
+  async function runRemoteMouseDiagnostic() {
+    setDiagnosticMsg("Sending one remote mouse nudge…");
+    try {
+      await SS.api("/api/handoff/remote/event", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "mouse_move", dx: 80, dy: 0 }),
+      });
+      setDiagnosticMsg("Remote mouse nudge sent. Watch the connected machine for a small move right.");
+    } catch (e) {
+      setDiagnosticMsg(`Remote mouse diagnostic failed: ${e.message}`);
+    }
+  }
+
+  async function showCaptureDiagnostic() {
+    if (!window.pywebview?.api?.get_cursor_capture_status) {
+      setDiagnosticMsg("Capture diagnostics are only available in the desktop app.");
+      return;
+    }
+    try {
+      const stats = await window.pywebview.api.get_cursor_capture_status();
+      const anchor = stats?.anchor ? `${stats.anchor.x},${stats.anchor.y}` : "none";
+      setDiagnosticMsg(`Capture running=${!!stats?.running}, anchor=${anchor}, moves=${stats?.move_events || 0}, warps=${stats?.warp_count || 0}, pending=${stats?.pending_events || 0}.`);
+    } catch (e) {
+      setDiagnosticMsg(`Capture diagnostic failed: ${e.message}`);
+    }
+  }
+
   return (
     <>
       <div className="main-head">
@@ -1141,6 +1194,19 @@ function DevicesSection() {
 
       {error && <div style={{ color: "var(--danger)", fontSize: 13, marginBottom: 12 }}>{error}</div>}
       {reconnectMsg && <div style={{ color: reconnectMsg.startsWith("Reconnected") ? "var(--ok)" : "var(--warn)", fontSize: 13, marginBottom: 12 }}>{reconnectMsg}</div>}
+      {diagnosticMsg && <div style={{ color: "var(--text-dim)", fontSize: 13, marginBottom: 12 }}>{diagnosticMsg}</div>}
+
+      <div className="panel">
+        <div className="panel-h">
+          <h2>Mouse diagnostics</h2>
+          <span className="h-sub">temporary debug tools</span>
+        </div>
+        <div className="panel-body" style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button type="button" className="btn-ghost" onClick={runLocalMouseDiagnostic}>Move this cursor</button>
+          <button type="button" className="btn-ghost" onClick={runRemoteMouseDiagnostic}>Move connected remote</button>
+          <button type="button" className="btn-ghost" onClick={showCaptureDiagnostic}>Show capture status</button>
+        </div>
+      </div>
 
       {/* Trusted devices — This Device excluded, lives at bottom */}
       <div className="panel">
