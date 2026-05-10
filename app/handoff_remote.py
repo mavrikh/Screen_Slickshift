@@ -24,6 +24,7 @@ class RemoteStatus:
     protocol_version: Optional[int] = None
     input_events: tuple[str, ...] = ()
     error: str = ""
+    version: str = ""
 
     def public_dict(self) -> dict[str, Any]:
         return {
@@ -306,6 +307,7 @@ def get_remote_status(target: RemoteTarget, timeout: float = 2.0) -> RemoteStatu
         disabled=bool(payload.get("disabled")) if isinstance(payload, dict) else False,
         protocol_version=protocol.get("version") if isinstance(protocol.get("version"), int) else None,
         input_events=tuple(str(event) for event in input_events),
+        version=str(payload.get("version", "")) if isinstance(payload, dict) else "",
     )
 
 

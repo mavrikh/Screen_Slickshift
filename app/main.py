@@ -23,6 +23,7 @@ from app.handoff import make_handoff_layout, make_layout_screen, normalize_edge
 from app.handoff_remote import (
     RemoteHandoffBridge,
     RemoteTarget,
+    get_remote_status,
     remote_pair,
     remote_request_pair,
     remote_trusted_reconnect,
@@ -38,6 +39,7 @@ from app.pairing import PairingCodeBook, PairingSessionBook, TrustedDeviceStore
 from app.protocol import parse_message, protocol_capabilities
 from app.security import token_is_valid, verify_token, verify_websocket_token
 from app.state import lockout_state, trusted_connections_state
+from app.version import APP_VERSION
 from app.transfer_history import TransferHistory
 from app.websocket import handle_touchpad_socket
 
@@ -354,6 +356,7 @@ async def new_app_page() -> FileResponse:
 async def status() -> dict:
     return {
         "app": settings.app_name,
+        "version": APP_VERSION,
         "disabled": lockout_state.is_disabled(),
         "auth": "token-required",
         "max_upload_bytes": settings.max_upload_bytes,
@@ -1065,6 +1068,12 @@ async def discovery_remote_pair(payload: RemoteDiscoveryPairPayload) -> dict:
     identity = get_or_create_device_identity()
     try:
         target = RemoteTarget.from_values(payload.host, payload.port)
+        remote_s = await asyncio.to_thread(get_remote_status, target)
+        if remote_s.version and remote_s.version != APP_VERSION:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Version mismatch — this device is v{APP_VERSION}, remote is v{remote_s.version}. Update both devices to the same version.",
+            )
         return await asyncio.to_thread(
             remote_pair,
             target,
@@ -1075,6 +1084,8 @@ async def discovery_remote_pair(payload: RemoteDiscoveryPairPayload) -> dict:
             payload.remember_device,
             payload.idle_timeout_seconds,
         )
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
@@ -1086,6 +1097,12 @@ async def discovery_remote_reconnect(payload: RemoteDiscoveryReconnectPayload) -
     identity = get_or_create_device_identity()
     try:
         target = RemoteTarget.from_values(payload.host, payload.port)
+        remote_s = await asyncio.to_thread(get_remote_status, target)
+        if remote_s.version and remote_s.version != APP_VERSION:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Version mismatch — this device is v{APP_VERSION}, remote is v{remote_s.version}. Update both devices to the same version.",
+            )
         return await asyncio.to_thread(
             remote_trusted_reconnect,
             target,
@@ -1093,6 +1110,8 @@ async def discovery_remote_reconnect(payload: RemoteDiscoveryReconnectPayload) -
             payload.shared_secret,
             payload.idle_timeout_seconds,
         )
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:

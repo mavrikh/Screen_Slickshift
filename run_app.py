@@ -55,6 +55,7 @@ class _AppAPI:
         self._cap_thread = None
         self._cap_events: list = []
         self._cap_lock = None
+        self._cursor_hidden = False
 
     def warp_to_center(self) -> dict:
         """Warp the OS cursor to the centre of the pywebview window.
@@ -121,13 +122,49 @@ class _AppAPI:
             pass
 
     def get_owner_token(self) -> str:
-        """Return the local owner token so the webview can authenticate without
-        the user having to read the terminal."""
+        """Return the local owner token. Retries for up to 2 s in case the
+        server hasn't written the token file yet on first start."""
+        import time as _t
+        for _ in range(20):
+            try:
+                from app.config import TOKEN_FILE
+                tok = TOKEN_FILE.read_text(encoding="utf-8").strip()
+                if tok:
+                    return tok
+            except Exception:
+                pass
+            _t.sleep(0.1)
+        return ""
+
+    def _hide_cursor(self) -> None:
+        if self._cursor_hidden:
+            return
+        import sys
         try:
-            from app.config import TOKEN_FILE
-            return TOKEN_FILE.read_text(encoding="utf-8").strip()
+            if sys.platform == "darwin":
+                from AppKit import NSCursor  # type: ignore[import]
+                NSCursor.hide()
+            elif sys.platform == "win32":
+                import ctypes
+                ctypes.windll.user32.ShowCursor(False)
+            self._cursor_hidden = True
         except Exception:
-            return ""
+            pass
+
+    def _show_cursor(self) -> None:
+        if not self._cursor_hidden:
+            return
+        import sys
+        try:
+            if sys.platform == "darwin":
+                from AppKit import NSCursor  # type: ignore[import]
+                NSCursor.unhide()
+            elif sys.platform == "win32":
+                import ctypes
+                ctypes.windll.user32.ShowCursor(True)
+            self._cursor_hidden = False
+        except Exception:
+            pass
 
     def start_cursor_capture(self, center_x: int, center_y: int) -> dict:
         """Start an OS-level cursor capture loop.
@@ -195,6 +232,7 @@ class _AppAPI:
                     pass
                 _time.sleep(0.008)
 
+        self._hide_cursor()
         self._cap_thread = threading.Thread(target=_run, daemon=True)
         self._cap_thread.start()
         return {"ok": True}
@@ -208,6 +246,7 @@ class _AppAPI:
         self._cap_thread = None
         if t is not None and t.is_alive():
             t.join(timeout=0.15)
+        self._show_cursor()
 
     def get_cursor_events(self) -> list:
         """Return and clear all queued cursor/button events since the last call."""

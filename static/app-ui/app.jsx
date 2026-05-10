@@ -2,6 +2,8 @@
 
 const { useState, useEffect } = React;
 
+const APP_VERSION = "0.0001";
+
 const SECTIONS = [
   { id: "overview",  label: "Overview",  Icon: Icons.Devices },
   { id: "devices",   label: "Devices",   Icon: Icons.Devices },
@@ -181,6 +183,9 @@ function App() {
               <Icons.Stop size={14} />
               {lockout ? "Lockout active — release" : "Emergency Stop"}
             </button>
+            <div style={{ fontSize: 10, color: "var(--muted)", textAlign: "center", paddingTop: 6, letterSpacing: "0.04em" }}>
+              v{APP_VERSION}
+            </div>
           </div>
         </aside>
 
