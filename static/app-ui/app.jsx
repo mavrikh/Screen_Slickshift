@@ -2,7 +2,7 @@
 
 const { useState, useEffect } = React;
 
-const APP_VERSION = "0.0001";
+const APP_VERSION = "0.0002";
 
 const SECTIONS = [
   { id: "overview",  label: "Overview",  Icon: Icons.Devices },

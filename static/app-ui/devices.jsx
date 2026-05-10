@@ -835,7 +835,10 @@ function ActiveControlOverlay({ deviceName, onStop }) {
       if (!alive) return;
       try {
         const evs = await window.pywebview.api.get_cursor_events();
-        for (const ev of (evs || [])) sendEvent(ev);
+        for (const ev of (evs || [])) {
+          if (ev.type === "hotkey_switch") { onStop(); return; }
+          sendEvent(ev);
+        }
       } catch {}
       if (alive) setTimeout(poll, 16);
     }
@@ -930,6 +933,7 @@ function ActiveControlOverlay({ deviceName, onStop }) {
   // Keyboard forwarding
   useEffect(() => {
     function onKeyDown(e) {
+      if (e.shiftKey && e.key === "`") { onStop(); return; }
       if (e.key === "Escape") {
         if (softCapture || document.pointerLockElement) { releaseCapture(); return; }
         onStop(); return;
@@ -1347,6 +1351,27 @@ function OverviewSection() {
       connectingRef.current = false;
     }
   }
+
+  // Register Shift+` hotkey — connect when idle, fired by OS-level listener or browser
+  useEffect(() => {
+    window.slickshiftHotkey = () => {
+      if (paired.length > 0 && !activeControl && !connectingRef.current) {
+        handleConnect(paired[0].id);
+      }
+    };
+    return () => { delete window.slickshiftHotkey; };
+  }, [paired, activeControl]);
+
+  useEffect(() => {
+    function onKey(e) {
+      if (e.shiftKey && e.key === "`" && paired.length > 0 && !activeControl && !connectingRef.current) {
+        e.preventDefault();
+        handleConnect(paired[0].id);
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [paired, activeControl]);
 
   // Arm local edge detector when handoff is on and not currently controlling
   useEffect(() => {

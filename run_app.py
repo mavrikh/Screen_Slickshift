@@ -151,6 +151,43 @@ class _AppAPI:
         except Exception:
             pass
 
+    def _hotkey_active(self) -> bool:
+        """Returns True if Shift + ` is currently held (any focus state)."""
+        import sys
+        try:
+            if sys.platform == "win32":
+                import ctypes
+                shift = bool(ctypes.windll.user32.GetAsyncKeyState(0x10) & 0x8000)
+                backtick = bool(ctypes.windll.user32.GetAsyncKeyState(0xC0) & 0x8000)
+                return shift and backtick
+            if sys.platform == "darwin":
+                from Quartz import CGEventSourceFlagsState, CGEventSourceKeyState, kCGEventSourceStateCombinedSessionState  # type: ignore[import]
+                shift = bool(CGEventSourceFlagsState(kCGEventSourceStateCombinedSessionState) & 0x20000)
+                backtick = bool(CGEventSourceKeyState(kCGEventSourceStateCombinedSessionState, 50))
+                return shift and backtick
+        except Exception:
+            pass
+        return False
+
+    def start_hotkey_listener(self) -> None:
+        """Start a background thread that fires window.slickshiftHotkey() in the
+        webview whenever Shift+` is pressed while the capture loop is NOT active."""
+        import threading
+        threading.Thread(target=self._hotkey_poll_thread, daemon=True).start()
+
+    def _hotkey_poll_thread(self) -> None:
+        import time
+        prev = False
+        while True:
+            try:
+                cur = self._hotkey_active()
+                if cur and not prev and not self._cap_running and self._win is not None:
+                    self._win.evaluate_js("window.slickshiftHotkey && window.slickshiftHotkey()")
+                prev = cur
+            except Exception:
+                pass
+            time.sleep(0.05)
+
     def _show_cursor(self) -> None:
         if not self._cursor_hidden:
             return
@@ -209,12 +246,13 @@ class _AppAPI:
             sw, sh = pyautogui.size()
             acx, acy = sw // 2, sh // 2
             pyautogui.moveTo(acx, acy, duration=0)
-            prev_l = prev_r = False
+            prev_l = prev_r = prev_hotkey = False
             while self._cap_running:
                 try:
                     pos = pyautogui.position()
                     dx, dy = pos.x - acx, pos.y - acy
                     l_dn, r_dn = _buttons()
+                    hotkey = self._hotkey_active()
                     evs = []
                     if dx or dy:
                         evs.append({"type": "mouse_move", "dx": int(dx), "dy": int(dy)})
@@ -225,6 +263,9 @@ class _AppAPI:
                     if r_dn != prev_r:
                         evs.append({"type": "mouse_button", "button": "right", "down": r_dn})
                         prev_r = r_dn
+                    if hotkey and not prev_hotkey:
+                        evs.append({"type": "hotkey_switch"})
+                    prev_hotkey = hotkey
                     if evs:
                         with self._cap_lock:
                             self._cap_events.extend(evs)
@@ -306,6 +347,7 @@ def main() -> None:
         resizable=True,
         js_api=api,
     )
+    api.start_hotkey_listener()
     webview.start()
 
 
