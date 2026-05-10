@@ -310,28 +310,111 @@ function SecuritySection({ lockout, onToggleLockout }) {
 }
 
 // ── Logs section ─────────────────────────────────────────────────────────────
-// Live log streaming is not yet implemented; the activity log from the
-// existing browser UI (/) provides the current working equivalent.
 
 function LogsSection() {
+  const [activity, setActivity] = useOS(null);
+  const [error, setError] = useOS("");
+
+  useOSEffect(() => {
+    let alive = true;
+    async function load() {
+      try {
+        const data = await SS.api("/api/activity/mouse");
+        if (!alive) return;
+        setActivity(data);
+        setError("");
+      } catch (e) {
+        if (!alive) return;
+        setError(e.message || "Could not load activity.");
+      }
+    }
+    load();
+    const timer = setInterval(load, 1000);
+    return () => { alive = false; clearInterval(timer); };
+  }, []);
+
+  const counters = activity?.counters || {};
+  const sent = counters.sent || {};
+  const received = counters.received || {};
+  const connections = counters.connections || {};
+  const events = activity?.events || [];
+
+  function fmtTime(ts) {
+    if (!ts) return "never";
+    try { return new Date(ts * 1000).toLocaleTimeString(); } catch { return "unknown"; }
+  }
+
+  function describeEvent(ev) {
+    const d = ev.detail || {};
+    if (ev.direction === "connection") return `connection ${ev.type}`;
+    if (ev.type === "mouse_move") return `${ev.direction} mouse move dx=${d.dx || 0}, dy=${d.dy || 0}`;
+    if (ev.type === "mouse_button") return `${ev.direction} ${d.button || "mouse"} ${d.down ? "down" : "up"}`;
+    if (ev.type === "scroll") return `${ev.direction} scroll amount=${d.amount || 0}`;
+    if (ev.type === "keyboard") return `${ev.direction} keyboard event`;
+    return `${ev.direction} ${ev.type}`;
+  }
+
+  function CounterCard({ title, data }) {
+    return (
+      <div className="activity-card">
+        <div className="activity-title">{title}</div>
+        <div className="activity-grid">
+          <span>Moves</span><strong>{data.mouse_move || 0}</strong>
+          <span>Buttons</span><strong>{data.mouse_button || 0}</strong>
+          <span>Scroll</span><strong>{data.scroll || 0}</strong>
+          <span>Ping</span><strong>{data.ping || 0}</strong>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <>
       <div className="main-head">
         <div>
           <h1>Logs</h1>
-          <div className="sub">Connection and control events from this server run. Sensitive content is never recorded.</div>
+          <div className="sub">Live connection and mouse activity from this machine. Sensitive content is never recorded.</div>
         </div>
       </div>
       <div className="panel">
-        <div className="panel-h"><h2>Activity log</h2></div>
+        <div className="panel-h">
+          <h2>Mouse activity</h2>
+          <span className="h-sub">refreshes every second</span>
+        </div>
         <div className="panel-body">
-          <div style={{ color: "var(--text-dim)", fontSize: 13, lineHeight: 1.7, padding: "4px 0" }}>
-            Live log streaming is not yet available in this UI. The activity log is shown on the{" "}
-            <a href="/" target="_blank" rel="noopener"
-               style={{ color: "var(--accent)", textDecoration: "none" }}>
-              main browser page
-            </a>.
+          {error && <div style={{ color: "var(--danger)", fontSize: 13, padding: "8px 0" }}>{error}</div>}
+          <div className="activity-cards">
+            <CounterCard title="Sent from this machine" data={sent} />
+            <CounterCard title="Received by this machine" data={received} />
+            <div className="activity-card">
+              <div className="activity-title">Connections</div>
+              <div className="activity-grid">
+                <span>Opened</span><strong>{connections.opened || 0}</strong>
+                <span>Closed</span><strong>{connections.closed || 0}</strong>
+                <span>Errors</span><strong>{connections.errors || 0}</strong>
+                <span>Updated</span><strong>{fmtTime(activity?.now)}</strong>
+              </div>
+            </div>
           </div>
+          <div className="activity-last">
+            <div>Last sent: <strong>{activity?.last_sent ? describeEvent(activity.last_sent) : "none"}</strong></div>
+            <div>Last received: <strong>{activity?.last_received ? describeEvent(activity.last_received) : "none"}</strong></div>
+          </div>
+        </div>
+      </div>
+
+      <div className="panel">
+        <div className="panel-h"><h2>Recent events</h2></div>
+        <div className="panel-body">
+          {events.length === 0 && <div style={{ color: "var(--muted)", fontSize: 13, padding: "8px 0" }}>No activity yet.</div>}
+          {events.slice().reverse().map((ev, idx) => (
+            <div className="log-row" key={`${ev.time}-${idx}`}>
+              <span className="log-time">{fmtTime(ev.time)}</span>
+              <span className={"log-dot " + (ev.direction === "connection" ? "info" : ev.direction === "received" ? "ok" : "warn")} />
+              <span className="log-msg">{describeEvent(ev)}</span>
+              <span className="log-tag">{ev.direction}</span>
+            </div>
+          ))}
         </div>
       </div>
     </>

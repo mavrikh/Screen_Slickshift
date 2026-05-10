@@ -6,6 +6,7 @@ from typing import Optional
 
 from fastapi import WebSocket, WebSocketDisconnect
 
+from app.activity import record_connection, record_received
 from app.input_control import click_mouse, mousedown_mouse, mouseup_mouse, move_mouse, press_key, scroll_mouse
 from app.protocol import parse_event
 
@@ -27,6 +28,7 @@ async def handle_touchpad_socket(
     if not accepted:
         await websocket.accept()
     logger.info("Touchpad WebSocket connected.")
+    record_connection("opened")
 
     try:
         while True:
@@ -37,6 +39,7 @@ async def handle_touchpad_socket(
                 if not await _ensure_mouse_allowed(websocket, authorize_mouse):
                     return
                 move_mouse(event.dx, event.dy)
+                record_received("mouse_move", {"dx": event.dx, "dy": event.dy})
                 _mark_session_active(mark_session_active)
             elif event.type == "mouse_button":
                 if not await _ensure_mouse_allowed(websocket, authorize_mouse):
@@ -45,26 +48,32 @@ async def handle_touchpad_socket(
                     mousedown_mouse(event.button)
                 else:
                     mouseup_mouse(event.button)
+                record_received("mouse_button", {"button": event.button, "down": event.down})
                 _mark_session_active(mark_session_active)
             elif event.type == "scroll":
                 if not await _ensure_mouse_allowed(websocket, authorize_mouse):
                     return
                 scroll_mouse(event.amount)
+                record_received("scroll", {"amount": event.amount})
                 _mark_session_active(mark_session_active)
             elif event.type == "keyboard":
                 if authorize_keyboard is not None and not authorize_keyboard():
                     continue
                 if event.key:
                     press_key(event.key, ctrl=event.ctrl, alt=event.alt, shift=event.shift, meta=event.meta)
+                    record_received("keyboard", {"forwarded": True})
                     _mark_session_active(mark_session_active)
             elif event.type == "ping":
+                record_received("ping")
                 continue
             else:
                 logger.warning("Ignoring unknown WebSocket event type: %s", event.raw_type)
     except WebSocketDisconnect as exc:
         logger.info("Touchpad WebSocket disconnected: %s", exc)
+        record_connection("closed")
     except Exception as exc:
         logger.exception("Touchpad WebSocket handler failed: %s", exc)
+        record_connection("errors")
 
 
 async def _ensure_mouse_allowed(

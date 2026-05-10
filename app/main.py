@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from app import clipboard as clipboard_service
+from app.activity import snapshot as activity_snapshot
 from app.commands import public_macro_list, run_macro
 from app.config import LOG_DIR, STATIC_DIR, ensure_directories, get_or_create_pairing_token, get_receive_dir, set_receive_dir, settings
 from app.device_identity import get_or_create_device_identity
@@ -377,6 +378,11 @@ async def auth_check() -> dict:
 @app.get("/api/input/status", dependencies=[Depends(verify_token)])
 async def input_status(check_backend: bool = Query(default=False)) -> dict:
     return input_control_status(check_backend=check_backend)
+
+
+@app.get("/api/activity/mouse", dependencies=[Depends(verify_token)])
+async def mouse_activity() -> dict:
+    return activity_snapshot()
 
 
 @app.get("/api/file-transfer/settings", dependencies=[Depends(verify_token)])

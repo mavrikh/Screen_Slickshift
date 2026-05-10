@@ -10,6 +10,7 @@ from urllib.request import Request, urlopen
 
 import websockets
 
+from app.activity import record_connection, record_sent
 from app.protocol import SUPPORTED_INPUT_EVENTS, parse_event
 
 
@@ -96,6 +97,7 @@ class RemoteHandoffBridge:
             self._websocket = websocket
             self._target = target
             self._token = token
+            record_connection("opened", {"target": f"{target.host}:{target.port}"})
         return status
 
     async def start_with_session(
@@ -120,6 +122,7 @@ class RemoteHandoffBridge:
             self._target = target
             self._session_id = session_id
             self._session_token = session_token
+            record_connection("opened", {"target": f"{target.host}:{target.port}"})
         return status
 
     async def send_event(self, message: dict[str, Any]) -> dict[str, Any]:
@@ -150,8 +153,10 @@ class RemoteHandoffBridge:
                 raise RuntimeError("Remote handoff is not connected.")
             try:
                 await self._websocket.send(json.dumps(outbound))
+                record_sent(outbound["type"], outbound)
             except Exception as exc:
                 self._websocket = None  # mark as disconnected so next status() is accurate
+                record_connection("errors", {"event": outbound["type"]})
                 raise RuntimeError("Remote connection lost.") from exc
         return {"ok": True, "event": outbound["type"]}
 
@@ -253,6 +258,7 @@ class RemoteHandoffBridge:
         if websocket is not None:
             try:
                 await websocket.close()
+                record_connection("closed")
             except Exception:
                 pass
 
