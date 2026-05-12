@@ -8,7 +8,7 @@ from typing import Optional
 
 from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Query, UploadFile, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -373,6 +373,22 @@ async def status() -> dict:
 @app.get("/api/auth/check", dependencies=[Depends(verify_token)])
 async def auth_check() -> dict:
     return {"ok": True}
+
+
+@app.get("/api/logs", dependencies=[Depends(verify_token)])
+async def read_logs(lines: int = Query(default=200, ge=1, le=5000)) -> PlainTextResponse:
+    """Return the last N lines of logs/server.log as plain text."""
+    log_file = LOG_DIR / "server.log"
+    if not log_file.exists():
+        return PlainTextResponse("")
+    try:
+        text = await asyncio.to_thread(log_file.read_text, encoding="utf-8", errors="replace")
+        all_lines = text.splitlines()
+        tail = "\n".join(all_lines[-lines:])
+        return PlainTextResponse(tail)
+    except Exception as exc:
+        logger.exception("Failed to read log file.")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.get("/api/input/status", dependencies=[Depends(verify_token)])

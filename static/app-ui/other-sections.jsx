@@ -309,6 +309,117 @@ function SecuritySection({ lockout, onToggleLockout }) {
   );
 }
 
+// ── Server log viewer ─────────────────────────────────────────────────────────
+
+function ServerLogViewer() {
+  const [lines, setLines] = useOS(200);
+  const [text, setText] = useOS(null);   // null = not yet fetched
+  const [fetchedAt, setFetchedAt] = useOS(null);
+  const [loading, setLoading] = useOS(false);
+  const [error, setError] = useOS("");
+  const scrollRef = React.useRef(null);
+
+  async function fetchLogs(n) {
+    setLoading(true);
+    setError("");
+    try {
+      const res = await fetch(`/api/logs?lines=${n}`, {
+        headers: { "X-Pairing-Token": SS.token() },
+      });
+      if (!res.ok) {
+        let detail = res.statusText;
+        try { detail = (await res.json()).detail || detail; } catch {}
+        throw new Error(detail);
+      }
+      const raw = await res.text();
+      setText(raw);
+      setFetchedAt(new Date());
+    } catch (e) {
+      setError(e.message || "Could not fetch logs.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // Auto-scroll to bottom whenever text changes.
+  useOSEffect(() => {
+    if (scrollRef.current && text !== null) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [text]);
+
+  function levelClass(line) {
+    const upper = line.toUpperCase();
+    if (upper.includes(" ERROR ") || upper.includes(" CRITICAL ")) return "lv-error";
+    if (upper.includes(" WARNING ") || upper.includes(" WARN "))    return "lv-warn";
+    if (upper.includes(" DEBUG "))                                   return "lv-debug";
+    if (upper.includes(" INFO "))                                    return "lv-info";
+    return "";
+  }
+
+  function renderLines() {
+    if (text === null) {
+      return (
+        <div className="log-viewer-empty">
+          Press Fetch to load log entries.
+        </div>
+      );
+    }
+    if (text.trim() === "") {
+      return <div className="log-viewer-empty">Log file is empty.</div>;
+    }
+    return (
+      <div ref={scrollRef} className="log-viewer-scroll">
+        {text.split("\n").map((line, i) => (
+          <span key={i} className={levelClass(line)}>
+            {line}{"\n"}
+          </span>
+        ))}
+      </div>
+    );
+  }
+
+  return (
+    <div className="log-viewer-panel">
+      <div className="log-viewer-head">
+        <Icons.Logs size={14} />
+        <h2>Server log</h2>
+        <div className="log-viewer-meta">
+          {fetchedAt && (
+            <span>Fetched {fetchedAt.toLocaleTimeString()}</span>
+          )}
+          <div className="seg" style={{ marginLeft: 4 }}>
+            {[50, 200, 500].map(n => (
+              <button
+                key={n}
+                type="button"
+                className={lines === n ? "on" : ""}
+                onClick={() => setLines(n)}
+              >
+                {n}
+              </button>
+            ))}
+          </div>
+          <button
+            type="button"
+            className="btn-secondary"
+            style={{ height: 28, padding: "0 12px", fontSize: 12 }}
+            onClick={() => fetchLogs(lines)}
+            disabled={loading}
+          >
+            <Icons.Refresh size={12} />
+            {loading ? "Loading…" : "Fetch"}
+          </button>
+        </div>
+      </div>
+      {error && (
+        <div style={{ color: "var(--danger)", fontSize: 12, padding: "8px 18px" }}>{error}</div>
+      )}
+      {renderLines()}
+    </div>
+  );
+}
+
 // ── Logs section ─────────────────────────────────────────────────────────────
 
 function LogsSection() {
@@ -417,6 +528,8 @@ function LogsSection() {
           ))}
         </div>
       </div>
+
+      <ServerLogViewer />
     </>
   );
 }
