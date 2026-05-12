@@ -177,14 +177,12 @@ class _AppAPI:
             return
         import sys
         if sys.platform == "darwin":
-            def _do() -> None:
-                try:
-                    from AppKit import NSCursor  # type: ignore[import]
-                    NSCursor.hide()
-                    self._cursor_hidden = True
-                except Exception:
-                    pass
-            self._dispatch_main_darwin(_do)
+            try:
+                from Quartz import CGDisplayHideCursor, kCGDirectMainDisplay  # type: ignore[import]
+                CGDisplayHideCursor(kCGDirectMainDisplay)
+                self._cursor_hidden = True
+            except Exception:
+                pass
         elif sys.platform == "win32":
             try:
                 import ctypes
@@ -239,14 +237,12 @@ class _AppAPI:
             return
         import sys
         if sys.platform == "darwin":
-            def _do() -> None:
-                try:
-                    from AppKit import NSCursor  # type: ignore[import]
-                    NSCursor.unhide()
-                    self._cursor_hidden = False
-                except Exception:
-                    pass
-            self._dispatch_main_darwin(_do)
+            try:
+                from Quartz import CGDisplayShowCursor, kCGDirectMainDisplay  # type: ignore[import]
+                CGDisplayShowCursor(kCGDirectMainDisplay)
+                self._cursor_hidden = False
+            except Exception:
+                pass
         elif sys.platform == "win32":
             try:
                 import ctypes

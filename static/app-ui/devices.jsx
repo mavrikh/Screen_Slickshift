@@ -871,8 +871,10 @@ function ActiveControlOverlay({ deviceName, onStop }) {
 
   async function requestLock() {
     if (window.pywebview) {
-      // Minimize so the app window doesn't sit over the controlled screen
-      window.pywebview.api.minimize?.()?.catch?.(() => {});
+      // Minimize so the app window doesn't sit over the controlled screen,
+      // then wait briefly for the animation to complete before hiding cursor.
+      try { await window.pywebview.api.minimize?.(); } catch {}
+      await new Promise(r => setTimeout(r, 120));
       try {
         const r = await window.pywebview.api.start_cursor_capture(0, 0);
         if (r?.ok) {
