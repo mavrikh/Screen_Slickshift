@@ -438,7 +438,9 @@ def main() -> None:
         js_api=api,
     )
     api.start_hotkey_listener()
-    webview.start()
+    import os, pathlib
+    _data_dir = pathlib.Path(os.environ.get("APPDATA") or os.path.expanduser("~")) / "ScreenSlickshift" / "webview"
+    webview.start(storage_path=str(_data_dir))
 
 
 if __name__ == "__main__":

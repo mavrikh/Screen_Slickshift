@@ -1317,7 +1317,7 @@ function OverviewSection() {
   const { devices: discovered, refresh: discoveryRefresh } = useDiscovery(true);
   const [pairOpen, setPairOpen] = useState(false);
   const [activeControl, setActiveControl] = useState(null);
-  const [edgeHandoff, setEdgeHandoff] = useState(true);
+  const [edgeHandoff, setEdgeHandoff] = useState(false);
   const [edgeRel, setEdgeRel] = useState(null);
   const [detectorState, setDetectorState] = useState("idle");
   const [dwellProgress, setDwellProgress] = useState(0);
@@ -1458,7 +1458,7 @@ function OverviewSection() {
     SS.api("/api/handoff/arm", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ edge: effectiveEdgeRel.localEdge, dwell_ms: 0 }),
+      body: JSON.stringify({ edge: effectiveEdgeRel.localEdge, dwell_ms: 400 }),
     }).catch(() => {});
   }, [edgeHandoff, effectiveEdgeRel?.localEdge, !!activeControl]);
 

@@ -92,7 +92,7 @@ class RemoteHandoffBridge:
 
         async with self._lock:
             await self._close_locked()
-            websocket = await websockets.connect(target.websocket_url)
+            websocket = await websockets.connect(target.websocket_url, ping_interval=None)
             await websocket.send(json.dumps({"type": "auth", "token": token}))
             self._websocket = websocket
             self._target = target
@@ -112,7 +112,7 @@ class RemoteHandoffBridge:
 
         async with self._lock:
             await self._close_locked()
-            websocket = await websockets.connect(target.websocket_url)
+            websocket = await websockets.connect(target.websocket_url, ping_interval=None)
             await websocket.send(json.dumps({
                 "type": "session_auth",
                 "session_id": session_id,
