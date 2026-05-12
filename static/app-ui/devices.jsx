@@ -792,6 +792,7 @@ function ActiveControlOverlay({ deviceName, onStop }) {
   const lastMoveRef = useRef(0);
   const lastPosRef = useRef({ x: 0, y: 0 });
   const physCenterRef = useRef({ x: 0, y: 0 });
+  const sendBusyRef = useRef(false);
 
   // Restore app window and stop Python capture when overlay closes
   useEffect(() => {
@@ -836,9 +837,18 @@ function ActiveControlOverlay({ deviceName, onStop }) {
       if (!alive) return;
       try {
         const evs = await window.pywebview.api.get_cursor_events();
-        for (const ev of (evs || [])) {
-          if (ev.type === "hotkey_switch") { onStop(); return; }
-          sendEvent(ev);
+        if (evs?.length) {
+          // Coalesce all mouse_move deltas into one event so we send a
+          // single POST per poll cycle instead of one per captured frame.
+          let dx = 0, dy = 0;
+          const others = [];
+          for (const ev of evs) {
+            if (ev.type === "hotkey_switch") { onStop(); return; }
+            if (ev.type === "mouse_move") { dx += ev.dx; dy += ev.dy; }
+            else others.push(ev);
+          }
+          if (dx || dy) sendEvent({ type: "mouse_move", dx, dy });
+          for (const ev of others) sendEvent(ev);
         }
         const stats = await window.pywebview.api.get_cursor_capture_status?.();
         if (stats) setCaptureStats(stats);
@@ -846,10 +856,15 @@ function ActiveControlOverlay({ deviceName, onStop }) {
       if (alive) setTimeout(poll, 16);
     }
     poll();
-    return () => { alive = false; };
+    return () => {
+      alive = false;
+      window.pywebview?.api?.stop_cursor_capture?.()?.catch?.(() => {});
+    };
   }, [usePythonCapture]);
 
   async function sendEvent(msg) {
+    if (sendBusyRef.current) return;
+    sendBusyRef.current = true;
     try {
       await SS.api("/api/handoff/remote/event", {
         method: "POST",
@@ -857,6 +872,7 @@ function ActiveControlOverlay({ deviceName, onStop }) {
         body: JSON.stringify(msg),
       });
     } catch { onStop(); }
+    finally { sendBusyRef.current = false; }
   }
 
   function _warpToWindowCenter() {
