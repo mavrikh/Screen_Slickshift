@@ -446,7 +446,9 @@ def main() -> None:
     api.start_hotkey_listener()
     import os, pathlib
     _data_dir = pathlib.Path(os.environ.get("APPDATA") or os.path.expanduser("~")) / "ScreenSlickshift" / "webview"
-    webview.start(storage_path=str(_data_dir))
+    # debug=True enables F12 / right-click Inspect in the WebView2 window.
+    # Remove before shipping.
+    webview.start(storage_path=str(_data_dir), debug=True)
 
 
 if __name__ == "__main__":
