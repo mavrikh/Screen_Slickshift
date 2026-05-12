@@ -353,9 +353,23 @@ class _AppAPI:
                 try:
                     import json as _json
                     import urllib.request as _ur
+                    # Normalize local dimensions to logical. On Windows with
+                    # DPI awareness pyautogui.size() returns physical pixels;
+                    # divide by the DPI scale to get logical. On Mac pyautogui
+                    # already returns logical, so no adjustment is needed.
                     local_size = pyautogui.size()
-                    local_w = local_size.width or 1
-                    local_h = local_size.height or 1
+                    local_w_raw = local_size.width or 1
+                    local_h_raw = local_size.height or 1
+                    if sys.platform == "win32" and CURSOR_FIX_FLAGS.get("fix_windows_dpi"):
+                        try:
+                            import ctypes as _ct2
+                            _dpi = _ct2.windll.shcore.GetScaleFactorForDevice(0) / 100.0
+                            local_w = int(local_w_raw / _dpi) or 1
+                            local_h = int(local_h_raw / _dpi) or 1
+                        except Exception:
+                            local_w, local_h = local_w_raw, local_h_raw
+                    else:
+                        local_w, local_h = local_w_raw, local_h_raw
                     url = f"http://{remote_host}:{remote_port}/api/screen-info"
                     with _ur.urlopen(url, timeout=3) as _resp:
                         remote_info = _json.loads(_resp.read().decode("utf-8"))
@@ -367,20 +381,15 @@ class _AppAPI:
                     scale_x = 1.0
                     scale_y = 1.0
 
-            # Compute local DPI so physical pyautogui.position() deltas on Windows
-            # (fix_windows_dpi returns physical coords) can be normalized to logical
-            # before the remote scale is applied.
+            # Normalize captured deltas to logical pixels before applying scale.
+            # On Windows with DPI awareness pyautogui.position() returns physical
+            # pixels — divide by the DPI scale. On Mac pyautogui already returns
+            # logical pixels, so local_dpi stays 1.0.
             local_dpi = 1.0
-            if sys.platform == "win32":
+            if sys.platform == "win32" and CURSOR_FIX_FLAGS.get("fix_windows_dpi"):
                 try:
                     import ctypes as _ct
                     local_dpi = _ct.windll.shcore.GetScaleFactorForDevice(0) / 100.0
-                except Exception:
-                    pass
-            elif sys.platform == "darwin":
-                try:
-                    from AppKit import NSScreen as _NS  # type: ignore[import]
-                    local_dpi = float(_NS.mainScreen().backingScaleFactor())
                 except Exception:
                     pass
 
