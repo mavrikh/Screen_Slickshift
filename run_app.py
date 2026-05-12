@@ -360,7 +360,7 @@ class _AppAPI:
         t = self._cap_thread
         self._cap_thread = None
         if t is not None and t.is_alive():
-            t.join(timeout=0.15)
+            t.join(timeout=0.25)
         try:
             with self._cap_lock:
                 self._cap_stats["running"] = False

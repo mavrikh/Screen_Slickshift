@@ -1355,6 +1355,7 @@ function OverviewSection() {
   async function handleConnect(device_id, returnEdge = null) {
     if (connectingRef.current) return;
     connectingRef.current = true;
+    try { await window.pywebview?.api?.stop_cursor_capture?.(); } catch {}
     const name = paired.find(d => d.id === device_id)?.name || device_id;
     let cred = null;
     try { const raw = localStorage.getItem(`slickshiftTrusted_${device_id}`); if (raw) cred = JSON.parse(raw); } catch {}
@@ -1420,8 +1421,9 @@ function OverviewSection() {
 
   // Register Shift+` hotkey — connect when idle, fired by OS-level listener or browser
   useEffect(() => {
-    window.slickshiftHotkey = () => {
+    window.slickshiftHotkey = async () => {
       if (paired.length > 0 && !activeControl && !connectingRef.current) {
+        try { await window.pywebview?.api?.stop_cursor_capture?.(); } catch {}
         handleConnect(paired[0].id);
       }
     };
@@ -1432,7 +1434,9 @@ function OverviewSection() {
     function onKey(e) {
       if (e.shiftKey && e.key === "`" && paired.length > 0 && !activeControl && !connectingRef.current) {
         e.preventDefault();
-        handleConnect(paired[0].id);
+        Promise.resolve(window.pywebview?.api?.stop_cursor_capture?.()).catch(() => {}).then(() => {
+          handleConnect(paired[0].id);
+        });
       }
     }
     window.addEventListener("keydown", onKey);
