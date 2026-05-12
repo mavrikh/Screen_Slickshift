@@ -29,7 +29,10 @@ def move_mouse(dx: float, dy: float) -> None:
         return
     _last_move_at = now
 
-    pyautogui.moveRel(int(dx), int(dy), duration=0)
+    try:
+        pyautogui.moveRel(int(dx), int(dy), duration=0)
+    except pyautogui.FailSafeException:
+        logger.warning("pyautogui FailSafeException suppressed in move_mouse (corner trigger).")
 
 
 def click_mouse(button: str = "left") -> None:

@@ -213,7 +213,114 @@ function PermPill({ label, on, onChange }) {
   );
 }
 
-function DeviceRow({ d, onUnpair, onPerm, onConnect, compact }) {
+// ── Remote logs modal (DEBUG) ─────────────────────────────────────────────────
+// <!-- DEBUG: temporary feature for development use -->
+
+function LogsModal({ device, onClose }) {
+  const [logs, setLogs] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState("");
+  const scrollRef = useRef(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function fetchLogs() {
+      setLoading(true);
+      setErr("");
+      try {
+        let cred = null;
+        try {
+          const raw = localStorage.getItem(`slickshiftTrusted_${device.device_id}`);
+          if (raw) cred = JSON.parse(raw);
+        } catch {}
+
+        if (!cred?.shared_secret || !cred?.host) {
+          setErr("No saved credential for this device. Connect to it at least once to enable log fetching.");
+          setLoading(false);
+          return;
+        }
+
+        const params = new URLSearchParams({
+          device_id: device.device_id,
+          host: cred.host,
+          port: String(cred.port || 8765),
+          shared_secret: cred.shared_secret,
+          lines: "300",
+        });
+
+        const res = await fetch(`/api/remote-logs?${params}`, {
+          headers: { "X-Pairing-Token": SS.token() },
+        });
+        if (!res.ok) {
+          let detail = res.statusText;
+          try { detail = (await res.json()).detail || detail; } catch {}
+          throw new Error(detail);
+        }
+        const text = await res.text();
+        if (!cancelled) setLogs(text || "(log file is empty)");
+      } catch (e) {
+        if (!cancelled) setErr(e.message || "Failed to fetch logs.");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    fetchLogs();
+    return () => { cancelled = true; };
+  }, [device.device_id]);
+
+  // Scroll to bottom when logs load
+  useEffect(() => {
+    if (logs && scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [logs]);
+
+  function colorize(line) {
+    if (/ ERROR | CRITICAL /.test(line)) return "lv-error";
+    if (/ WARNING /.test(line)) return "lv-warn";
+    if (/ INFO /.test(line)) return "lv-info";
+    if (/ DEBUG /.test(line)) return "lv-debug";
+    return "";
+  }
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" style={{ width: 680 }} onClick={e => e.stopPropagation()}>
+        <div className="modal-h">
+          <h2>Remote logs — {device.name}</h2>
+          <p style={{ fontSize: 12, color: "var(--muted)", marginTop: 4 }}>
+            Last 300 lines from the remote server.log
+            <span style={{ marginLeft: 10, color: "var(--warn)", fontStyle: "italic" }}>debug feature</span>
+          </p>
+        </div>
+        <div style={{ padding: "0 0 0 0" }}>
+          {loading && (
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, padding: "28px 22px", color: "var(--text-dim)", fontSize: 13 }}>
+              <div className="spinner" style={{ width: 28, height: 28, borderWidth: 2, marginBottom: 0 }} />
+              Connecting to remote…
+            </div>
+          )}
+          {err && (
+            <div style={{ color: "var(--danger)", fontSize: 13, padding: "18px 22px" }}>{err}</div>
+          )}
+          {logs && !loading && (
+            <div className="log-viewer-scroll" ref={scrollRef}
+              style={{ height: 380, margin: 0, borderRadius: 0, borderTop: "1px solid var(--border)" }}>
+              {logs.split("\n").map((line, i) => (
+                <div key={i} className={colorize(line) || undefined}>{line || " "}</div>
+              ))}
+            </div>
+          )}
+        </div>
+        <div className="modal-foot">
+          <button type="button" className="btn-ghost" onClick={onClose}>Close</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DeviceRow({ d, onUnpair, onPerm, onConnect, onFetchLogs, compact }) {
   return (
     <div className={"dev-row" + (compact ? " compact" : "")}>
       <div className={"dev-icon " + (d.self ? "self" : "")}>
@@ -239,6 +346,13 @@ function DeviceRow({ d, onUnpair, onPerm, onConnect, compact }) {
                 <PermPill label="Macros"    on={d.perms.macros}    onChange={v => onPerm && onPerm(d.id, "macros", v)} />
               </div>
             )}
+            {/* DEBUG: fetch logs button */}
+            <button type="button" className="btn-ghost"
+              style={{ fontSize: 11, color: "var(--muted)", borderColor: "var(--border)", height: 28, padding: "0 10px" }}
+              onClick={() => onFetchLogs && onFetchLogs(d)}
+              title="Fetch remote logs (debug)">
+              Fetch logs
+            </button>
             <button type="button" className="btn-secondary" onClick={() => onConnect && onConnect(d.id)}>Connect</button>
             <button type="button" className="btn-ghost" onClick={() => onUnpair && onUnpair(d.id)}>Remove</button>
           </>
@@ -1066,6 +1180,7 @@ function DevicesSection() {
   const [diagnosticMsg, setDiagnosticMsg] = useState("");
   const [toast, setToast] = useState("");
   const [activeControl, setActiveControl] = useState(null); // {deviceName}
+  const [logsDevice, setLogsDevice] = useState(null); // device object for LogsModal
   const toastTimer = useRef(null);
 
   function showToast(msg) {
@@ -1244,7 +1359,7 @@ function DevicesSection() {
             </div>
           ) : (
             paired.map(d => (
-              <DeviceRow key={d.id} d={d} onUnpair={unpair} onPerm={setPerm} onConnect={handleConnect} />
+              <DeviceRow key={d.id} d={d} onUnpair={unpair} onPerm={setPerm} onConnect={handleConnect} onFetchLogs={setLogsDevice} />
             ))
           )}
         </div>
@@ -1315,6 +1430,8 @@ function DevicesSection() {
         onClose={() => setPairOpen(false)} onComplete={completePair} />
       <PendingPairDisplay onTrustSaved={load} />
       {activeControl && <ActiveControlOverlay deviceName={activeControl.deviceName} onStop={stopControl} />}
+      {/* DEBUG: remote logs modal */}
+      {logsDevice && <LogsModal device={logsDevice} onClose={() => setLogsDevice(null)} />}
 
       {toast && (
         <div style={{
@@ -1342,6 +1459,7 @@ function OverviewSection() {
   const [edgeRel, setEdgeRel] = useState(null);
   const [detectorState, setDetectorState] = useState("idle");
   const [dwellProgress, setDwellProgress] = useState(0);
+  const [logsDevice, setLogsDevice] = useState(null); // device object for LogsModal
   const connectingRef = useRef(false);
   const bridgeWarmRef = useRef(false);
 
@@ -1587,7 +1705,7 @@ function OverviewSection() {
             ) : paired.length === 0 ? (
               <div style={{ color: "var(--muted)", fontSize: 13, padding: "8px 0" }}>No paired devices yet.</div>
             ) : (
-              paired.map(d => <DeviceRow key={d.id} d={d} onUnpair={unpair} onConnect={handleConnect} compact />)
+              paired.map(d => <DeviceRow key={d.id} d={d} onUnpair={unpair} onConnect={handleConnect} onFetchLogs={setLogsDevice} compact />)
             )}
           </div>
           {discovered.length > 0 && (
@@ -1639,6 +1757,8 @@ function OverviewSection() {
         }} />
       <PendingPairDisplay onTrustSaved={load} />
       {activeControl && <ActiveControlOverlay deviceName={activeControl.deviceName} onStop={stopControl} />}
+      {/* DEBUG: remote logs modal */}
+      {logsDevice && <LogsModal device={logsDevice} onClose={() => setLogsDevice(null)} />}
     </>
   );
 }

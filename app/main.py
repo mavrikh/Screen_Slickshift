@@ -391,6 +391,128 @@ async def read_logs(lines: int = Query(default=200, ge=1, le=5000)) -> PlainText
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@app.post("/api/session/logs")
+async def session_read_logs(
+    session_id: str = Body(...),
+    session_token: str = Body(...),
+    lines: int = Body(default=200),
+) -> PlainTextResponse:
+    """Return the last N lines of logs/server.log authenticated by session token."""
+    if pairing_session_book.verify_session(session_id, session_token) is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired session.")
+    log_file = LOG_DIR / "server.log"
+    if not log_file.exists():
+        return PlainTextResponse("")
+    try:
+        lines = max(1, min(lines, 5000))
+        text = await asyncio.to_thread(log_file.read_text, encoding="utf-8", errors="replace")
+        all_lines = text.splitlines()
+        tail = "\n".join(all_lines[-lines:])
+        return PlainTextResponse(tail)
+    except Exception as exc:
+        logger.exception("Failed to read log file for session.")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/api/remote-logs", dependencies=[Depends(verify_token)])
+async def remote_logs_proxy(
+    device_id: str = Query(...),
+    host: str = Query(...),
+    port: int = Query(default=8765),
+    shared_secret: str = Query(...),
+    lines: int = Query(default=200, ge=1, le=5000),
+) -> PlainTextResponse:
+    """Proxy: reconnect to a trusted device using shared_secret, fetch its log tail.
+
+    The frontend supplies host, port, and shared_secret from localStorage where they
+    were saved at pair time. The server uses these to do a trusted reconnect, obtain
+    a short-lived session token, call /api/session/logs on the remote, then end the
+    ephemeral session.
+    """
+    import json as _json
+    import urllib.request as _urllib_request
+    from urllib.error import HTTPError, URLError
+
+    store = TrustedDeviceStore()
+    if store.get_device(device_id) is None:
+        raise HTTPException(status_code=404, detail="Device not found in trusted store.")
+
+    identity = get_or_create_device_identity()
+    base_url = f"http://{host}:{port}"
+
+    # Step 1: trusted reconnect to get a short-lived session on the remote.
+    reconnect_body = _json.dumps({
+        "device_id": identity.device_id,
+        "shared_secret": shared_secret,
+        "idle_timeout_seconds": 60,
+    }).encode("utf-8")
+    reconnect_req = _urllib_request.Request(
+        f"{base_url}/api/pairing/trusted-reconnect",
+        data=reconnect_body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with _urllib_request.urlopen(reconnect_req, timeout=6) as resp:
+            reconnect_data = _json.loads(resp.read().decode("utf-8"))
+    except HTTPError as exc:
+        body = ""
+        try:
+            body = exc.read().decode("utf-8", errors="replace")
+            detail = _json.loads(body).get("detail", exc.reason)
+        except Exception:
+            detail = exc.reason or body or str(exc)
+        raise HTTPException(status_code=502, detail=f"Remote reconnect failed: {detail}") from exc
+    except (OSError, URLError) as exc:
+        raise HTTPException(status_code=502, detail=f"Cannot reach remote device: {exc}") from exc
+
+    session_id = reconnect_data.get("session", {}).get("session_id")
+    session_token = reconnect_data.get("session_token")
+    if not session_id or not session_token:
+        raise HTTPException(status_code=502, detail="Remote reconnect did not return a valid session.")
+
+    # Step 2: fetch logs from the remote using the ephemeral session.
+    logs_body = _json.dumps({
+        "session_id": session_id,
+        "session_token": session_token,
+        "lines": lines,
+    }).encode("utf-8")
+    logs_req = _urllib_request.Request(
+        f"{base_url}/api/session/logs",
+        data=logs_body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with _urllib_request.urlopen(logs_req, timeout=8) as resp:
+            log_text = resp.read().decode("utf-8", errors="replace")
+    except HTTPError as exc:
+        body = ""
+        try:
+            body = exc.read().decode("utf-8", errors="replace")
+            detail = _json.loads(body).get("detail", exc.reason)
+        except Exception:
+            detail = exc.reason or body or str(exc)
+        log_text = f"[fetch error {exc.code}] {detail}"
+    except (OSError, URLError) as exc:
+        log_text = f"[network error] {exc}"
+
+    # Step 3: end the ephemeral session on the remote (best-effort).
+    try:
+        end_body = _json.dumps({"session_id": session_id, "session_token": session_token}).encode("utf-8")
+        end_req = _urllib_request.Request(
+            f"{base_url}/api/session/end",
+            data=end_body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        _urllib_request.urlopen(end_req, timeout=3)
+    except Exception:
+        pass
+
+    return PlainTextResponse(log_text)
+
+
 @app.get("/api/input/status", dependencies=[Depends(verify_token)])
 async def input_status(check_backend: bool = Query(default=False)) -> dict:
     return input_control_status(check_backend=check_backend)
