@@ -2,7 +2,7 @@
 
 const { useState, useEffect } = React;
 
-const APP_VERSION = "0.0006";
+const APP_VERSION = "0.0009"; // keep in sync with app/version.py
 
 const SECTIONS = [
   { id: "overview",  label: "Overview",  Icon: Icons.Devices },
