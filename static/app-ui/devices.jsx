@@ -2,6 +2,23 @@
 
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
+// ── Cursor fix flags ──────────────────────────────────────────────────────────
+// Fetched once from the server on first use. Controls which cursor bug fixes
+// are active without requiring a code change (set flags in app/cursor_fixes.py).
+
+let _cursorFixFlagsCache = null;
+async function getCursorFixFlags() {
+  if (_cursorFixFlagsCache !== null) return _cursorFixFlagsCache;
+  try {
+    const res = await fetch("/api/cursor-fix-flags");
+    if (res.ok) _cursorFixFlagsCache = await res.json();
+    else _cursorFixFlagsCache = {};
+  } catch {
+    _cursorFixFlagsCache = {};
+  }
+  return _cursorFixFlagsCache;
+}
+
 // ── Data helpers ─────────────────────────────────────────────────────────────
 
 function osToPlatform(os) {
@@ -220,6 +237,7 @@ function LogsModal({ device, onClose }) {
   const [logs, setLogs] = useState(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
+  const [copied, setCopied] = useState(false);
   const scrollRef = useRef(null);
 
   useEffect(() => {
@@ -313,6 +331,20 @@ function LogsModal({ device, onClose }) {
           )}
         </div>
         <div className="modal-foot">
+          {logs && (
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() => {
+                navigator.clipboard.writeText(logs).then(() => {
+                  setCopied(true);
+                  setTimeout(() => setCopied(false), 2000);
+                });
+              }}
+            >
+              {copied ? "Copied!" : "Copy to clipboard"}
+            </button>
+          )}
           <button type="button" className="btn-ghost" onClick={onClose}>Close</button>
         </div>
       </div>
@@ -897,7 +929,7 @@ const REMOTE_KEY_MAP = {
 // Pointer lock is used for relative mouse movement; without it, clicking the
 // overlay requests lock instead of forwarding.
 
-function ActiveControlOverlay({ deviceName, onStop }) {
+function ActiveControlOverlay({ deviceName, remoteHost, remotePort, onStop }) {
   const overlayRef = useRef(null);
   const [pointerLocked, setPointerLocked] = useState(false);
   const [softCapture, setSoftCapture] = useState(false);
@@ -1009,7 +1041,11 @@ function ActiveControlOverlay({ deviceName, onStop }) {
       try { await window.pywebview.api.minimize?.(); } catch {}
       await new Promise(r => setTimeout(r, 120));
       try {
-        const r = await window.pywebview.api.start_cursor_capture(0, 0);
+        const r = await window.pywebview.api.start_cursor_capture(
+          0, 0,
+          remoteHost || null,
+          remotePort || null,
+        );
         if (r?.ok) {
           const stats = await window.pywebview.api.get_cursor_capture_status?.();
           if (stats) {
@@ -1211,7 +1247,7 @@ function DevicesSection() {
           });
         }
         await SS.api("/api/handoff/remote/warp-cursor", { method: "POST" });
-        setActiveControl({ deviceName: connInfo.name || connInfo.host });
+        setActiveControl({ deviceName: connInfo.name || connInfo.host, remoteHost: connInfo.host, remotePort: connInfo.port || 8765 });
       } catch {}
     }
   }
@@ -1219,6 +1255,8 @@ function DevicesSection() {
   async function handleConnect(device_id) {
     setReconnectMsg("");
     const name = paired.find(d => d.id === device_id)?.name || device_id;
+    let resolvedHost = null;
+    let resolvedPort = 8765;
     try {
       // Ping-verify the bridge before trusting status.connected — the socket
       // can be non-null but already closed if the remote rejected session auth.
@@ -1231,6 +1269,11 @@ function DevicesSection() {
             body: JSON.stringify({ type: "ping" }),
           });
           bridgeReady = true;
+          // Try to recover host from localStorage for scale fix even on warm bridge
+          try {
+            const raw = localStorage.getItem(`slickshiftTrusted_${device_id}`);
+            if (raw) { const c = JSON.parse(raw); resolvedHost = c.host; resolvedPort = c.port || 8765; }
+          } catch {}
         }
       } catch {}
 
@@ -1247,6 +1290,8 @@ function DevicesSection() {
           setReconnectMsg(`${name} not found on the network. Make sure Screen Slickshift is running on it.`);
           return;
         }
+        resolvedHost = found.host;
+        resolvedPort = found.port || 8765;
         const data = await SS.api("/api/discovery/remote/reconnect", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1261,7 +1306,7 @@ function DevicesSection() {
         }
       }
       await SS.api("/api/handoff/remote/warp-cursor", { method: "POST" });
-      setActiveControl({ deviceName: name });
+      setActiveControl({ deviceName: name, remoteHost: resolvedHost, remotePort: resolvedPort });
     } catch (e) {
       setReconnectMsg(`Connect failed: ${e.message}`);
     }
@@ -1429,7 +1474,7 @@ function DevicesSection() {
       <PairModal open={pairOpen} target={pairTarget} discoveredDevices={discovered}
         onClose={() => setPairOpen(false)} onComplete={completePair} />
       <PendingPairDisplay onTrustSaved={load} />
-      {activeControl && <ActiveControlOverlay deviceName={activeControl.deviceName} onStop={stopControl} />}
+      {activeControl && <ActiveControlOverlay deviceName={activeControl.deviceName} remoteHost={activeControl.remoteHost} remotePort={activeControl.remotePort} onStop={stopControl} />}
       {/* DEBUG: remote logs modal */}
       {logsDevice && <LogsModal device={logsDevice} onClose={() => setLogsDevice(null)} />}
 
@@ -1543,14 +1588,18 @@ function OverviewSection() {
       await SS.api("/api/handoff/remote/warp-cursor", { method: "POST" });
       if (returnEdge) {
         try {
+          // Bug 4 fix: use 600 ms dwell when fix_return_dwell is enabled so the
+          // return edge detector isn't triggered the instant the cursor arrives.
+          const flags = await getCursorFixFlags();
+          const returnDwellMs = flags.fix_return_dwell ? 600 : 0;
           await SS.api("/api/handoff/remote/arm-return", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ return_edge: returnEdge, dwell_ms: 0 }),
+            body: JSON.stringify({ return_edge: returnEdge, dwell_ms: returnDwellMs }),
           });
         } catch {}
       }
-      setActiveControl({ deviceName: name });
+      setActiveControl({ deviceName: name, remoteHost: found.host, remotePort: found.port || 8765 });
     } catch (e) {
       if (e?.message) showOverviewMsg(e.message);
     } finally {
@@ -1751,12 +1800,12 @@ function OverviewSection() {
                 });
               }
               await SS.api("/api/handoff/remote/warp-cursor", { method: "POST" });
-              setActiveControl({ deviceName: connInfo.name || connInfo.host });
+              setActiveControl({ deviceName: connInfo.name || connInfo.host, remoteHost: connInfo.host, remotePort: connInfo.port || 8765 });
             } catch {}
           }
         }} />
       <PendingPairDisplay onTrustSaved={load} />
-      {activeControl && <ActiveControlOverlay deviceName={activeControl.deviceName} onStop={stopControl} />}
+      {activeControl && <ActiveControlOverlay deviceName={activeControl.deviceName} remoteHost={activeControl.remoteHost} remotePort={activeControl.remotePort} onStop={stopControl} />}
       {/* DEBUG: remote logs modal */}
       {logsDevice && <LogsModal device={logsDevice} onClose={() => setLogsDevice(null)} />}
     </>

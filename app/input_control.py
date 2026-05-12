@@ -4,6 +4,7 @@ import logging
 import sys
 import time
 
+from app.cursor_fixes import CURSOR_FIX_FLAGS
 from app.state import lockout_state
 
 
@@ -182,5 +183,18 @@ def _pyautogui():
     # Slickshift uses its explicit emergency lockout instead.
     pyautogui.FAILSAFE = False
     pyautogui.PAUSE = 0
+
+    # Bug 2 fix: set per-monitor DPI awareness on Windows so that pyautogui
+    # coord reads and writes operate in the same coordinate space.
+    if sys.platform == "win32" and CURSOR_FIX_FLAGS.get("fix_windows_dpi"):
+        try:
+            import ctypes
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+        except Exception:
+            try:
+                ctypes.windll.user32.SetProcessDPIAware()  # fallback for older Windows
+            except Exception:
+                pass
+
     _pyautogui_backend = pyautogui
     return _pyautogui_backend

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 import time
 from logging.handlers import RotatingFileHandler
 from typing import Optional
@@ -16,6 +17,7 @@ from app import clipboard as clipboard_service
 from app.activity import snapshot as activity_snapshot
 from app.commands import public_macro_list, run_macro
 from app.config import LOG_DIR, STATIC_DIR, ensure_directories, get_or_create_pairing_token, get_receive_dir, set_receive_dir, settings
+from app.cursor_fixes import CURSOR_FIX_FLAGS
 from app.device_identity import get_or_create_device_identity
 from app.files import save_upload
 from app.discovery import DiscoveredDevice, DiscoveryService, PendingPairRequest, get_local_ip
@@ -368,6 +370,41 @@ async def status() -> dict:
         "max_upload_bytes": settings.max_upload_bytes,
         "protocol": protocol_capabilities(),
     }
+
+
+@app.get("/api/cursor-fix-flags")
+async def cursor_fix_flags() -> dict:
+    """Return the current cursor fix feature flags. No auth required — config only."""
+    return dict(CURSOR_FIX_FLAGS)
+
+
+@app.get("/api/screen-info")
+async def screen_info_public() -> dict:
+    """Return local screen dimensions and DPI scale. No auth required.
+    Used by the controlling machine to compute a movement scale factor (Bug 1 fix)."""
+    try:
+        import pyautogui
+        size = await asyncio.to_thread(pyautogui.size)
+        width = size.width
+        height = size.height
+    except Exception as exc:
+        return {"width": None, "height": None, "dpi_scale": 1.0, "error": str(exc)}
+
+    dpi_scale = 1.0
+    if sys.platform == "darwin":
+        try:
+            from AppKit import NSScreen  # type: ignore[import]
+            dpi_scale = float(NSScreen.mainScreen().backingScaleFactor())
+        except Exception:
+            dpi_scale = 1.0
+    elif sys.platform == "win32":
+        try:
+            import ctypes
+            dpi_scale = ctypes.windll.shcore.GetScaleFactorForDevice(0) / 100.0
+        except Exception:
+            dpi_scale = 1.0
+
+    return {"width": width, "height": height, "dpi_scale": dpi_scale, "error": ""}
 
 
 @app.get("/api/auth/check", dependencies=[Depends(verify_token)])

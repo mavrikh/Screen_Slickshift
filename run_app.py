@@ -255,10 +255,20 @@ class _AppAPI:
             except Exception:
                 pass
 
-    def start_cursor_capture(self, center_x: int, center_y: int) -> dict:
+    def start_cursor_capture(
+        self,
+        center_x: int,
+        center_y: int,
+        remote_host: str = None,
+        remote_port: int = None,
+    ) -> dict:
         """Start an OS-level cursor capture loop.
         Polls cursor position at ~120 Hz, warps back to the screen center,
-        and queues mouse_move / mouse_button events for get_cursor_events()."""
+        and queues mouse_move / mouse_button events for get_cursor_events().
+
+        remote_host / remote_port: if provided and fix_movement_scale is enabled,
+        the loop fetches the remote screen dimensions once on startup and scales
+        all dx/dy values by remote/local resolution so movement feels 1:1."""
         import threading
         import sys
         import time as _time
@@ -296,17 +306,30 @@ class _AppAPI:
             return False, False
 
         def _run():
+            from app.cursor_fixes import CURSOR_FIX_FLAGS
+
             try:
                 import pyautogui
             except Exception:
                 return
-            # Use pyautogui's own coordinate space for the anchor point so there
-            # is no DPI / coordinate-system mismatch with pyautogui.position().
             # Disable FAILSAFE so the warp loop doesn't raise when the cursor
             # briefly passes near (0, 0).
             pyautogui.FAILSAFE = False
-            sw, sh = pyautogui.size()
-            pyautogui.moveTo(sw // 2, sh // 2, duration=0)
+
+            # Bug 3 fix: use the DPI-aware warp_cursor_to_center() so the anchor
+            # is established in the same coordinate space that pyautogui.position()
+            # reads from. On Mac Retina, pyautogui.moveTo(sw//2, sh//2) uses
+            # physical pixels while position() returns logical coords, so the
+            # computed anchor lands in the wrong space. warp_cursor_to_center()
+            # already handles this correctly; reading back the actual position
+            # after the warp then gives a self-calibrated anchor with no mismatch.
+            if CURSOR_FIX_FLAGS.get("fix_capture_anchor"):
+                from app.input_control import warp_cursor_to_center
+                warp_cursor_to_center()
+            else:
+                sw, sh = pyautogui.size()
+                pyautogui.moveTo(sw // 2, sh // 2, duration=0)
+
             # Read back the actual post-warp position instead of trusting the
             # computed center. On Windows with DPI scaling, pyautogui.size() and
             # pyautogui.position() can use different coordinate spaces, making a
@@ -317,6 +340,31 @@ class _AppAPI:
             with self._cap_lock:
                 self._cap_stats["anchor"] = {"x": int(acx), "y": int(acy)}
                 self._cap_stats["warp_count"] += 1
+
+            # Bug 1 fix: fetch remote screen info and compute a scale factor so
+            # that dx/dy are normalized to the remote machine's resolution.
+            scale_x = 1.0
+            scale_y = 1.0
+            if (CURSOR_FIX_FLAGS.get("fix_movement_scale")
+                    and remote_host is not None
+                    and remote_port is not None):
+                try:
+                    import json as _json
+                    import urllib.request as _ur
+                    local_size = pyautogui.size()
+                    local_w = local_size.width or 1
+                    local_h = local_size.height or 1
+                    url = f"http://{remote_host}:{remote_port}/api/screen-info"
+                    with _ur.urlopen(url, timeout=3) as _resp:
+                        remote_info = _json.loads(_resp.read().decode("utf-8"))
+                    remote_w = remote_info.get("width") or local_w
+                    remote_h = remote_info.get("height") or local_h
+                    scale_x = remote_w / local_w
+                    scale_y = remote_h / local_h
+                except Exception:
+                    scale_x = 1.0
+                    scale_y = 1.0
+
             prev_l = prev_r = prev_hotkey = False
             while self._cap_running:
                 try:
@@ -326,11 +374,13 @@ class _AppAPI:
                     hotkey = self._hotkey_active()
                     evs = []
                     if dx or dy:
-                        evs.append({"type": "mouse_move", "dx": int(dx), "dy": int(dy)})
+                        sdx = int(dx * scale_x)
+                        sdy = int(dy * scale_y)
+                        evs.append({"type": "mouse_move", "dx": sdx, "dy": sdy})
                         pyautogui.moveTo(acx, acy, duration=0)
                         self._cap_stats["warp_count"] += 1
                         self._cap_stats["move_events"] += 1
-                        self._cap_stats["last_move"] = {"dx": int(dx), "dy": int(dy)}
+                        self._cap_stats["last_move"] = {"dx": sdx, "dy": sdy}
                     if l_dn != prev_l:
                         evs.append({"type": "mouse_button", "button": "left", "down": l_dn})
                         self._cap_stats["button_events"] += 1
