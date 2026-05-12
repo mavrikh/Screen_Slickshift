@@ -178,15 +178,17 @@ class _AppAPI:
         import sys
         if sys.platform == "darwin":
             try:
-                from Quartz import CGDisplayHideCursor, kCGDirectMainDisplay  # type: ignore[import]
-                CGDisplayHideCursor(kCGDirectMainDisplay)
+                from Quartz import CGDisplayHideCursor, CGMainDisplayID  # type: ignore[import]
+                CGDisplayHideCursor(CGMainDisplayID())
                 self._cursor_hidden = True
             except Exception:
                 pass
         elif sys.platform == "win32":
             try:
                 import ctypes
-                ctypes.windll.user32.ShowCursor(False)
+                # ShowCursor uses a reference counter; decrement until hidden.
+                while ctypes.windll.user32.ShowCursor(False) >= 0:
+                    pass
                 self._cursor_hidden = True
             except Exception:
                 pass
@@ -238,15 +240,17 @@ class _AppAPI:
         import sys
         if sys.platform == "darwin":
             try:
-                from Quartz import CGDisplayShowCursor, kCGDirectMainDisplay  # type: ignore[import]
-                CGDisplayShowCursor(kCGDirectMainDisplay)
+                from Quartz import CGDisplayShowCursor, CGMainDisplayID  # type: ignore[import]
+                CGDisplayShowCursor(CGMainDisplayID())
                 self._cursor_hidden = False
             except Exception:
                 pass
         elif sys.platform == "win32":
             try:
                 import ctypes
-                ctypes.windll.user32.ShowCursor(True)
+                # Restore cursor — increment counter until visible (>= 0).
+                while ctypes.windll.user32.ShowCursor(True) < 0:
+                    pass
                 self._cursor_hidden = False
             except Exception:
                 pass
@@ -302,8 +306,14 @@ class _AppAPI:
             # briefly passes near (0, 0).
             pyautogui.FAILSAFE = False
             sw, sh = pyautogui.size()
-            acx, acy = sw // 2, sh // 2
-            pyautogui.moveTo(acx, acy, duration=0)
+            pyautogui.moveTo(sw // 2, sh // 2, duration=0)
+            # Read back the actual post-warp position instead of trusting the
+            # computed center. On Windows with DPI scaling, pyautogui.size() and
+            # pyautogui.position() can use different coordinate spaces, making a
+            # computed anchor wrong. Using the real position self-calibrates.
+            _time.sleep(0.020)
+            _actual = pyautogui.position()
+            acx, acy = _actual.x, _actual.y
             with self._cap_lock:
                 self._cap_stats["anchor"] = {"x": int(acx), "y": int(acy)}
                 self._cap_stats["warp_count"] += 1
