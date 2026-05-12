@@ -22,4 +22,5 @@ CURSOR_FIX_FLAGS = {
     "fix_capture_anchor": True,   # Bug 3
     "fix_windows_dpi":    True,   # Bug 2
     "fix_movement_scale": True,   # Bug 1
+    "cursor_sensitivity": 0.7,    # < 1.0 slows movement, > 1.0 speeds it up. 0.7 is a reasonable default for a large TV target.
 }

@@ -381,30 +381,34 @@ async def cursor_fix_flags() -> dict:
 @app.get("/api/screen-info")
 async def screen_info_public() -> dict:
     """Return local screen dimensions and DPI scale. No auth required.
-    Used by the controlling machine to compute a movement scale factor (Bug 1 fix)."""
+    Used by the controlling machine to compute a movement scale factor (Bug 1 fix).
+    Always returns LOGICAL dimensions so the caller can compute logical/logical ratios."""
     try:
         import pyautogui
         size = await asyncio.to_thread(pyautogui.size)
-        width = size.width
-        height = size.height
+        w = size.width
+        h = size.height
     except Exception as exc:
         return {"width": None, "height": None, "dpi_scale": 1.0, "error": str(exc)}
 
     dpi_scale = 1.0
-    if sys.platform == "darwin":
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            dpi_scale = ctypes.windll.shcore.GetScaleFactorForDevice(0) / 100.0
+            if CURSOR_FIX_FLAGS.get("fix_windows_dpi") and dpi_scale > 1.0:
+                w = int(w / dpi_scale)
+                h = int(h / dpi_scale)
+        except Exception:
+            dpi_scale = 1.0
+    elif sys.platform == "darwin":
         try:
             from AppKit import NSScreen  # type: ignore[import]
             dpi_scale = float(NSScreen.mainScreen().backingScaleFactor())
         except Exception:
             dpi_scale = 1.0
-    elif sys.platform == "win32":
-        try:
-            import ctypes
-            dpi_scale = ctypes.windll.shcore.GetScaleFactorForDevice(0) / 100.0
-        except Exception:
-            dpi_scale = 1.0
 
-    return {"width": width, "height": height, "dpi_scale": dpi_scale, "error": ""}
+    return {"width": w, "height": h, "dpi_scale": dpi_scale, "error": ""}
 
 
 @app.get("/api/auth/check", dependencies=[Depends(verify_token)])

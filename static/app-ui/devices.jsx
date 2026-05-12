@@ -1591,7 +1591,7 @@ function OverviewSection() {
           // Bug 4 fix: use 600 ms dwell when fix_return_dwell is enabled so the
           // return edge detector isn't triggered the instant the cursor arrives.
           const flags = await getCursorFixFlags();
-          const returnDwellMs = flags.fix_return_dwell ? 600 : 0;
+          const returnDwellMs = flags.fix_return_dwell ? 1200 : 0;
           await SS.api("/api/handoff/remote/arm-return", {
             method: "POST",
             headers: { "Content-Type": "application/json" },

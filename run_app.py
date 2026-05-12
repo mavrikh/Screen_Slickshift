@@ -343,6 +343,8 @@ class _AppAPI:
 
             # Bug 1 fix: fetch remote screen info and compute a scale factor so
             # that dx/dy are normalized to the remote machine's resolution.
+            # The remote endpoint now returns LOGICAL dimensions, so remote/local
+            # is a logical/logical ratio (correct regardless of DPI).
             scale_x = 1.0
             scale_y = 1.0
             if (CURSOR_FIX_FLAGS.get("fix_movement_scale")
@@ -365,6 +367,26 @@ class _AppAPI:
                     scale_x = 1.0
                     scale_y = 1.0
 
+            # Compute local DPI so physical pyautogui.position() deltas on Windows
+            # (fix_windows_dpi returns physical coords) can be normalized to logical
+            # before the remote scale is applied.
+            local_dpi = 1.0
+            if sys.platform == "win32":
+                try:
+                    import ctypes as _ct
+                    local_dpi = _ct.windll.shcore.GetScaleFactorForDevice(0) / 100.0
+                except Exception:
+                    pass
+            elif sys.platform == "darwin":
+                try:
+                    from AppKit import NSScreen as _NS  # type: ignore[import]
+                    local_dpi = float(_NS.mainScreen().backingScaleFactor())
+                except Exception:
+                    pass
+
+            sensitivity = float(CURSOR_FIX_FLAGS.get("cursor_sensitivity", 1.0))
+            sensitivity = max(0.1, min(3.0, sensitivity))
+
             prev_l = prev_r = prev_hotkey = False
             while self._cap_running:
                 try:
@@ -374,8 +396,10 @@ class _AppAPI:
                     hotkey = self._hotkey_active()
                     evs = []
                     if dx or dy:
-                        sdx = int(dx * scale_x)
-                        sdy = int(dy * scale_y)
+                        dx_logical = dx / local_dpi if local_dpi > 1.0 else dx
+                        dy_logical = dy / local_dpi if local_dpi > 1.0 else dy
+                        sdx = int(dx_logical * scale_x * sensitivity)
+                        sdy = int(dy_logical * scale_y * sensitivity)
                         evs.append({"type": "mouse_move", "dx": sdx, "dy": sdy})
                         pyautogui.moveTo(acx, acy, duration=0)
                         self._cap_stats["warp_count"] += 1
