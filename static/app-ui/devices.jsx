@@ -871,7 +871,10 @@ function ActiveControlOverlay({ deviceName, onStop }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(msg),
       });
-    } catch { onStop(); }
+    } catch (err) {
+      console.error("[Slickshift] sendEvent failed:", err?.message || err);
+      onStop();
+    }
     finally { sendBusyRef.current = false; }
   }
 

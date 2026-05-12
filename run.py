@@ -25,7 +25,7 @@ def main() -> None:
         port=args.port,
         reload=args.reload,
         access_log=False,
-        log_level="warning",
+        log_level="info",
     )
 
 

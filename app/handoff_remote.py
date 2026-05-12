@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
@@ -157,6 +160,7 @@ class RemoteHandoffBridge:
             except Exception as exc:
                 self._websocket = None  # mark as disconnected so next status() is accurate
                 record_connection("errors", {"event": outbound["type"]})
+                logger.warning("Remote WebSocket send failed (%s): %s", type(exc).__name__, exc)
                 raise RuntimeError("Remote connection lost.") from exc
         return {"ok": True, "event": outbound["type"]}
 

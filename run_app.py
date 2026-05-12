@@ -31,7 +31,7 @@ def _start_server() -> None:
         host=_SERVER_HOST,
         port=_PORT,
         access_log=False,
-        log_level="warning",
+        log_level="info",
     )
 
 
