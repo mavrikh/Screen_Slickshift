@@ -9,9 +9,8 @@ Requires PyQt6 and pyautogui. Install via:
     source .venv/bin/activate   # Windows: .venv\\Scripts\\activate
     pip install -r requirements.txt
 
-Step 1 of 8 from mouse-integration-restart-brainstorm.md.
-This entry point sets up logging, boots the QApplication, and shows the
-main window. No transport, capture, or injection is wired at this step.
+Step 3 of 8 from mouse-integration-restart-brainstorm.md.
+Adds TCP transport, hello handshake, heartbeat, and connection UI.
 """
 
 from __future__ import annotations
@@ -36,7 +35,7 @@ def _configure_logging() -> None:
 def main() -> None:
     _configure_logging()
     logger = logging.getLogger(__name__)
-    logger.info("cursor-bridge-test starting -- Step 1 skeleton")
+    logger.info("cursor-bridge-test starting -- Step 3: transport + handshake")
 
     app = QApplication(sys.argv)
     app.setApplicationName("Cursor Bridge Test")

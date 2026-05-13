@@ -13,10 +13,11 @@ DEFAULT_HOST: str = "0.0.0.0"  # listen on all interfaces when acting as server
 # network state. Must work even when the remote machine is unreachable.
 HANDOFF_HOTKEY_RELEASE: str = "ctrl+alt+shift+esc"
 
-# Heartbeat interval in seconds. If the secondary does not receive a heartbeat
-# within HEARTBEAT_TIMEOUT_S, it releases control unconditionally.
-HEARTBEAT_INTERVAL_S: float = 0.5
-HEARTBEAT_TIMEOUT_S: float = 2.0
+# Heartbeat interval in seconds. Ping is sent every HEARTBEAT_INTERVAL_S.
+# If no pong arrives within HEARTBEAT_TIMEOUT_S, the connection is marked dead.
+# Dead-man switch: architecture invariant #4 in Slickshift CLAUDE.md.
+HEARTBEAT_INTERVAL_S: float = 2.0
+HEARTBEAT_TIMEOUT_S: float = 6.0
 
 # Dwell time at screen edge before handoff fires (seconds).
 EDGE_DWELL_S: float = 1.2
