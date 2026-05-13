@@ -5,16 +5,26 @@ Five regions:
   1. Connection panel (top): peer address field, Listen/Connect/Disconnect buttons,
      connection state indicator with peer info. Added in Step 3.
   2. Mirroring panel (below connection): Start/Stop Mirroring toggle, role display,
-     and Inject checkbox (receiver only). Added in Step 4; Inject added in Step 5.
+     Inject checkbox (receiver only), and Peer Layout dropdown (Step 6).
   3. Status bar: current switch-state, cursor coordinates, FPS, role, delta stats.
   4. Canvas (center): red square represents the local cursor position (always).
      In RECEIVING state a second green square mirrors the incoming sender deltas.
+     In TRANSITIONING state the red square dims to grey to signal "leaving".
   5. Log panel (bottom, collapsible): last N lines from the event log.
 
 Step 4 wires the mirroring button to DeltaCapture and the transport send queue.
 Step 5 adds OS-level injection on the receiver side via MouseInjector, an Inject
 checkbox (defaults off), macOS Accessibility permission probe, Esc force-release,
 and status bar distinction between canvas-only and injecting receiver roles.
+Step 6 adds:
+  - Peer Layout dropdown: "Peer is to the: Right/Left/Top/Bottom" (CONNECTED/IDLE only).
+  - Edge-band detection (EDGE_BAND_PX=2) with EDGE_DWELL_S=0.25 s dwell timer.
+  - handoff_request / handoff_ack acknowledge-based handoff protocol.
+  - Entry-edge cursor warp with normalized perpendicular position.
+  - HANDOFF_ACK_TIMEOUT_S=1.0 s rollback if peer does not ack in time.
+  - HANDOFF_COOLDOWN_S=0.5 s cooldown prevents immediate re-trigger after warp.
+  - TRANSITIONING visual feedback: orange status bar role + dimmed grey canvas square.
+  - Disconnect during TRANSITIONING returns cleanly to IDLE with no stuck state.
 """
 
 from __future__ import annotations
@@ -29,6 +39,7 @@ from PyQt6.QtCore import Qt, QTimer, QSize
 from PyQt6.QtGui import QColor, QPainter, QPen
 from PyQt6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QFrame,
     QGroupBox,
     QHBoxLayout,
@@ -66,13 +77,16 @@ def _ts() -> str:
 class _Canvas(QFrame):
     """
     Central canvas. Draws two squares:
-    - Red square: local cursor position (always visible).
+    - Red square: local cursor position (always visible unless dimmed).
     - Green square: mirrors the sender's incoming deltas (RECEIVING state only).
 
     In RECEIVING state the green square starts at canvas center and accumulates
     normalized deltas from the peer. It does NOT represent any OS cursor position --
     it is a visual confirmation that delta math is working before injection is added
     in Step 5.
+
+    In TRANSITIONING state (Step 6) the local square dims to grey to signal that
+    the local cursor is leaving. The green square is not shown in TRANSITIONING.
     """
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -91,6 +105,9 @@ class _Canvas(QFrame):
         self._remote_y: float = _NO_POSITION
         self._show_remote: bool = False
 
+        # When True, paint the local square as dim grey (TRANSITIONING feedback).
+        self._local_dimmed: bool = False
+
     def set_local_position(self, nx: float, ny: float) -> None:
         """Update the red (local) square. Triggers a repaint."""
         self._local_x = max(0.0, min(1.0, nx))
@@ -100,6 +117,17 @@ class _Canvas(QFrame):
     # Keep the legacy name for compatibility with existing callers.
     def set_normalized_position(self, nx: float, ny: float) -> None:
         self.set_local_position(nx, ny)
+
+    def set_local_dimmed(self, dimmed: bool) -> None:
+        """
+        Dim or restore the local (red) square.
+
+        Call with dimmed=True when entering TRANSITIONING so the user sees
+        that the local cursor is about to hand off. Call with dimmed=False on
+        any other state transition.
+        """
+        self._local_dimmed = dimmed
+        self.update()
 
     def reset_remote_position(self) -> None:
         """
@@ -146,11 +174,12 @@ class _Canvas(QFrame):
             painter.drawLine(x, 0, x, h)
             painter.drawLine(0, y, w, y)
 
-        # Red square: local cursor.
+        # Local cursor square: red normally, grey when TRANSITIONING.
         lx = int(self._local_x * w) - _DOT_SIZE // 2
         ly = int(self._local_y * h) - _DOT_SIZE // 2
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#e94560"))
+        local_color = QColor("#555555") if self._local_dimmed else QColor("#e94560")
+        painter.setBrush(local_color)
         painter.drawRect(lx, ly, _DOT_SIZE, _DOT_SIZE)
 
         # Green square: remote sender cursor mirror (only in RECEIVING state).
@@ -167,7 +196,13 @@ class _StatusBar(QWidget):
     """
     Top status bar. Shows switch-state mode, cursor coordinates, role, and
     delta statistics (rate or drop count depending on role).
+
+    Step 6: Role text is coloured orange (#f08040) in TRANSITIONING state to give
+    a clear visual cue that a handoff is in flight and awaiting ACK.
     """
+
+    _COLOR_DEFAULT = "#e0e0e0"
+    _COLOR_TRANSITIONING = "#f08040"
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -191,11 +226,14 @@ class _StatusBar(QWidget):
         y: int,
         role: str = "Idle",
         extra: str = "",
+        transitioning: bool = False,
     ) -> None:
         parts = [f"Mode: {mode}", f"Cursor: ({x}, {y})", f"Role: {role}"]
         if extra:
             parts.append(extra)
         self._label.setText("  |  ".join(parts))
+        color = self._COLOR_TRANSITIONING if transitioning else self._COLOR_DEFAULT
+        self._label.setStyleSheet(f"color: {color};")
 
 
 class _LogPanel(QPlainTextEdit):
@@ -329,7 +367,12 @@ class _ConnectionPanel(QGroupBox):
         elif state == SwitchState.HANDSHAKING:
             color = self._COLOR_HANDSHAKING
             text = "Handshaking..."
-        elif state in (SwitchState.CONNECTED, SwitchState.CAPTURING, SwitchState.RECEIVING):
+        elif state in (
+            SwitchState.CONNECTED,
+            SwitchState.CAPTURING,
+            SwitchState.RECEIVING,
+            SwitchState.TRANSITIONING,
+        ):
             color = self._COLOR_CONNECTED
             if peer_info is not None:
                 name = peer_info.get("machine_name", "unknown")
@@ -390,22 +433,33 @@ class _ConnectionPanel(QGroupBox):
 
 class _MirrorPanel(QGroupBox):
     """
-    Step 4 mirroring panel.
+    Mirroring panel (Steps 4, 5, 6).
 
     Contains:
-    - Start Mirroring button: only enabled in CONNECTED state. Clicking it makes
-      this machine the sender (CAPTURING state) and notifies the peer.
+    - Start Mirroring button: only enabled in CONNECTED state.
     - Stop Mirroring button: only enabled in CAPTURING state.
-    - Role label: displays "Role: Sender", "Role: Receiver", or "Role: Idle".
+    - Inject checkbox (Step 5): receiver only, defaults unchecked.
+    - Peer Layout dropdown (Step 6): "Peer is to the: Right/Left/Top/Bottom".
+      Enabled only in CONNECTED or IDLE states. Disabled during CAPTURING,
+      RECEIVING, and TRANSITIONING to prevent mid-handoff layout changes.
+    - Role label: displays the current role.
 
-    The panel does not hold business logic. Button signals are connected in
-    MainWindow which owns both StateController and TcpTransport.
+    The panel does not hold business logic. Signals are connected in MainWindow.
     """
 
     _COLOR_IDLE = "#888888"
     _COLOR_SENDER = "#f0c040"
     _COLOR_RECEIVER = "#40a0ff"
     _COLOR_RECEIVER_INJECTING = "#40ffc0"
+    _COLOR_TRANSITIONING = "#f08040"
+
+    # Edge options in display order. The value is the config key passed to DeltaCapture.
+    _EDGE_OPTIONS: list[tuple[str, str]] = [
+        ("Right", "right"),
+        ("Left", "left"),
+        ("Top", "top"),
+        ("Bottom", "bottom"),
+    ]
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("Mirroring", parent)
@@ -437,9 +491,7 @@ class _MirrorPanel(QGroupBox):
         self._stop_btn.setEnabled(False)
         layout.addWidget(self._stop_btn)
 
-        # Step 5: Inject checkbox. Defaults to unchecked so canvas-mirror-only
-        # behavior (Step 4) is preserved until the user opts in. Only meaningful
-        # when this machine is the Receiver.
+        # Step 5: Inject checkbox. Defaults to unchecked. Only meaningful in RECEIVING.
         self._inject_chk = QCheckBox("Inject")
         self._inject_chk.setChecked(False)
         self._inject_chk.setEnabled(False)
@@ -448,6 +500,28 @@ class _MirrorPanel(QGroupBox):
             "QCheckBox:disabled { color: #555555; }"
         )
         layout.addWidget(self._inject_chk)
+
+        # Step 6: Peer Layout dropdown.
+        peer_label = QLabel("Peer is to the:")
+        peer_label.setStyleSheet("color: #b0b0b0; font-family: monospace; font-size: 12px;")
+        layout.addWidget(peer_label)
+
+        self._peer_edge_combo = QComboBox()
+        for display, _ in self._EDGE_OPTIONS:
+            self._peer_edge_combo.addItem(display)
+        self._peer_edge_combo.setCurrentIndex(0)  # default: Right
+        self._peer_edge_combo.setStyleSheet(
+            "QComboBox { background-color: #16213e; color: #e0e0e0; "
+            "font-family: monospace; font-size: 12px; border: 1px solid #3a3a6e; "
+            "padding: 3px 6px; } "
+            "QComboBox:disabled { color: #555555; border-color: #2a2a4e; } "
+            "QComboBox::drop-down { border: none; } "
+            "QComboBox QAbstractItemView { background-color: #16213e; color: #e0e0e0; "
+            "selection-background-color: #1e2f5e; font-family: monospace; font-size: 12px; }"
+        )
+        # Dropdown is editable only when idle or connected; disable during active states.
+        self._peer_edge_combo.setEnabled(True)
+        layout.addWidget(self._peer_edge_combo)
 
         layout.addStretch()
 
@@ -458,7 +532,11 @@ class _MirrorPanel(QGroupBox):
         layout.addWidget(self._role_label)
 
     def on_state_changed(self, state: SwitchState) -> None:
-        """Update button states and role label to match the new switch state."""
+        """Update button states, role label, and dropdown enable to match the new switch state."""
+        # Dropdown is editable only when nothing active is happening.
+        dropdown_enabled = state in (SwitchState.CONNECTED, SwitchState.IDLE)
+        self._peer_edge_combo.setEnabled(dropdown_enabled)
+
         if state == SwitchState.CONNECTED:
             self._start_btn.setEnabled(True)
             self._stop_btn.setEnabled(False)
@@ -474,8 +552,13 @@ class _MirrorPanel(QGroupBox):
             self._stop_btn.setEnabled(False)
             self._inject_chk.setEnabled(True)
             self._set_role("Receiver", self._COLOR_RECEIVER)
+        elif state == SwitchState.TRANSITIONING:
+            self._start_btn.setEnabled(False)
+            self._stop_btn.setEnabled(False)
+            self._inject_chk.setEnabled(False)
+            self._set_role("Handing off...", self._COLOR_TRANSITIONING)
         else:
-            # IDLE, LISTENING, CONNECTING, HANDSHAKING, TRANSITIONING -- all buttons off.
+            # IDLE, LISTENING, CONNECTING, HANDSHAKING -- all active buttons off.
             self._start_btn.setEnabled(False)
             self._stop_btn.setEnabled(False)
             self._inject_chk.setEnabled(False)
@@ -490,6 +573,13 @@ class _MirrorPanel(QGroupBox):
             self._set_role("Receiver (injecting)", self._COLOR_RECEIVER_INJECTING)
         else:
             self._set_role("Receiver", self._COLOR_RECEIVER)
+
+    def selected_edge(self) -> str:
+        """Return the currently selected edge key (e.g. 'right', 'left', 'top', 'bottom')."""
+        idx = self._peer_edge_combo.currentIndex()
+        if 0 <= idx < len(self._EDGE_OPTIONS):
+            return self._EDGE_OPTIONS[idx][1]
+        return "right"
 
     def _set_role(self, role: str, color: str) -> None:
         self._role_label.setText(f"Role: {role}")
@@ -508,6 +598,10 @@ class _MirrorPanel(QGroupBox):
     @property
     def inject_chk(self) -> QCheckBox:
         return self._inject_chk
+
+    @property
+    def peer_edge_combo(self) -> QComboBox:
+        return self._peer_edge_combo
 
 
 class MainWindow(QMainWindow):
@@ -530,6 +624,14 @@ class MainWindow(QMainWindow):
         # Whether OS cursor injection is currently active on this machine.
         # Controlled by the Inject checkbox; only meaningful in RECEIVING state.
         self._injection_enabled: bool = False
+
+        # Step 6: QTimer that fires after HANDOFF_ACK_TIMEOUT_S if no handoff_ack
+        # arrives from the peer. On timeout, rolls back TRANSITIONING -> CAPTURING.
+        # Single-shot; started when we enter TRANSITIONING, cancelled on ack or rollback.
+        self._handoff_ack_timer = QTimer(self)
+        self._handoff_ack_timer.setSingleShot(True)
+        self._handoff_ack_timer.setInterval(int(config.HANDOFF_ACK_TIMEOUT_S * 1000))
+        self._handoff_ack_timer.timeout.connect(self._on_handoff_ack_timeout)
 
         # Wire transport signals to main-thread handlers.
         self._transport.register_connected_callback(self._on_transport_connected)
@@ -568,6 +670,24 @@ class MainWindow(QMainWindow):
 
         # Wire Inject checkbox (Step 5).
         self._mirror_panel.inject_chk.stateChanged.connect(self._on_inject_toggled)
+
+        # Step 6: Wire peer-edge dropdown. When the user changes it we update
+        # DeltaCapture immediately so edge detection uses the new edge on the next tick.
+        self._mirror_panel.peer_edge_combo.currentIndexChanged.connect(
+            self._on_peer_edge_changed
+        )
+
+        # Wire edge-dwell callback from DeltaCapture to main thread.
+        # The capture loop runs in a background thread, so the callback must be
+        # safe to call from a non-Qt thread. We use a Qt signal to cross the boundary.
+        # Since QObject.emit is not available here directly, we store the callback
+        # via a thread-safe queue and drain it on the poll timer tick.
+        # Simpler approach: use a QTimer single-shot with 0 ms delay posted from the
+        # callback thread -- but that requires access to QTimer from a non-Qt thread.
+        # Safest approach: the callback sets a threading.Event and the poll timer
+        # checks it. We pass a lambda that calls QTimer.singleShot(0, ...) instead,
+        # which IS safe to call from any thread in PyQt6.
+        self._capture.set_edge_dwell_callback(self._schedule_handoff_fire)
 
         # Splitter lets the user resize the log panel vertically.
         splitter = QSplitter(Qt.Orientation.Vertical)
@@ -625,11 +745,14 @@ class MainWindow(QMainWindow):
         mode = state.value.upper()
         role = self._role_label_for_state(state)
         extra = self._extra_status_for_state(state)
-        self._status_bar.update_status(mode, x, y, role=role, extra=extra)
+        transitioning = (state == SwitchState.TRANSITIONING)
+        self._status_bar.update_status(mode, x, y, role=role, extra=extra, transitioning=transitioning)
 
     def _role_label_for_state(self, state: SwitchState) -> str:
         if state == SwitchState.CAPTURING:
             return "Sender"
+        if state == SwitchState.TRANSITIONING:
+            return "Handing off..."
         if state == SwitchState.RECEIVING:
             return "Receiver (injecting)" if self._injection_enabled else "Receiver"
         return "Idle"
@@ -683,7 +806,9 @@ class MainWindow(QMainWindow):
 
     def _on_disconnect_clicked(self) -> None:
         self._dead_man_timer.stop()
+        self._handoff_ack_timer.stop()  # Step 6: cancel any in-flight handoff
         self._stop_capture_if_running()
+        self._canvas.set_local_dimmed(False)
         self._canvas.hide_remote()
         self._transport.close()
         self._state_ctrl.force_release()
@@ -701,13 +826,27 @@ class MainWindow(QMainWindow):
         This machine becomes the sender. Transition to CAPTURING and notify peer.
 
         The peer will transition to RECEIVING on receipt of mirror_start.
+        Step 6: configure the capture module with the selected peer edge before starting.
         """
+        edge = self._mirror_panel.selected_edge()
+        self._capture.set_peer_edge(edge)
         self._state_ctrl.start_mirroring()
         self._transport.send({"type": "mirror_start"})
         self._capture.start(self._transport.enqueue_delta)
         self._conn_panel.on_state_changed(SwitchState.CAPTURING, peer_info=self._peer_info)
         self._mirror_panel.on_state_changed(SwitchState.CAPTURING)
-        self._append_log("Mirroring started -- this machine is now the Sender")
+        self._append_log(f"Mirroring started -- this machine is now the Sender (peer to the {edge})")
+
+    def _on_peer_edge_changed(self, index: int) -> None:  # noqa: ARG002
+        """
+        Peer-edge dropdown selection changed. Update DeltaCapture immediately.
+
+        The dropdown is disabled during CAPTURING/RECEIVING/TRANSITIONING so this
+        handler only fires when the state is CONNECTED or IDLE, which is safe.
+        """
+        edge = self._mirror_panel.selected_edge()
+        self._capture.set_peer_edge(edge)
+        logger.info("Peer edge updated to: %s", edge)
 
     def _on_stop_mirroring_clicked(self) -> None:
         """Stop capturing and notify peer to exit RECEIVING."""
@@ -719,8 +858,16 @@ class MainWindow(QMainWindow):
         self._append_log("Mirroring stopped")
 
     def _stop_capture_if_running(self) -> None:
-        """Stop DeltaCapture if it is currently polling."""
-        if self._state_ctrl.state == SwitchState.CAPTURING:
+        """
+        Stop DeltaCapture if it is currently polling.
+
+        Also covers TRANSITIONING: the capture thread is still alive (paused)
+        during a handoff-in-flight. If the connection dies mid-handoff, we must
+        stop it cleanly to avoid leaving a zombie thread.
+        """
+        state = self._state_ctrl.state
+        if state in (SwitchState.CAPTURING, SwitchState.TRANSITIONING):
+            self._capture.set_paused(False)  # unpause before stop so the thread exits cleanly
             self._capture.stop()
 
     # ------------------------------------------------------------------
@@ -737,9 +884,17 @@ class MainWindow(QMainWindow):
         self._transport.send_hello()
 
     def _on_transport_disconnected(self, reason: str) -> None:
-        """Connection dropped or timed out."""
+        """
+        Connection dropped or timed out.
+
+        Step 6: if we were mid-handoff (TRANSITIONING), cancel the ack timer and
+        restore the canvas before transitioning to IDLE. No stuck state remains.
+        """
         self._dead_man_timer.stop()
+        # Cancel any in-flight handoff ack timer -- the peer is gone.
+        self._handoff_ack_timer.stop()
         self._stop_capture_if_running()
+        self._canvas.set_local_dimmed(False)
         self._canvas.hide_remote()
         self._state_ctrl.connection_lost(reason)
         self._peer_info = None
@@ -759,6 +914,10 @@ class MainWindow(QMainWindow):
             self._handle_mirror_stop()
         elif msg_type == "delta":
             self._handle_delta(message)
+        elif msg_type == "handoff_request":
+            self._handle_handoff_request(message)
+        elif msg_type == "handoff_ack":
+            self._handle_handoff_ack()
         else:
             logger.debug("Unknown message type: %r", msg_type)
 
@@ -844,6 +1003,202 @@ class MainWindow(QMainWindow):
                 f"Last delta: ndx={ndx:.4f} ndy={ndy:.4f} seq={seq}  "
                 f"({self._deltas_received} total, {rate:.1f} Hz)"
             )
+
+    # ------------------------------------------------------------------
+    # Step 6: edge-based handoff handlers
+    # ------------------------------------------------------------------
+
+    def _schedule_handoff_fire(self, sender_edge: str, perp: float) -> None:
+        """
+        Called from the DeltaCapture background thread when edge dwell completes.
+
+        PyQt6 allows QTimer.singleShot() to be called from non-Qt threads; it
+        posts the callback to the main event loop safely. This is the thread-
+        crossing bridge between the capture thread and the Qt main thread.
+        """
+        QTimer.singleShot(0, lambda: self._on_edge_dwell_fired(sender_edge, perp))
+
+    def _on_edge_dwell_fired(self, sender_edge: str, perp: float) -> None:
+        """
+        Main thread: edge dwell threshold met on this machine (the current sender).
+
+        Guard: only fire if we are still in CAPTURING state. The dwell callback
+        can arrive slightly after a state change (e.g., user clicked Stop Mirroring
+        just before dwell completed). If state changed, discard silently.
+        """
+        if self._state_ctrl.state != SwitchState.CAPTURING:
+            logger.debug(
+                "Edge dwell callback arrived in state %s -- discarded",
+                self._state_ctrl.state.value,
+            )
+            return
+
+        logger.info("Handoff fire: edge=%s perp=%.3f", sender_edge, perp)
+        self._append_log(f"Handoff triggered: cursor at {sender_edge} edge, perp={perp:.3f}")
+
+        # Transition to TRANSITIONING and pause delta delivery.
+        self._state_ctrl.begin_handoff()
+        self._capture.set_paused(True)
+
+        # Send handoff_request to peer.
+        self._transport.send({
+            "type": "handoff_request",
+            "perp": perp,
+            "sender_edge": sender_edge,
+        })
+
+        # Update panels.
+        self._conn_panel.on_state_changed(SwitchState.TRANSITIONING, peer_info=self._peer_info)
+        self._mirror_panel.on_state_changed(SwitchState.TRANSITIONING)
+
+        # Start the ack timeout timer. If no handoff_ack arrives within
+        # HANDOFF_ACK_TIMEOUT_S, _on_handoff_ack_timeout rolls back to CAPTURING.
+        self._handoff_ack_timer.start()
+
+    def _on_handoff_ack_timeout(self) -> None:
+        """
+        Handoff ACK did not arrive within HANDOFF_ACK_TIMEOUT_S.
+
+        Roll back TRANSITIONING -> CAPTURING. Log the event and resume delta delivery.
+        """
+        if self._state_ctrl.state != SwitchState.TRANSITIONING:
+            return  # already resolved via ack or disconnect
+        logger.warning(
+            "Handoff ACK timeout (%.1fs) -- rolling back to CAPTURING",
+            config.HANDOFF_ACK_TIMEOUT_S,
+        )
+        self._append_log(
+            f"Handoff ACK timeout after {config.HANDOFF_ACK_TIMEOUT_S:.1f}s -- resuming capture"
+        )
+        self._state_ctrl.handoff_ack_timeout()
+        self._capture.set_paused(False)
+        self._conn_panel.on_state_changed(SwitchState.CAPTURING, peer_info=self._peer_info)
+        self._mirror_panel.on_state_changed(SwitchState.CAPTURING)
+
+    def _handle_handoff_request(self, payload: dict) -> None:
+        """
+        Peer (the current sender) wants to hand off control to us.
+
+        We are in RECEIVING state. Steps:
+        1. Compute entry edge (opposite of sender_edge).
+        2. Warp OS cursor (if injection enabled) or only move canvas.
+        3. Send handoff_ack.
+        4. Transition RECEIVING -> CAPTURING (we are now the sender).
+        5. Set cooldown on DeltaCapture to suppress immediate re-trigger.
+        6. Start capture loop.
+        """
+        if self._state_ctrl.state != SwitchState.RECEIVING:
+            logger.debug(
+                "handoff_request arrived in state %s -- ignored",
+                self._state_ctrl.state.value,
+            )
+            return
+
+        perp: float = float(payload.get("perp", 0.5))
+        sender_edge: str = payload.get("sender_edge", "right")
+
+        # Compute entry edge: opposite of sender_edge.
+        _opposite: dict[str, str] = {
+            "right": "left",
+            "left": "right",
+            "top": "bottom",
+            "bottom": "top",
+        }
+        entry_edge = _opposite.get(sender_edge, "left")
+
+        # Compute absolute cursor position on the entry edge.
+        # perp is the normalized coordinate perpendicular to the edge.
+        # For left/right entry: x = 1px (left) or screen_w-1 (right), y = perp * screen_h.
+        # For top/bottom entry: y = 1px (top) or screen_h-1 (bottom), x = perp * screen_w.
+        if entry_edge == "left":
+            nx = 1.0 / self._screen_w
+            ny = perp
+        elif entry_edge == "right":
+            nx = (self._screen_w - 1) / self._screen_w
+            ny = perp
+        elif entry_edge == "top":
+            nx = perp
+            ny = 1.0 / self._screen_h
+        else:  # bottom
+            nx = perp
+            ny = (self._screen_h - 1) / self._screen_h
+
+        logger.info(
+            "Handoff received from peer at edge=%s perp=%.3f -- entry edge=%s nx=%.3f ny=%.3f",
+            sender_edge, perp, entry_edge, nx, ny,
+        )
+        self._append_log(
+            f"Handoff received from peer at edge={sender_edge} perp={perp:.3f}"
+        )
+
+        # Warp cursor to entry position.
+        if self._injection_enabled:
+            self._injector.move_absolute(nx, ny, self._screen_w, self._screen_h)
+
+        # Always reset the canvas green square to the entry position so the
+        # visual representation matches the handoff landing point.
+        # reset_remote_position() sets center; we override with a forced delta from
+        # center to the actual entry point.
+        self._canvas.reset_remote_position()
+        # apply_remote_delta accumulates from 0.5, so delta = target - 0.5.
+        self._canvas.apply_remote_delta(nx - 0.5, ny - 0.5)
+
+        # Send ack back to the original sender.
+        self._transport.send({"type": "handoff_ack"})
+
+        # Transition this machine to CAPTURING (new sender).
+        self._state_ctrl.handoff_request_received()
+
+        # Set cooldown on the capture module before starting the loop.
+        self._capture.set_cooldown()
+        edge = self._mirror_panel.selected_edge()
+        self._capture.set_peer_edge(edge)
+        self._capture.set_paused(False)
+        self._capture.start(self._transport.enqueue_delta)
+
+        # Hide the remote green square (we are now the sender, not receiver).
+        self._canvas.hide_remote()
+
+        # Update panels.
+        self._conn_panel.on_state_changed(SwitchState.CAPTURING, peer_info=self._peer_info)
+        self._mirror_panel.on_state_changed(SwitchState.CAPTURING)
+        self._append_log("Role switched: this machine is now the Sender")
+
+    def _handle_handoff_ack(self) -> None:
+        """
+        Peer confirmed it received our handoff_request and is now the sender.
+
+        This machine transitions TRANSITIONING -> RECEIVING. The capture loop
+        was already paused; now stop it fully and enter receive-only mode.
+        """
+        if self._state_ctrl.state != SwitchState.TRANSITIONING:
+            logger.debug(
+                "handoff_ack arrived in state %s -- ignored",
+                self._state_ctrl.state.value,
+            )
+            return
+
+        # Cancel the ack timeout -- we got the ack in time.
+        self._handoff_ack_timer.stop()
+
+        # Stop the capture thread (was paused; now fully stop it).
+        self._capture.set_paused(False)
+        self._capture.stop()
+
+        # Transition to RECEIVING.
+        self._state_ctrl.handoff_ack_received()
+
+        # Reset the remote canvas square so it starts from center for incoming deltas.
+        self._deltas_received = 0
+        self._delta_timestamps.clear()
+        self._last_sample_log_time = time.monotonic()
+        self._canvas.reset_remote_position()
+
+        # Update panels.
+        self._conn_panel.on_state_changed(SwitchState.RECEIVING, peer_info=self._peer_info)
+        self._mirror_panel.on_state_changed(SwitchState.RECEIVING)
+        self._append_log("Handoff complete -- this machine is now the Receiver")
+        logger.info("Handoff complete -- transitioned to RECEIVING")
 
     # ------------------------------------------------------------------
     # Inject toggle and force-release (Step 5)
@@ -936,11 +1291,17 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_state_changed(self, state: SwitchState) -> None:
-        """Fired by StateController on every transition. Updates status bar."""
+        """
+        Fired by StateController on every transition. Updates status bar and canvas dim.
+
+        Step 6: dim the canvas red square in TRANSITIONING; restore in all other states.
+        """
         mode = state.value.upper()
         x, y = pyautogui.position()
         role = self._role_label_for_state(state)
-        self._status_bar.update_status(mode, x, y, role=role)
+        transitioning = (state == SwitchState.TRANSITIONING)
+        self._status_bar.update_status(mode, x, y, role=role, transitioning=transitioning)
+        self._canvas.set_local_dimmed(transitioning)
 
     # ------------------------------------------------------------------
     # Dead-man monitor (Qt main thread, 500 ms tick)

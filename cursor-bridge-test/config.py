@@ -19,8 +19,22 @@ HANDOFF_HOTKEY_RELEASE: str = "ctrl+alt+shift+esc"
 HEARTBEAT_INTERVAL_S: float = 2.0
 HEARTBEAT_TIMEOUT_S: float = 6.0
 
-# Dwell time at screen edge before handoff fires (seconds).
-EDGE_DWELL_S: float = 1.2
+# Step 6: screen-edge handoff constants.
+
+# Width of the edge band in pixels. Cursor must be within this many pixels of
+# the screen boundary (0 or screen_dim - 1) to enter the dwell timer.
+EDGE_BAND_PX: int = 2
+
+# Time in seconds the cursor must remain in the edge band before handoff fires.
+EDGE_DWELL_S: float = 0.25
+
+# Time in seconds to wait for handoff_ack from peer before rolling back to CAPTURING.
+HANDOFF_ACK_TIMEOUT_S: float = 1.0
+
+# Cooldown in seconds after transitioning into CAPTURING via handoff. Edge
+# detection is suppressed during this window to prevent immediate re-trigger
+# when the newly warped cursor lands at the entry edge.
+HANDOFF_COOLDOWN_S: float = 0.5
 
 # Logging
 LOG_LEVEL: str = "DEBUG"

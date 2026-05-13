@@ -7,18 +7,20 @@ state until the peer ACKs that it has entered CAPTURING state. On timeout, the
 host rolls back to IDLE. This prevents double-cursor chaos and cursor-trap failure
 modes described in brainstorm doc Section 3J.
 
-State diagram for Step 4 (one-way delta mirroring):
+State diagram (Step 6 -- edge-based handoff added):
 
     IDLE ──listen()──> LISTENING ──inbound connection──> HANDSHAKING
     IDLE ──connect()──> CONNECTING ──TCP connected──> HANDSHAKING
     HANDSHAKING ──hello received──> CONNECTED
     CONNECTED ──start_mirroring()──> CAPTURING
     CONNECTED ──mirror_start_received()──> RECEIVING
+    CAPTURING ──edge dwell fires──> TRANSITIONING
+    TRANSITIONING ──handoff_ack received──> RECEIVING
+    TRANSITIONING ──ack timeout / disconnect──> CAPTURING (rollback) / IDLE
+    RECEIVING ──handoff_request received──> CAPTURING (new sender, via handoff)
     CAPTURING ──stop_mirroring()──> CONNECTED
     RECEIVING ──mirror_stop_received()──> CONNECTED
     any active ──force_release() / disconnect──> IDLE
-
-TRANSITIONING is defined but not yet reachable -- Step 6 (edge-based handoff).
 """
 
 from __future__ import annotations
@@ -207,36 +209,83 @@ class StateController:
         self._transition(SwitchState.CONNECTED)
 
     # ------------------------------------------------------------------
-    # Step 6+ transitions -- edge-based handoff (not yet reachable)
+    # Step 6 transitions -- edge-based handoff
     # ------------------------------------------------------------------
 
-    def request_handoff_to_peer(self) -> None:
+    def begin_handoff(self) -> None:
         """
-        Begin handoff: this machine wishes to give control to the peer.
+        Edge dwell fired: this machine (currently CAPTURING) wants to hand off
+        control to the peer.
 
-        Transitions to TRANSITIONING and sends a handoff request via transport.
-        Rolls back to CAPTURING on ACK timeout.
-        NOT YET IMPLEMENTED -- Step 6.
-        """
-        raise NotImplementedError
+        Transitions CAPTURING -> TRANSITIONING. The caller is responsible for:
+          1. Sending {"type": "handoff_request", "perp": ..., "sender_edge": ...}
+          2. Starting the HANDOFF_ACK_TIMEOUT_S timer.
+          3. Pausing the capture loop (no more deltas while TRANSITIONING).
 
-    def confirm_handoff_received(self) -> None:
+        Only valid from CAPTURING state.
         """
-        Called when this machine receives a handoff request from the peer.
+        if self._state != SwitchState.CAPTURING:
+            logger.warning(
+                "begin_handoff() called in state %s -- ignored", self._state.value
+            )
+            return
+        self._transition(SwitchState.TRANSITIONING)
 
-        Transitions to RECEIVING and sends ACK back to peer.
-        NOT YET IMPLEMENTED -- Step 6.
+    def handoff_ack_received(self) -> None:
         """
-        raise NotImplementedError
+        Peer sent handoff_ack confirming it has entered CAPTURING (new sender).
 
-    def peer_ack_received(self) -> None:
-        """
-        Called when the ACK arrives confirming the peer is now in RECEIVING state.
+        Transitions this machine TRANSITIONING -> RECEIVING. The original sender
+        now becomes the receiver. The caller cancels the ack-timeout timer.
 
-        Transitions this machine from TRANSITIONING to CAPTURING.
-        NOT YET IMPLEMENTED -- Step 6.
+        Only valid from TRANSITIONING state.
         """
-        raise NotImplementedError
+        if self._state != SwitchState.TRANSITIONING:
+            logger.warning(
+                "handoff_ack_received() called in state %s -- ignored", self._state.value
+            )
+            return
+        self._transition(SwitchState.RECEIVING)
+
+    def handoff_ack_timeout(self) -> None:
+        """
+        No handoff_ack arrived within HANDOFF_ACK_TIMEOUT_S.
+
+        Rolls back TRANSITIONING -> CAPTURING so the user can continue moving
+        the cursor locally. Logs at WARNING; this indicates a network hiccup or
+        a slow peer.
+
+        Only valid from TRANSITIONING state.
+        """
+        if self._state != SwitchState.TRANSITIONING:
+            logger.warning(
+                "handoff_ack_timeout() called in state %s -- ignored", self._state.value
+            )
+            return
+        logger.warning("Handoff ACK timeout -- rolling back to CAPTURING")
+        self._transition(SwitchState.CAPTURING)
+
+    def handoff_request_received(self) -> None:
+        """
+        Peer (currently CAPTURING) sent a handoff_request to give control to us.
+
+        Transitions this machine RECEIVING -> CAPTURING (we become the new sender).
+        The caller is responsible for:
+          1. Warping the OS cursor to the entry-edge position derived from the
+             handoff_request payload.
+          2. Sending {"type": "handoff_ack"} back to the peer.
+          3. Starting the capture loop so deltas flow from this machine.
+          4. Setting _handoff_cooldown_until so edge detection is suppressed.
+
+        Only valid from RECEIVING state.
+        """
+        if self._state != SwitchState.RECEIVING:
+            logger.warning(
+                "handoff_request_received() called in state %s -- ignored",
+                self._state.value,
+            )
+            return
+        self._transition(SwitchState.CAPTURING)
 
     def heartbeat_timeout(self) -> None:
         """

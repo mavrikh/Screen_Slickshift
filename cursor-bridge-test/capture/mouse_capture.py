@@ -1,29 +1,34 @@
 """
-cursor-bridge-test -- input capture (Step 4: polling delta loop).
+cursor-bridge-test -- input capture (Steps 4 and 6).
 
-Uses pyautogui.position() at ~60 Hz to compute normalized cursor deltas and
-deliver them to a bounded outbound queue. The queue is consumed by the transport
-layer's sender thread.
+Step 4: pyautogui.position() at ~60 Hz computes normalized cursor deltas and
+delivers them to a bounded outbound queue consumed by the transport sender thread.
 
-Design decisions vs. the brainstorm doc (Section 3A):
+Step 6 additions:
+- Edge band detection: on each poll tick, if the cursor is within EDGE_BAND_PX
+  of the configured peer edge and the caller is in CAPTURING state, a dwell timer
+  starts. If the cursor stays in the band for EDGE_DWELL_S seconds without leaving,
+  the on_edge_dwell callback fires. The perpendicular coordinate at that moment is
+  passed as a normalized value 0.0-1.0.
+- Cooldown guard: the caller sets _handoff_cooldown_until (via set_cooldown()) so
+  edge detection is suppressed for HANDOFF_COOLDOWN_S after every handoff landing.
+  This prevents immediate re-trigger when the newly warped cursor starts at the edge.
+- The poll loop pauses delta delivery while is_paused is True (set by the main
+  window during TRANSITIONING). Pausing does NOT stop the thread -- edge detection
+  keeps running so the rollback path can still poll cursor state.
+
+Design decisions vs. brainstorm doc (Section 3A):
 - pyautogui.position() is a passive poll, not a CGEventTap event callback.
-  This means local cursor delivery is NOT suppressed while CAPTURING -- that is
-  Step 6 (handoff) + Step 7 (DPI normalization). Passive polling is correct for
-  Step 4, which is delta-send-only.
-- The poll interval matches CANVAS_REFRESH_MS (16 ms, ~60 Hz). Step 4 does not
-  require a tighter loop.
-- Normalization: raw pixel deltas are divided by the logical screen dimensions
-  reported by pyautogui.size(). The receiver scales up using its own screen
-  dimensions from the hello payload. This is the hybrid model from brainstorm
-  doc Section 4 Step 3.
-- No-op suppression: if (dx, dy) == (0, 0), no delta message is enqueued. This
-  prevents the send queue from filling when the cursor is stationary.
+  Local cursor delivery is NOT suppressed while CAPTURING. That is Step 7+.
+- Normalization: raw pixel deltas divided by the local logical screen dimensions.
+  The receiver scales using its own screen dimensions from the hello payload.
+- No-op suppression: (dx, dy) == (0, 0) skips the queue enqueue but edge-band
+  checks still run on every tick so the dwell timer advances correctly.
 """
 
 from __future__ import annotations
 
 import logging
-import queue
 import threading
 import time
 from collections.abc import Callable
@@ -35,23 +40,69 @@ import config
 logger = logging.getLogger(__name__)
 
 # Type alias for the enqueue function supplied by the transport layer.
-# Accepts a delta dict; returns True if the message was queued, False if dropped.
 EnqueueFn = Callable[[dict], bool]
+
+# Type alias for the edge-dwell callback.
+# Arguments: sender_edge (str), perp (float 0.0-1.0).
+EdgeDwellCallback = Callable[[str, float], None]
+
+# Valid edge names.
+VALID_EDGES: frozenset[str] = frozenset({"right", "left", "top", "bottom"})
+
+
+def _compute_perp(edge: str, x: int, y: int, screen_w: int, screen_h: int) -> float:
+    """
+    Compute the normalized perpendicular coordinate at a given edge.
+
+    For left/right edges the perpendicular axis is Y: return y / screen_h.
+    For top/bottom edges the perpendicular axis is X: return x / screen_w.
+    Clamped to [0.0, 1.0].
+    """
+    if edge in ("left", "right"):
+        return max(0.0, min(1.0, y / screen_h))
+    return max(0.0, min(1.0, x / screen_w))
+
+
+def _in_edge_band(edge: str, x: int, y: int, screen_w: int, screen_h: int) -> bool:
+    """
+    Return True if (x, y) is within EDGE_BAND_PX of the named edge boundary.
+
+    "left"   -- x <= EDGE_BAND_PX - 1
+    "right"  -- x >= screen_w - EDGE_BAND_PX
+    "top"    -- y <= EDGE_BAND_PX - 1
+    "bottom" -- y >= screen_h - EDGE_BAND_PX
+    """
+    band = config.EDGE_BAND_PX
+    if edge == "left":
+        return x < band
+    if edge == "right":
+        return x >= screen_w - band
+    if edge == "top":
+        return y < band
+    if edge == "bottom":
+        return y >= screen_h - band
+    return False
 
 
 class DeltaCapture:
     """
-    Polls the local cursor position at ~60 Hz and enqueues normalized delta
-    messages for transmission by the transport layer.
+    Polls the local cursor position at ~60 Hz, enqueues normalized delta
+    messages for transmission, and fires an edge-dwell callback when the
+    cursor holds at the configured peer edge long enough.
 
     Lifecycle:
         capture = DeltaCapture()
-        capture.start(enqueue_fn)   # starts background polling thread
+        capture.set_peer_edge("right")          # configure before start
+        capture.set_edge_dwell_callback(fn)
+        capture.start(enqueue_fn)               # starts background polling thread
         ...
-        capture.stop()              # joins the thread
+        capture.set_paused(True)                # suppress delta enqueue (TRANSITIONING)
+        capture.set_cooldown()                  # suppress edge detection after handoff
+        capture.stop()                          # joins the thread
 
-    The enqueue_fn is called from the polling thread. It must be thread-safe.
-    The caller (TcpTransport) supplies a bounded queue with drop-oldest semantics.
+    The enqueue_fn is called from the polling thread and must be thread-safe.
+    The on_edge_dwell callback fires from the polling thread; route to the Qt
+    main thread via signal if it touches Qt widgets.
     """
 
     def __init__(self) -> None:
@@ -59,20 +110,90 @@ class DeltaCapture:
         self._stop_event = threading.Event()
         self._seq: int = 0
         self._screen_w, self._screen_h = pyautogui.size()
+
+        # Edge configuration. Default "right" matches the dropdown default.
+        self._peer_edge: str = "right"
+
+        # Callback to fire when the dwell threshold is met.
+        self._edge_dwell_callback: EdgeDwellCallback | None = None
+
+        # Paused flag: when True, deltas are not enqueued (TRANSITIONING state).
+        # Edge checks still run; only queue delivery stops.
+        self._paused: bool = False
+        self._paused_lock = threading.Lock()
+
+        # Cooldown: edge detection is suppressed until this monotonic timestamp.
+        # Set to time.monotonic() + HANDOFF_COOLDOWN_S after every handoff landing.
+        self._handoff_cooldown_until: float = 0.0
+        self._cooldown_lock = threading.Lock()
+
         logger.info(
             "DeltaCapture initialized. Logical screen: %dx%d",
             self._screen_w,
             self._screen_h,
         )
 
+    # ------------------------------------------------------------------
+    # Configuration setters (call before or during operation)
+    # ------------------------------------------------------------------
+
+    def set_peer_edge(self, edge: str) -> None:
+        """
+        Set which screen edge the peer is located at.
+
+        Must be one of "right", "left", "top", "bottom". Changes take effect on
+        the next poll tick; no restart required.
+        """
+        if edge not in VALID_EDGES:
+            logger.warning("set_peer_edge: invalid edge %r -- keeping %r", edge, self._peer_edge)
+            return
+        self._peer_edge = edge
+        logger.info("Peer edge set to: %s", edge)
+
+    def set_edge_dwell_callback(self, callback: EdgeDwellCallback) -> None:
+        """Register the function to call when an edge dwell completes."""
+        self._edge_dwell_callback = callback
+
+    def set_paused(self, paused: bool) -> None:
+        """
+        Pause or resume delta delivery.
+
+        When paused=True, the poll loop skips enqueue_fn calls but continues
+        polling and running edge-band checks. Used during TRANSITIONING so no
+        stale deltas reach the peer after handoff fires.
+        """
+        with self._paused_lock:
+            self._paused = paused
+        logger.debug("DeltaCapture paused=%s", paused)
+
+    def set_cooldown(self) -> None:
+        """
+        Set the handoff cooldown to now + HANDOFF_COOLDOWN_S.
+
+        Call this every time a handoff lands (state transitions into CAPTURING
+        via handoff_request_received) to suppress immediate re-trigger.
+        """
+        until = time.monotonic() + config.HANDOFF_COOLDOWN_S
+        with self._cooldown_lock:
+            self._handoff_cooldown_until = until
+        logger.info(
+            "Handoff cooldown set for %.2fs", config.HANDOFF_COOLDOWN_S
+        )
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
     def start(self, enqueue_fn: EnqueueFn) -> None:
         """
         Start the polling loop in a background daemon thread.
 
-        enqueue_fn is called with each delta dict. It returns True if the
-        message was accepted, False if it was dropped due to backpressure.
+        enqueue_fn is called with each delta dict when not paused. It returns
+        True if accepted, False if dropped due to backpressure.
         """
         self._stop_event.clear()
+        with self._paused_lock:
+            self._paused = False
         self._seq = 0
         self._thread = threading.Thread(
             target=self._poll_loop,
@@ -81,7 +202,7 @@ class DeltaCapture:
             name="delta-capture",
         )
         self._thread.start()
-        logger.info("DeltaCapture started")
+        logger.info("DeltaCapture started (peer_edge=%s)", self._peer_edge)
 
     def stop(self) -> None:
         """Signal the polling thread to stop and wait for it to exit."""
@@ -91,14 +212,27 @@ class DeltaCapture:
             self._thread = None
         logger.info("DeltaCapture stopped")
 
+    # ------------------------------------------------------------------
+    # Background poll loop
+    # ------------------------------------------------------------------
+
     def _poll_loop(self, enqueue_fn: EnqueueFn) -> None:
         """
         Background thread: poll pyautogui.position() every CANVAS_REFRESH_MS.
 
-        Computes (dx_px, dy_px), skips no-ops, normalizes, and calls enqueue_fn.
+        Each tick:
+        1. Compute (dx_px, dy_px). If non-zero and not paused, normalize and enqueue.
+        2. Run edge-band check if not in cooldown.
+        3. Advance or reset dwell timer based on whether cursor is in the band.
+        4. If dwell threshold met, fire the edge_dwell_callback.
         """
-        interval_s: float = config.CANVAS_REFRESH_MS / 1000.0
+        import config as _cfg  # re-import inside thread for clarity on constants
+
+        interval_s: float = _cfg.CANVAS_REFRESH_MS / 1000.0
         prev_x, prev_y = pyautogui.position()
+
+        # Dwell tracking.
+        dwell_start: float | None = None  # monotonic time when cursor entered the band
 
         while not self._stop_event.is_set():
             time.sleep(interval_s)
@@ -107,23 +241,64 @@ class DeltaCapture:
             dx_px = cur_x - prev_x
             dy_px = cur_y - prev_y
 
-            if dx_px == 0 and dy_px == 0:
-                # Cursor did not move -- do not send a no-op delta.
+            # --- Delta delivery ---
+            if dx_px != 0 or dy_px != 0:
+                prev_x, prev_y = cur_x, cur_y
+                with self._paused_lock:
+                    currently_paused = self._paused
+                if not currently_paused:
+                    ndx: float = dx_px / self._screen_w
+                    ndy: float = dy_px / self._screen_h
+                    self._seq += 1
+                    delta: dict = {
+                        "type": "delta",
+                        "ndx": ndx,
+                        "ndy": ndy,
+                        "seq": self._seq,
+                    }
+                    accepted = enqueue_fn(delta)
+                    if not accepted:
+                        logger.debug("Delta seq=%d dropped (send queue full)", self._seq)
+
+            # --- Edge-band detection (Step 6) ---
+            now = time.monotonic()
+
+            # Suppress edge checks while paused (TRANSITIONING) or within cooldown.
+            with self._cooldown_lock:
+                in_cooldown = now < self._handoff_cooldown_until
+            with self._paused_lock:
+                currently_paused = self._paused
+
+            if currently_paused or in_cooldown:
+                # Reset the dwell timer so it doesn't accumulate across suppressed ticks.
+                if dwell_start is not None:
+                    dwell_start = None
+                    logger.debug("Edge dwell reset (paused=%s cooldown=%s)", currently_paused, in_cooldown)
                 continue
 
-            prev_x, prev_y = cur_x, cur_y
+            edge = self._peer_edge
+            in_band = _in_edge_band(edge, cur_x, cur_y, self._screen_w, self._screen_h)
 
-            ndx: float = dx_px / self._screen_w
-            ndy: float = dy_px / self._screen_h
-            self._seq += 1
+            logger.debug(
+                "Edge check: edge=%s pos=(%d,%d) in_band=%s dwell_start=%s",
+                edge, cur_x, cur_y, in_band, dwell_start,
+            )
 
-            delta: dict = {
-                "type": "delta",
-                "ndx": ndx,
-                "ndy": ndy,
-                "seq": self._seq,
-            }
-
-            accepted = enqueue_fn(delta)
-            if not accepted:
-                logger.debug("Delta seq=%d dropped (send queue full)", self._seq)
+            if in_band:
+                if dwell_start is None:
+                    dwell_start = now
+                    logger.debug("Entered %s edge band at pos=(%d,%d)", edge, cur_x, cur_y)
+                elif now - dwell_start >= _cfg.EDGE_DWELL_S:
+                    # Dwell threshold met -- fire handoff.
+                    perp = _compute_perp(edge, cur_x, cur_y, self._screen_w, self._screen_h)
+                    logger.info(
+                        "Edge dwell complete: edge=%s perp=%.3f pos=(%d,%d)",
+                        edge, perp, cur_x, cur_y,
+                    )
+                    dwell_start = None  # reset so we don't fire again immediately
+                    if self._edge_dwell_callback is not None:
+                        self._edge_dwell_callback(edge, perp)
+            else:
+                if dwell_start is not None:
+                    logger.debug("Left %s edge band -- dwell timer reset", edge)
+                    dwell_start = None
