@@ -177,3 +177,21 @@ class MouseInjector:
             pyautogui.scroll(dy)
         if dx != 0:
             pyautogui.hscroll(dx)
+
+    def key(self, key_name: str, pressed: bool) -> None:
+        """
+        Inject a synthetic keyboard event at the OS level.
+
+        key_name must be a string accepted by pyautogui (e.g. 'a', 'shift',
+        'enter', 'f1'). pyautogui handles the platform-specific keycode
+        translation internally (e.g. 'command' -> Cmd on macOS).
+
+        pressed=True fires a key-down event; pressed=False fires key-up.
+        Both events must be forwarded so modifier state is reconstructed
+        correctly on the receiver (e.g. Shift held while typing a letter).
+        """
+        logger.debug("inject key: key_name=%r pressed=%s", key_name, pressed)
+        if pressed:
+            pyautogui.keyDown(key_name)
+        else:
+            pyautogui.keyUp(key_name)

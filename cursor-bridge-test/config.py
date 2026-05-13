@@ -68,3 +68,8 @@ RECONNECT_MAX_ATTEMPTS: int = 5
 
 # Step 8: idle timeout when receiving with no input.
 IDLE_TIMEOUT_S: float = 60.0
+
+# Step 9: Keyboard forwarding. Off by default; opt-in only.
+# Sender's local keystrokes still fire on local apps -- this forwards them
+# additionally to the peer. Use with explicit caution.
+KEYBOARD_FORWARDING_DEFAULT: bool = False

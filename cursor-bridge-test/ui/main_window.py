@@ -116,6 +116,11 @@ class _MainSignals(QObject):
     # Ctrl+Alt+Shift+Esc combo is detected. Step 8.
     force_release_pressed = pyqtSignal()
 
+    # Emitted by the pynput keyboard listener thread when a key event fires
+    # and keyboard forwarding is active. Step 9.
+    # Args: key_name (str -- pyautogui name), pressed (bool).
+    key_event_fired = pyqtSignal(str, bool)
+
 
 class _Canvas(QFrame):
     """
@@ -242,11 +247,13 @@ class _StatusBar(QWidget):
 
     Step 6: Role text is coloured orange (#f08040) in TRANSITIONING state to give
     a clear visual cue that a handoff is in flight and awaiting ACK.
+    Step 9: Appends "| KBD" in red (#ff6060) when keyboard forwarding is live.
     """
 
     _COLOR_DEFAULT = "#e0e0e0"
     _COLOR_TRANSITIONING = "#f08040"
     _COLOR_RECONNECTING = "#c08040"
+    _COLOR_KBD_ACTIVE = "#ff6060"
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -272,11 +279,22 @@ class _StatusBar(QWidget):
         extra: str = "",
         transitioning: bool = False,
         reconnecting: bool = False,
+        kbd_active: bool = False,
     ) -> None:
         parts = [f"Mode: {mode}", f"Cursor: ({x}, {y})", f"Role: {role}"]
         if extra:
             parts.append(extra)
-        self._label.setText("  |  ".join(parts))
+        base_text = "  |  ".join(parts)
+        if kbd_active:
+            # Step 9: append KBD indicator in a separate span so only that word
+            # is styled red while the rest of the label keeps its default colour.
+            self._label.setText(
+                f'{base_text}  |  <span style="color: {self._COLOR_KBD_ACTIVE};">KBD</span>'
+            )
+            self._label.setTextFormat(Qt.TextFormat.RichText)
+        else:
+            self._label.setText(base_text)
+            self._label.setTextFormat(Qt.TextFormat.PlainText)
         if transitioning:
             color = self._COLOR_TRANSITIONING
         elif reconnecting:
@@ -560,6 +578,22 @@ class _MirrorPanel(QGroupBox):
         )
         layout.addWidget(self._inject_chk)
 
+        # Step 9: Forward Keyboard checkbox. Defaults to unchecked. Only
+        # enabled in CAPTURING state so the sender explicitly opts in.
+        # Tooltip explains the dual-fire behaviour.
+        self._kbd_fwd_chk = QCheckBox("Forward Keyboard")
+        self._kbd_fwd_chk.setChecked(False)
+        self._kbd_fwd_chk.setEnabled(False)
+        self._kbd_fwd_chk.setToolTip(
+            "Forwards every keystroke to the peer. "
+            "Sender's local apps also receive keystrokes. Use with caution."
+        )
+        self._kbd_fwd_chk.setStyleSheet(
+            "QCheckBox { color: #b0b0b0; font-family: monospace; font-size: 12px; }"
+            "QCheckBox:disabled { color: #555555; }"
+        )
+        layout.addWidget(self._kbd_fwd_chk)
+
         # Step 6: Peer Layout dropdown.
         peer_label = QLabel("Peer is to the:")
         peer_label.setStyleSheet("color: #b0b0b0; font-family: monospace; font-size: 12px;")
@@ -600,32 +634,39 @@ class _MirrorPanel(QGroupBox):
             self._start_btn.setEnabled(True)
             self._stop_btn.setEnabled(False)
             self._inject_chk.setEnabled(False)
+            self._kbd_fwd_chk.setEnabled(False)
             self._set_role("Idle", self._COLOR_IDLE)
         elif state == SwitchState.CAPTURING:
             self._start_btn.setEnabled(False)
             self._stop_btn.setEnabled(True)
             self._inject_chk.setEnabled(False)
+            # Forward Keyboard is opt-in; only interactive while CAPTURING.
+            self._kbd_fwd_chk.setEnabled(True)
             self._set_role("Sender", self._COLOR_SENDER)
         elif state == SwitchState.RECEIVING:
             self._start_btn.setEnabled(False)
             self._stop_btn.setEnabled(False)
             self._inject_chk.setEnabled(True)
+            self._kbd_fwd_chk.setEnabled(False)
             self._set_role("Receiver", self._COLOR_RECEIVER)
         elif state == SwitchState.TRANSITIONING:
             self._start_btn.setEnabled(False)
             self._stop_btn.setEnabled(False)
             self._inject_chk.setEnabled(False)
+            self._kbd_fwd_chk.setEnabled(False)
             self._set_role("Handing off...", self._COLOR_TRANSITIONING)
         elif state == SwitchState.RECONNECTING:
             self._start_btn.setEnabled(False)
             self._stop_btn.setEnabled(False)
             self._inject_chk.setEnabled(False)
+            self._kbd_fwd_chk.setEnabled(False)
             self._set_role("Reconnecting...", self._COLOR_TRANSITIONING)
         else:
             # IDLE, LISTENING, CONNECTING, HANDSHAKING -- all active buttons off.
             self._start_btn.setEnabled(False)
             self._stop_btn.setEnabled(False)
             self._inject_chk.setEnabled(False)
+            self._kbd_fwd_chk.setEnabled(False)
             self._set_role("Idle", self._COLOR_IDLE)
 
     def set_role_injecting(self, injecting: bool) -> None:
@@ -662,6 +703,10 @@ class _MirrorPanel(QGroupBox):
     @property
     def inject_chk(self) -> QCheckBox:
         return self._inject_chk
+
+    @property
+    def kbd_fwd_chk(self) -> QCheckBox:
+        return self._kbd_fwd_chk
 
     @property
     def peer_edge_combo(self) -> QComboBox:
@@ -837,6 +882,57 @@ class MainWindow(QMainWindow):
         self._kb_pressed_keys_lock = threading.Lock()
         self._kb_listener: _pynput_keyboard.Listener | None = None
 
+        # Step 9: keyboard forwarding state.
+        # True only when the checkbox is checked AND state is CAPTURING.
+        # Toggled by _on_kbd_fwd_toggled and cleared on CAPTURING exit.
+        self._keyboard_forwarding_active: bool = False
+
+        # Translation map: pynput Key enum -> pyautogui key name string.
+        # Used by _translate_pynput_key(). Keys not in this map and not
+        # KeyCode-with-char are logged at DEBUG and skipped.
+        self._PYNPUT_KEY_MAP: dict[_pynput_keyboard.Key, str] = {
+            _pynput_keyboard.Key.shift: "shift",
+            _pynput_keyboard.Key.shift_l: "shift",
+            _pynput_keyboard.Key.shift_r: "shiftright",
+            _pynput_keyboard.Key.ctrl: "ctrl",
+            _pynput_keyboard.Key.ctrl_l: "ctrl",
+            _pynput_keyboard.Key.ctrl_r: "ctrlright",
+            _pynput_keyboard.Key.alt: "alt",
+            _pynput_keyboard.Key.alt_l: "alt",
+            _pynput_keyboard.Key.alt_r: "altright",
+            _pynput_keyboard.Key.cmd: "command",
+            _pynput_keyboard.Key.cmd_r: "cmdright",
+            _pynput_keyboard.Key.enter: "enter",
+            _pynput_keyboard.Key.esc: "esc",
+            _pynput_keyboard.Key.space: "space",
+            _pynput_keyboard.Key.tab: "tab",
+            _pynput_keyboard.Key.backspace: "backspace",
+            _pynput_keyboard.Key.delete: "delete",
+            _pynput_keyboard.Key.up: "up",
+            _pynput_keyboard.Key.down: "down",
+            _pynput_keyboard.Key.left: "left",
+            _pynput_keyboard.Key.right: "right",
+            _pynput_keyboard.Key.f1: "f1",
+            _pynput_keyboard.Key.f2: "f2",
+            _pynput_keyboard.Key.f3: "f3",
+            _pynput_keyboard.Key.f4: "f4",
+            _pynput_keyboard.Key.f5: "f5",
+            _pynput_keyboard.Key.f6: "f6",
+            _pynput_keyboard.Key.f7: "f7",
+            _pynput_keyboard.Key.f8: "f8",
+            _pynput_keyboard.Key.f9: "f9",
+            _pynput_keyboard.Key.f10: "f10",
+            _pynput_keyboard.Key.f11: "f11",
+            _pynput_keyboard.Key.f12: "f12",
+            _pynput_keyboard.Key.home: "home",
+            _pynput_keyboard.Key.end: "end",
+            _pynput_keyboard.Key.page_up: "pageup",
+            _pynput_keyboard.Key.page_down: "pagedown",
+            _pynput_keyboard.Key.insert: "insert",
+            _pynput_keyboard.Key.caps_lock: "capslock",
+            _pynput_keyboard.Key.num_lock: "numlock",
+        }
+
         # Wire transport signals to main-thread handlers.
         self._transport.register_connected_callback(self._on_transport_connected)
         self._transport.register_disconnected_callback(self._on_transport_disconnected)
@@ -895,6 +991,9 @@ class MainWindow(QMainWindow):
         # Wire Inject checkbox (Step 5).
         self._mirror_panel.inject_chk.stateChanged.connect(self._on_inject_toggled)
 
+        # Wire Forward Keyboard checkbox (Step 9).
+        self._mirror_panel.kbd_fwd_chk.stateChanged.connect(self._on_kbd_fwd_toggled)
+
         # Step 6: Wire peer-edge dropdown. When the user changes it we update
         # DeltaCapture immediately so edge detection uses the new edge on the next tick.
         self._mirror_panel.peer_edge_combo.currentIndexChanged.connect(
@@ -949,6 +1048,9 @@ class MainWindow(QMainWindow):
         # Wire force-release hotkey signal (Step 8).
         self._main_signals.force_release_pressed.connect(self._on_system_force_release)
 
+        # Wire keyboard forwarding signal (Step 9).
+        self._main_signals.key_event_fired.connect(self._on_key_event_fired)
+
         # Start the pynput mouse listener. It runs for the full window lifetime and is
         # gated off until set_active(True) is called on CAPTURING entry.
         self._event_capture.start()
@@ -966,6 +1068,21 @@ class MainWindow(QMainWindow):
         if _last_addr:
             self._conn_panel._addr_field.setText(_last_addr)
             logger.info("Restored last peer address from settings: %s", _last_addr)
+
+        # --- QSettings: restore keyboard forwarding checkbox preference (Step 9) ---
+        # The checkbox is disabled at startup (not CAPTURING), so restoring its
+        # checked state here only sets the visual preference; the flag stays False
+        # until the user enters CAPTURING and the checkbox is enabled.
+        _kbd_fwd_saved: bool = self._settings.value(
+            "keyboard_forwarding_enabled",
+            config.KEYBOARD_FORWARDING_DEFAULT,
+            type=bool,
+        )
+        self._mirror_panel.kbd_fwd_chk.blockSignals(True)
+        self._mirror_panel.kbd_fwd_chk.setChecked(_kbd_fwd_saved)
+        self._mirror_panel.kbd_fwd_chk.blockSignals(False)
+        if _kbd_fwd_saved:
+            logger.info("Restored keyboard forwarding preference: enabled (checkbox pre-checked)")
 
     # ------------------------------------------------------------------
     # Cursor polling (local red square + status bar coordinates)
@@ -989,6 +1106,7 @@ class MainWindow(QMainWindow):
         self._status_bar.update_status(
             mode, x, y, role=role, extra=extra,
             transitioning=transitioning, reconnecting=reconnecting,
+            kbd_active=self._keyboard_forwarding_active,
         )
 
     def _role_label_for_state(self, state: SwitchState) -> str:
@@ -1261,6 +1379,8 @@ class MainWindow(QMainWindow):
             self._handle_click_message(message)
         elif msg_type == "scroll":
             self._handle_scroll_message(message)
+        elif msg_type == "key":
+            self._handle_key_message(message)
         elif msg_type == "force_release":
             # Peer force-released. If we are CAPTURING, return to CONNECTED cleanly.
             logger.info("Peer sent force_release -- returning to CONNECTED")
@@ -1709,6 +1829,87 @@ class MainWindow(QMainWindow):
         logger.debug("Injecting scroll: dx=%d dy=%d", dx, dy)
         self._injector.scroll(dx, dy)
 
+    def _handle_key_message(self, message: dict) -> None:
+        """
+        Inject a keyboard event received from the sender.
+
+        Only acts if RECEIVING and injection is enabled -- same gate as
+        click/scroll injection. Step 9.
+        """
+        if self._state_ctrl.state != SwitchState.RECEIVING or not self._injection_enabled:
+            return
+        key_name: str = message.get("key", "")
+        pressed: bool = bool(message.get("pressed", True))
+        if not key_name:
+            logger.debug("Received key message with empty key -- skipped")
+            return
+        logger.debug("Injecting key: key=%r pressed=%s", key_name, pressed)
+        self._injector.key(key_name, pressed)
+
+    # ------------------------------------------------------------------
+    # Step 9: keyboard forwarding toggle and key event handler
+    # ------------------------------------------------------------------
+
+    def _on_kbd_fwd_toggled(self, state: int) -> None:
+        """
+        Called when the Forward Keyboard checkbox changes state.
+
+        Only meaningful while CAPTURING. If toggled in any other state (which
+        should not happen because the checkbox is disabled), it is ignored.
+        Persists the preference to QSettings so it survives restarts.
+        """
+        checked: bool = state != 0
+        # Persist the preference regardless of current state.
+        self._settings.setValue("keyboard_forwarding_enabled", checked)
+
+        if self._state_ctrl.state != SwitchState.CAPTURING:
+            # Checkbox is disabled outside CAPTURING; this path is a safety net.
+            return
+
+        self._keyboard_forwarding_active = checked
+        if checked:
+            self._append_log(
+                "Keyboard forwarding ON. Every keystroke fires on both this machine "
+                "and the peer. Press Ctrl+Alt+Shift+Esc to force-release."
+            )
+            logger.info("Keyboard forwarding enabled")
+        else:
+            self._append_log("Keyboard forwarding OFF.")
+            logger.info("Keyboard forwarding disabled")
+
+    def _translate_pynput_key(
+        self,
+        key: _pynput_keyboard.Key | _pynput_keyboard.KeyCode,
+    ) -> str | None:
+        """
+        Translate a pynput key object to a pyautogui key name string.
+
+        Returns the string on success, or None if the key cannot be translated
+        (caller should log at DEBUG and skip forwarding rather than raise).
+        """
+        if isinstance(key, _pynput_keyboard.Key):
+            name = self._PYNPUT_KEY_MAP.get(key)
+            if name is None:
+                logger.debug("KB forward: no mapping for pynput Key %r -- skipped", key)
+            return name
+        # KeyCode: use .char if available (ordinary printable characters).
+        if isinstance(key, _pynput_keyboard.KeyCode) and key.char is not None:
+            return key.char
+        logger.debug("KB forward: cannot translate KeyCode %r -- skipped", key)
+        return None
+
+    def _on_key_event_fired(self, key_name: str, pressed: bool) -> None:
+        """
+        Qt main thread: a keyboard event was captured and forwarding is active.
+
+        Gate: only forward if still in CAPTURING state. The signal may arrive
+        slightly after a state transition; discard silently if so.
+        """
+        if self._state_ctrl.state != SwitchState.CAPTURING:
+            return
+        logger.debug("Sending key: key=%r pressed=%s", key_name, pressed)
+        self._transport.send({"type": "key", "key": key_name, "pressed": pressed})
+
     # ------------------------------------------------------------------
     # Inject toggle and force-release (Step 5)
     # ------------------------------------------------------------------
@@ -1820,15 +2021,23 @@ class MainWindow(QMainWindow):
 
         Step 6: dim the canvas red square in TRANSITIONING; restore in all other states.
         Step 8: pass reconnecting flag to status bar for amber color.
+        Step 9: pass kbd_active flag; also clear keyboard forwarding when leaving CAPTURING.
         """
         mode = state.value.upper()
         x, y = pyautogui.position()
         role = self._role_label_for_state(state)
         transitioning = (state == SwitchState.TRANSITIONING)
         reconnecting = (state == SwitchState.RECONNECTING)
+
+        # Clear keyboard forwarding when leaving CAPTURING.
+        if state != SwitchState.CAPTURING and self._keyboard_forwarding_active:
+            self._keyboard_forwarding_active = False
+            logger.info("Keyboard forwarding deactivated (state left CAPTURING)")
+
         self._status_bar.update_status(
             mode, x, y, role=role,
             transitioning=transitioning, reconnecting=reconnecting,
+            kbd_active=self._keyboard_forwarding_active,
         )
         self._canvas.set_local_dimmed(transitioning)
 
@@ -1948,7 +2157,15 @@ class MainWindow(QMainWindow):
         self,
         key: _pynput_keyboard.Key | _pynput_keyboard.KeyCode | None,
     ) -> None:
-        """Called on the pynput listener thread for every key press."""
+        """
+        Called on the pynput listener thread for every key press.
+
+        Force-release detection is unconditional (Step 8). Keyboard forwarding
+        (Step 9) is layered on top: if _keyboard_forwarding_active is True,
+        translate and emit the key -- EXCEPT when the full force-release combo
+        is active (Ctrl+Alt+Shift+Esc all pressed), to avoid leaking that combo
+        to the peer.
+        """
         if key is None:
             return
         with self._kb_pressed_keys_lock:
@@ -1957,16 +2174,35 @@ class MainWindow(QMainWindow):
         if self._kb_combo_active():
             logger.info("Force-release combo detected on keyboard listener thread")
             self._main_signals.force_release_pressed.emit()
+            # Do not forward keys while the force-release combo is fully active.
+            return
+        # Step 9: forward keystroke if keyboard forwarding is active.
+        if self._keyboard_forwarding_active:
+            key_name = self._translate_pynput_key(key)
+            if key_name is not None:
+                self._main_signals.key_event_fired.emit(key_name, True)
 
     def _kb_on_release(
         self,
         key: _pynput_keyboard.Key | _pynput_keyboard.KeyCode | None,
     ) -> None:
-        """Called on the pynput listener thread for every key release."""
+        """
+        Called on the pynput listener thread for every key release.
+
+        Step 9: forward key-release events when keyboard forwarding is active.
+        The force-release combo suppression on press means those modifier
+        release events can be forwarded safely (the combo is already broken by
+        the time any of the four keys release).
+        """
         if key is None:
             return
         with self._kb_pressed_keys_lock:
             self._kb_pressed_keys.discard(key)
+        # Step 9: forward key-release if keyboard forwarding is active.
+        if self._keyboard_forwarding_active:
+            key_name = self._translate_pynput_key(key)
+            if key_name is not None:
+                self._main_signals.key_event_fired.emit(key_name, False)
 
     def _on_system_force_release(self) -> None:
         """
