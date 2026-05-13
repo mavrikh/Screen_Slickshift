@@ -15,17 +15,13 @@ pyautogui's failsafe (corner abort) is disabled globally because the cursor
 legitimately reaches screen corners in a KVM workflow. The dead-man-switch
 (Step 3 heartbeat) and the Esc force-release (Step 5) replace it. See config.py.
 
-Step 7: move_relative accepts dpi_scale and dpi_correction_enabled. When correction
-is on, the pixel delta is multiplied by dpi_scale after scaling so that the OS call
-receives the unit the platform expects (physical pixels on systems where pyautogui
-returns physical values from size(), logical otherwise). The sender already corrected
-to logical space, so the receiver multiplies back out to match its own platform units.
-
-Step 8 (DPI asymmetry fix): move_absolute also accepts position_in_physical_pixels.
-On Windows with PyQt6 DPI awareness, pyautogui.moveTo() expects physical pixel
-coordinates while screen_w/screen_h from pyautogui.size() are logical. Multiplying
-by dpi_scale converts the normalized target into physical pixels. On macOS, moveTo
-expects logical pixels, so no multiplication is needed.
+DPI handling (simplified in Step 9):
+- pyautogui.size() and pyautogui.position() are internally consistent on each
+  platform. The receiver scales normalized deltas by its own pyautogui.size()
+  directly. No dpi_scale multiplication is needed at the injection layer.
+- The sender normalized against its own pyautogui canvas; the receiver multiplies
+  back using its own. The fraction-of-screen invariant handles cross-machine DPI
+  differences naturally.
 """
 
 from __future__ import annotations
@@ -110,43 +106,23 @@ class MouseInjector:
         ndy: float,
         screen_w: int,
         screen_h: int,
-        dpi_scale: float = 1.0,
-        dpi_correction_enabled: bool = True,
     ) -> None:
         """
         Inject a relative cursor movement.
 
-        ndx, ndy are normalized deltas (fractions of the sender's logical canvas,
-        already corrected to true logical space by the sender in Step 7).
+        ndx, ndy are normalized deltas (fractions of the sender's pyautogui
+        canvas). The receiver multiplies by its own pyautogui.size() to recover
+        a pixel count in its own native unit. pyautogui.moveRel then receives
+        a value consistent with the unit it expects on this platform.
 
-        When dpi_correction_enabled is True, the receiver scales the normalized delta
-        against its logical screen dimensions, then multiplies by dpi_scale to produce
-        the physical-pixel value that pyautogui.moveRel expects on this machine.
-        This is the inverse of what the sender did: sender divided by dpi_scale,
-        receiver multiplies by dpi_scale, so the round-trip is pixel-accurate.
-
-        When dpi_correction_enabled is False, the naive pass-through applies:
-        multiply ndx/ndy by screen_w/screen_h directly, matching Step 4 behavior.
+        screen_w, screen_h must be from pyautogui.size() on this machine.
         """
-        if dpi_correction_enabled and dpi_scale != 1.0:
-            # The sender normalized against logical pixels (physical delta / dpi_scale
-            # / logical screen width). To invert: multiply ndx by logical screen width
-            # to get a logical pixel count, then multiply by dpi_scale to get the
-            # physical pixel count that pyautogui.moveRel expects on this machine.
-            # screen_w from pyautogui.size() is the logical width on this platform.
-            dx_px = int(ndx * screen_w * dpi_scale)
-            dy_px = int(ndy * screen_h * dpi_scale)
-            logger.debug(
-                "inject DPI-corrected: ndx=%.4f ndy=%.4f scale=%.2f -> dx=%d dy=%d",
-                ndx, ndy, dpi_scale, dx_px, dy_px,
-            )
-        else:
-            dx_px = int(ndx * screen_w)
-            dy_px = int(ndy * screen_h)
-            logger.debug(
-                "inject naive: ndx=%.4f ndy=%.4f -> dx=%d dy=%d",
-                ndx, ndy, dx_px, dy_px,
-            )
+        dx_px = int(ndx * screen_w)
+        dy_px = int(ndy * screen_h)
+        logger.debug(
+            "inject move_relative: ndx=%.4f ndy=%.4f -> dx=%d dy=%d",
+            ndx, ndy, dx_px, dy_px,
+        )
         pyautogui.moveRel(dx_px, dy_px, duration=0)
 
     def move_absolute(
@@ -155,32 +131,20 @@ class MouseInjector:
         ny: float,
         screen_w: int,
         screen_h: int,
-        dpi_scale: float = 1.0,
-        position_in_physical_pixels: bool = False,
     ) -> None:
         """
         Warp the cursor to a normalized absolute position.
 
         Used at handoff entry (Step 6) to anchor the secondary cursor at the
         corresponding edge position. nx, ny are in range 0.0-1.0 relative to
-        the receiver's logical screen.
+        the receiver's pyautogui canvas.
 
-        When position_in_physical_pixels is True (Windows with PyQt6 DPI awareness),
-        pyautogui.moveTo expects physical pixel coordinates while screen_w/screen_h
-        are logical. Multiply by dpi_scale to produce the correct physical target.
-        On macOS, moveTo operates in logical pixels, so no multiplication is needed.
+        screen_w, screen_h must be from pyautogui.size() on this machine.
+        pyautogui.moveTo receives coordinates in its own native unit directly.
         """
-        if position_in_physical_pixels and dpi_scale != 1.0:
-            x_px = int(nx * screen_w * dpi_scale)
-            y_px = int(ny * screen_h * dpi_scale)
-            logger.debug(
-                "inject move_absolute (physical): nx=%.4f ny=%.4f scale=%.2f -> x=%d y=%d",
-                nx, ny, dpi_scale, x_px, y_px,
-            )
-        else:
-            x_px = int(nx * screen_w)
-            y_px = int(ny * screen_h)
-            logger.debug("inject move_absolute: nx=%.4f ny=%.4f -> x=%d y=%d", nx, ny, x_px, y_px)
+        x_px = int(nx * screen_w)
+        y_px = int(ny * screen_h)
+        logger.debug("inject move_absolute: nx=%.4f ny=%.4f -> x=%d y=%d", nx, ny, x_px, y_px)
         pyautogui.moveTo(x_px, y_px, duration=0)
 
     def click(self, button: str = "left") -> None:

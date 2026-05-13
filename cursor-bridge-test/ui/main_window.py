@@ -27,11 +27,14 @@ Step 6 adds:
   - Disconnect during TRANSITIONING returns cleanly to IDLE with no stuck state.
 Step 7 adds:
   - Sender-side DPI scale read from QScreen.devicePixelRatio() at startup.
-  - dpi_scale passed to DeltaCapture at construction (no PyQt6 import in that module).
-  - Receiver-side dpi_scale passed to MouseInjector.move_relative on each delta.
-  - Ctrl+Shift+D hotkey toggles DPI correction on/off for A/B comparison.
-  - Status bar shows active DPI scale for Sender and Receiver (injecting) roles.
+  - Status bar shows active DPI scale for Sender and Receiver (injecting) roles
+    (informational only -- DPI is no longer load-bearing in the math).
   - Hello receipt logs peer's logical, physical, and DPI values in a single line.
+Step 9 simplification:
+  - pyautogui.size() and pyautogui.position() are internally consistent on each
+    platform. Normalized deltas use pyautogui.size() directly on both sides.
+  - Dropped effective_screen_w/h multiplications and Ctrl+Shift+D DPI toggle.
+  - position_in_physical_pixels heuristic retained for diagnostic logging only.
 """
 
 from __future__ import annotations
@@ -724,15 +727,9 @@ class MainWindow(QMainWindow):
         self._capture = DeltaCapture(
             self._screen_w,
             self._screen_h,
-            self._dpi_scale,
-            position_in_physical_pixels=self._position_in_physical_pixels,
         )
         self._injector = MouseInjector()
         self._peer_info: dict | None = None  # last received hello payload from peer
-
-        # Step 7: master DPI correction toggle. Propagated to DeltaCapture and
-        # MouseInjector on every delta. Defaults to enabled.
-        self._dpi_correction_enabled: bool = True
 
         # Signal bridge: capture-thread -> Qt main thread.
         # Must be created on the main thread (here in __init__) so Qt assigns it
@@ -864,9 +861,8 @@ class MainWindow(QMainWindow):
         self._dead_man_timer.timeout.connect(self._check_dead_man)
 
         logger.info(
-            "MainWindow initialized. Screen logical: %dx%d  dpi_scale=%.2f  dpi_correction=%s. Polling at %dms.",
-            self._screen_w, self._screen_h, self._dpi_scale,
-            self._dpi_correction_enabled, config.CANVAS_REFRESH_MS,
+            "MainWindow initialized. Screen (pyautogui): %dx%d  dpi_scale=%.2f. Polling at %dms.",
+            self._screen_w, self._screen_h, self._dpi_scale, config.CANVAS_REFRESH_MS,
         )
 
         # --- QSettings: restore last peer address on startup (Ask 3) ---
@@ -881,12 +877,11 @@ class MainWindow(QMainWindow):
 
     def _poll_cursor(self) -> None:
         x, y = pyautogui.position()
-        # Normalize against effective dimensions so the canvas red square reaches
-        # the actual screen edges on Windows DPI-aware mode (physical pixel coords).
-        eff_w = round(self._screen_w * self._dpi_scale) if self._position_in_physical_pixels else self._screen_w
-        eff_h = round(self._screen_h * self._dpi_scale) if self._position_in_physical_pixels else self._screen_h
-        nx = x / eff_w
-        ny = y / eff_h
+        # Normalize against pyautogui.size() -- position() and size() are in the
+        # same unit on each platform, so nx/ny correctly represent 0.0-1.0 across
+        # the full screen range without any dpi_scale correction.
+        nx = x / self._screen_w
+        ny = y / self._screen_h
         self._canvas.set_local_position(nx, ny)
 
         state = self._state_ctrl.state
@@ -984,7 +979,6 @@ class MainWindow(QMainWindow):
         """
         edge = self._mirror_panel.selected_edge()
         self._capture.set_peer_edge(edge)
-        self._capture.set_dpi_correction_enabled(self._dpi_correction_enabled)
         self._state_ctrl.start_mirroring()
         self._transport.send({"type": "mirror_start"})
         self._capture.start(self._transport.enqueue_delta)
@@ -1156,8 +1150,6 @@ class MainWindow(QMainWindow):
             self._injector.move_relative(
                 ndx, ndy,
                 self._screen_w, self._screen_h,
-                dpi_scale=self._dpi_scale,
-                dpi_correction_enabled=self._dpi_correction_enabled,
             )
 
         # Log a sample line roughly once per second.
@@ -1305,8 +1297,6 @@ class MainWindow(QMainWindow):
             self._injector.move_absolute(
                 nx, ny,
                 self._screen_w, self._screen_h,
-                dpi_scale=self._dpi_scale,
-                position_in_physical_pixels=self._position_in_physical_pixels,
             )
 
         # Always reset the canvas green square to the entry position so the
@@ -1327,7 +1317,6 @@ class MainWindow(QMainWindow):
         self._capture.set_cooldown()
         edge = self._mirror_panel.selected_edge()
         self._capture.set_peer_edge(edge)
-        self._capture.set_dpi_correction_enabled(self._dpi_correction_enabled)
         self._capture.set_paused(False)
         self._capture.start(self._transport.enqueue_delta)
 
@@ -1450,37 +1439,16 @@ class MainWindow(QMainWindow):
         Intercept hotkeys while the window has focus.
 
         Esc: force-release OS injection (RECEIVING + injection enabled only).
-        Ctrl+Shift+D: toggle DPI correction on/off for A/B comparison (Step 7).
         All other keys pass through to the default handler.
         """
-        modifiers = event.modifiers()
-        ctrl_shift = Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier
-
         if (
             event.key() == Qt.Key.Key_Escape
             and self._state_ctrl.state == SwitchState.RECEIVING
             and self._injection_enabled
         ):
             self._force_release_injection()
-        elif event.key() == Qt.Key.Key_D and (modifiers & ctrl_shift) == ctrl_shift:
-            self._toggle_dpi_correction()
         else:
             super().keyPressEvent(event)
-
-    def _toggle_dpi_correction(self) -> None:
-        """
-        Toggle DPI correction on/off and propagate to DeltaCapture.
-
-        The toggle applies immediately on the capture side (DeltaCapture reads the
-        flag on each tick). The injection side reads self._dpi_correction_enabled
-        directly on each delta arrival. No restart required.
-        """
-        self._dpi_correction_enabled = not self._dpi_correction_enabled
-        self._capture.set_dpi_correction_enabled(self._dpi_correction_enabled)
-        state_str = "enabled" if self._dpi_correction_enabled else "disabled -- using raw pyautogui values"
-        msg = f"DPI correction {state_str}"
-        self._append_log(msg)
-        logger.info("DPI correction toggled: %s", self._dpi_correction_enabled)
 
     # ------------------------------------------------------------------
     # State change handler
