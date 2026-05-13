@@ -1,0 +1,18 @@
+# Slickshift mainline dependencies
+# Python 3.10+ required.
+
+PyQt6>=6.6
+
+# pyautogui is used for passive cursor position polling (pyautogui.position())
+# and injection (pyautogui.moveTo/moveRel/mouseDown/mouseUp/scroll/hscroll/keyDown/keyUp).
+#
+# PROVISIONAL -- production capture will replace pyautogui.position() with
+# CGEventTap on macOS and RawInput on Windows (see capture/mouse_capture.py stub).
+# The injection surface (moveTo, mouseDown, etc.) may also be replaced with
+# direct platform API calls at that time.
+pyautogui>=0.9.54
+
+# pynput is used for cross-platform mouse button and scroll event capture.
+# Runs a listener in a background thread. On macOS requires Accessibility permission
+# (same grant as pyautogui). On Windows no extra permission is needed.
+pynput>=1.7
