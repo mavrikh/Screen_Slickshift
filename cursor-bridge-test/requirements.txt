@@ -1,0 +1,15 @@
+# cursor-bridge-test dependencies
+# Python 3.10+ required.
+
+PyQt6>=6.6
+
+# pyautogui is used in Step 1 for passive cursor position polling (pyautogui.position())
+# and will be used in early injection steps (pyautogui.moveTo/moveRel).
+#
+# PROVISIONAL -- Known Unknown #2 from Slickshift CLAUDE.md:
+# pyautogui's position() is a passive poll, not a CGEventTap. It cannot suppress
+# local cursor delivery during handoff. If system-wide capture is required (it is,
+# for Step 6+), this will be supplemented or replaced with direct CGEventTap calls
+# on macOS and SetWindowsHookEx on Windows. That decision is deferred to Step 5
+# diagnostics.
+pyautogui>=0.9.54
