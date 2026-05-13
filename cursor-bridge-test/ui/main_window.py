@@ -1068,6 +1068,14 @@ class MainWindow(QMainWindow):
         self._stop_capture_if_running()
         self._canvas.set_local_dimmed(False)
         self._canvas.hide_remote()
+        # Notify peer before closing so it treats the drop as user-initiated and
+        # skips its reconnect path. Best-effort: if the send fails (peer already
+        # gone), log and proceed. Matches the force_release notification pattern.
+        if self._state_ctrl.state not in (SwitchState.IDLE, SwitchState.RECONNECTING):
+            try:
+                self._transport.send({"type": "user_disconnect"})
+            except Exception:
+                logger.info("user_disconnect notification failed (peer already gone) -- proceeding with close")
         self._transport.close()
         if self._state_ctrl.state == SwitchState.RECONNECTING:
             self._state_ctrl.reconnect_canceled()
@@ -1257,6 +1265,13 @@ class MainWindow(QMainWindow):
             # Peer force-released. If we are CAPTURING, return to CONNECTED cleanly.
             logger.info("Peer sent force_release -- returning to CONNECTED")
             self._handle_peer_force_release()
+        elif msg_type == "user_disconnect":
+            # Peer issued a clean user-initiated disconnect. Set the flag so the
+            # imminent transport-closed callback goes to IDLE instead of reconnecting.
+            # Do NOT tear down here -- the peer will close the socket and
+            # _on_transport_disconnected will fire with the flag already set.
+            logger.info("Peer issued user disconnect -- closing cleanly without reconnect")
+            self._user_initiated_disconnect = True
         elif msg_type == "idle_timeout_release":
             # Informational from peer. Log only; no state change required on this side.
             logger.info("Peer sent idle_timeout_release (informational)")
@@ -2008,7 +2023,14 @@ class MainWindow(QMainWindow):
         """
         Peer sent a force_release notification. If this machine is CAPTURING,
         return to CONNECTED cleanly (peer is no longer receiving).
+
+        Set _user_initiated_disconnect so that if the peer also closes the
+        socket immediately after force_release, the transport-closed callback
+        on this side treats it as user-initiated and skips the reconnect path.
+        Force-release is user-initiated from the perspective of the network --
+        neither side should try to reconnect after a force-release.
         """
+        self._user_initiated_disconnect = True
         state = self._state_ctrl.state
         if state == SwitchState.CAPTURING:
             self._event_capture.set_active(False)
