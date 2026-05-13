@@ -35,7 +35,7 @@ import logging
 import time
 import pyautogui
 
-from PyQt6.QtCore import Qt, QTimer, QSize
+from PyQt6.QtCore import QObject, Qt, QTimer, QSize, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QPen
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -72,6 +72,22 @@ _NO_POSITION: float = 0.5
 def _ts() -> str:
     """Return a short timestamp string for log lines."""
     return datetime.datetime.now().strftime("%H:%M:%S")
+
+
+class _MainSignals(QObject):
+    """
+    Qt signal carrier for MainWindow's capture-thread callbacks.
+
+    Lives on the main thread so signals cross the thread boundary safely via
+    Qt's queued connection mechanism. All callbacks from non-Qt threads must go
+    through these signals -- never call Qt widgets directly from a non-Qt thread.
+
+    Matches the _TransportSignals pattern in transport/socket_io.py.
+    """
+
+    # Emitted by the capture thread when edge dwell completes.
+    # Args: sender_edge (str), perp (float).
+    edge_dwell_fired = pyqtSignal(str, float)
 
 
 class _Canvas(QFrame):
@@ -621,6 +637,12 @@ class MainWindow(QMainWindow):
         self._injector = MouseInjector()
         self._peer_info: dict | None = None  # last received hello payload from peer
 
+        # Signal bridge: capture-thread -> Qt main thread.
+        # Must be created on the main thread (here in __init__) so Qt assigns it
+        # to the main thread's event loop. Matches the _TransportSignals pattern.
+        self._main_signals = _MainSignals()
+        self._main_signals.edge_dwell_fired.connect(self._on_edge_dwell_fired)
+
         # Whether OS cursor injection is currently active on this machine.
         # Controlled by the Inject checkbox; only meaningful in RECEIVING state.
         self._injection_enabled: bool = False
@@ -677,16 +699,10 @@ class MainWindow(QMainWindow):
             self._on_peer_edge_changed
         )
 
-        # Wire edge-dwell callback from DeltaCapture to main thread.
-        # The capture loop runs in a background thread, so the callback must be
-        # safe to call from a non-Qt thread. We use a Qt signal to cross the boundary.
-        # Since QObject.emit is not available here directly, we store the callback
-        # via a thread-safe queue and drain it on the poll timer tick.
-        # Simpler approach: use a QTimer single-shot with 0 ms delay posted from the
-        # callback thread -- but that requires access to QTimer from a non-Qt thread.
-        # Safest approach: the callback sets a threading.Event and the poll timer
-        # checks it. We pass a lambda that calls QTimer.singleShot(0, ...) instead,
-        # which IS safe to call from any thread in PyQt6.
+        # Wire edge-dwell callback from DeltaCapture to the Qt main thread.
+        # _schedule_handoff_fire is called on the capture background thread; it emits
+        # _main_signals.edge_dwell_fired which is delivered to _on_edge_dwell_fired on
+        # the main thread via Qt's queued connection (see _MainSignals above).
         self._capture.set_edge_dwell_callback(self._schedule_handoff_fire)
 
         # Splitter lets the user resize the log panel vertically.
@@ -1012,11 +1028,14 @@ class MainWindow(QMainWindow):
         """
         Called from the DeltaCapture background thread when edge dwell completes.
 
-        PyQt6 allows QTimer.singleShot() to be called from non-Qt threads; it
-        posts the callback to the main event loop safely. This is the thread-
-        crossing bridge between the capture thread and the Qt main thread.
+        Bridges the capture thread to the Qt main thread via pyqtSignal (queued connection).
         """
-        QTimer.singleShot(0, lambda: self._on_edge_dwell_fired(sender_edge, perp))
+        logger.info(
+            "Edge dwell callback received on capture thread: edge=%s perp=%.3f",
+            sender_edge,
+            perp,
+        )
+        self._main_signals.edge_dwell_fired.emit(sender_edge, perp)
 
     def _on_edge_dwell_fired(self, sender_edge: str, perp: float) -> None:
         """
