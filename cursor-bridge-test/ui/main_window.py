@@ -44,7 +44,7 @@ import time
 import pyautogui
 
 from PyQt6.QtCore import QObject, QSettings, Qt, QTimer, QSize, pyqtSignal
-from PyQt6.QtGui import QColor, QPainter, QPen
+from PyQt6.QtGui import QColor, QFont, QPainter, QPen
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -780,6 +780,26 @@ class MainWindow(QMainWindow):
         self._canvas = _Canvas()
         self._log_panel = _LogPanel()
 
+        # --- DPI diagnostic label (read-only, set once at startup) ---
+        _diag_text: str = (
+            f"Display: qt={_qt_logical_w}x{_qt_logical_h}"
+            f"  pa={_pyautogui_w}x{_pyautogui_h}"
+            f"  dpi={self._dpi_scale:.2f}"
+            f"  phys_pos={self._position_in_physical_pixels}"
+        )
+        self._dpi_diag_label = QLabel(_diag_text)
+        self._dpi_diag_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        _diag_font = QFont()
+        _diag_font.setStyleHint(QFont.StyleHint.Monospace)
+        _diag_font.setFamily("Menlo")
+        _diag_font.setPointSize(11)
+        self._dpi_diag_label.setFont(_diag_font)
+        self._dpi_diag_label.setStyleSheet(
+            "color: #909090; background-color: transparent; padding: 2px 8px;"
+        )
+
         # Wire connection buttons.
         self._conn_panel.listen_btn.clicked.connect(self._on_listen_clicked)
         self._conn_panel.connect_btn.clicked.connect(self._on_connect_clicked)
@@ -816,6 +836,7 @@ class MainWindow(QMainWindow):
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
         root_layout.addWidget(self._conn_panel)
+        root_layout.addWidget(self._dpi_diag_label)
         root_layout.addWidget(self._mirror_panel)
         root_layout.addWidget(self._status_bar)
         root_layout.addWidget(splitter)
