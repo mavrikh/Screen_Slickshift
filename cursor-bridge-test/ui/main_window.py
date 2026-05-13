@@ -43,8 +43,10 @@ import collections
 import datetime
 import logging
 import sys
+import threading
 import time
 import pyautogui
+from pynput import keyboard as _pynput_keyboard
 
 from PyQt6.QtCore import QObject, QSettings, Qt, QTimer, QSize, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QPainter, QPen
@@ -109,6 +111,10 @@ class _MainSignals(QObject):
     # Emitted by the pynput listener thread when a scroll wheel event fires.
     # Args: dx (int), dy (int).
     scroll_fired = pyqtSignal(int, int)
+
+    # Emitted by the pynput keyboard listener thread when the system-wide
+    # Ctrl+Alt+Shift+Esc combo is detected. Step 8.
+    force_release_pressed = pyqtSignal()
 
 
 class _Canvas(QFrame):
@@ -240,6 +246,7 @@ class _StatusBar(QWidget):
 
     _COLOR_DEFAULT = "#e0e0e0"
     _COLOR_TRANSITIONING = "#f08040"
+    _COLOR_RECONNECTING = "#c08040"
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -264,12 +271,18 @@ class _StatusBar(QWidget):
         role: str = "Idle",
         extra: str = "",
         transitioning: bool = False,
+        reconnecting: bool = False,
     ) -> None:
         parts = [f"Mode: {mode}", f"Cursor: ({x}, {y})", f"Role: {role}"]
         if extra:
             parts.append(extra)
         self._label.setText("  |  ".join(parts))
-        color = self._COLOR_TRANSITIONING if transitioning else self._COLOR_DEFAULT
+        if transitioning:
+            color = self._COLOR_TRANSITIONING
+        elif reconnecting:
+            color = self._COLOR_RECONNECTING
+        else:
+            color = self._COLOR_DEFAULT
         self._label.setStyleSheet(f"color: {color};")
 
 
@@ -409,6 +422,7 @@ class _ConnectionPanel(QGroupBox):
             SwitchState.CAPTURING,
             SwitchState.RECEIVING,
             SwitchState.TRANSITIONING,
+            SwitchState.RECONNECTING,
         ):
             color = self._COLOR_CONNECTED
             if peer_info is not None:
@@ -602,6 +616,11 @@ class _MirrorPanel(QGroupBox):
             self._stop_btn.setEnabled(False)
             self._inject_chk.setEnabled(False)
             self._set_role("Handing off...", self._COLOR_TRANSITIONING)
+        elif state == SwitchState.RECONNECTING:
+            self._start_btn.setEnabled(False)
+            self._stop_btn.setEnabled(False)
+            self._inject_chk.setEnabled(False)
+            self._set_role("Reconnecting...", self._COLOR_TRANSITIONING)
         else:
             # IDLE, LISTENING, CONNECTING, HANDSHAKING -- all active buttons off.
             self._start_btn.setEnabled(False)
@@ -770,6 +789,54 @@ class MainWindow(QMainWindow):
         self._handoff_ack_timer.setInterval(int(config.HANDOFF_ACK_TIMEOUT_S * 1000))
         self._handoff_ack_timer.timeout.connect(self._on_handoff_ack_timeout)
 
+        # Step 8: user-initiated disconnect flag.
+        # Set to True when the user explicitly clicks Disconnect or presses the
+        # force-release hotkey. Reset to False on each Connect/Listen attempt.
+        # When False and the transport fires a disconnected signal, the reconnect
+        # path is entered instead of going straight to IDLE.
+        self._user_initiated_disconnect: bool = False
+
+        # Step 8: flag set while a reconnect attempt is in progress and the
+        # handshake is completing. Tells _handle_hello to restore the prior role
+        # instead of staying at CONNECTED.
+        self._reconnect_restoring_role: bool = False
+
+        # Step 8: reconnect state.
+        # _reconnect_prev_role: the SwitchState at time of drop (CAPTURING or RECEIVING).
+        # _reconnect_attempt: current attempt number (1-based).
+        # _reconnect_delay_s: next delay in seconds (grows with backoff).
+        # _reconnect_host/_reconnect_port: saved peer address from QSettings at drop time.
+        self._reconnect_prev_role: SwitchState = SwitchState.IDLE
+        self._reconnect_attempt: int = 0
+        self._reconnect_delay_s: float = config.RECONNECT_INITIAL_DELAY_S
+        self._reconnect_host: str = ""
+        self._reconnect_port: int = config.DEFAULT_PORT
+
+        # Step 8: reconnect timer. Single-shot; restarted on each failed attempt.
+        # Runs on the Qt main thread so all state transitions are thread-safe.
+        self._reconnect_timer = QTimer(self)
+        self._reconnect_timer.setSingleShot(True)
+        self._reconnect_timer.timeout.connect(self._on_reconnect_attempt)
+
+        # Step 8: idle timeout in RECEIVING state.
+        # Fires every 1 s while in RECEIVING. Compares against _last_delta_received_time.
+        # Transitions RECEIVING -> CONNECTED if no delta/click/scroll arrives in
+        # IDLE_TIMEOUT_S seconds.
+        self._last_delta_received_time: float = 0.0
+        self._idle_timer = QTimer(self)
+        self._idle_timer.setInterval(1000)  # 1 s tick
+        self._idle_timer.timeout.connect(self._check_idle_timeout)
+
+        # Step 8: system-wide force-release hotkey via pynput keyboard listener.
+        # Tracks which modifier/special keys are currently held. The combo fires when
+        # Ctrl+Alt+Shift+Esc are simultaneously pressed.
+        # On macOS this requires Accessibility permission (same grant as the mouse
+        # listener). Without it the listener starts but silently receives no events;
+        # the in-window Esc handler remains a fallback in that case.
+        self._kb_pressed_keys: set[_pynput_keyboard.Key | _pynput_keyboard.KeyCode] = set()
+        self._kb_pressed_keys_lock = threading.Lock()
+        self._kb_listener: _pynput_keyboard.Listener | None = None
+
         # Wire transport signals to main-thread handlers.
         self._transport.register_connected_callback(self._on_transport_connected)
         self._transport.register_disconnected_callback(self._on_transport_disconnected)
@@ -879,9 +946,15 @@ class MainWindow(QMainWindow):
         self._dead_man_timer.setInterval(500)
         self._dead_man_timer.timeout.connect(self._check_dead_man)
 
-        # Start the pynput listener. It runs for the full window lifetime and is
+        # Wire force-release hotkey signal (Step 8).
+        self._main_signals.force_release_pressed.connect(self._on_system_force_release)
+
+        # Start the pynput mouse listener. It runs for the full window lifetime and is
         # gated off until set_active(True) is called on CAPTURING entry.
         self._event_capture.start()
+
+        # Start the system-wide keyboard listener for Ctrl+Alt+Shift+Esc (Step 8).
+        self._start_kb_listener()
 
         logger.info(
             "MainWindow initialized. Screen (pyautogui): %dx%d  dpi_scale=%.2f. Polling at %dms.",
@@ -912,7 +985,11 @@ class MainWindow(QMainWindow):
         role = self._role_label_for_state(state)
         extra = self._extra_status_for_state(state)
         transitioning = (state == SwitchState.TRANSITIONING)
-        self._status_bar.update_status(mode, x, y, role=role, extra=extra, transitioning=transitioning)
+        reconnecting = (state == SwitchState.RECONNECTING)
+        self._status_bar.update_status(
+            mode, x, y, role=role, extra=extra,
+            transitioning=transitioning, reconnecting=reconnecting,
+        )
 
     def _role_label_for_state(self, state: SwitchState) -> str:
         dpi_str = f"{self._dpi_scale:.2f}"
@@ -920,6 +997,9 @@ class MainWindow(QMainWindow):
             return f"Sender | DPI: {dpi_str}"
         if state == SwitchState.TRANSITIONING:
             return "Handing off..."
+        if state == SwitchState.RECONNECTING:
+            attempt = self._reconnect_attempt
+            return f"Reconnecting ({attempt}/{config.RECONNECT_MAX_ATTEMPTS})..."
         if state == SwitchState.RECEIVING and self._injection_enabled:
             return f"Receiver (injecting) | DPI: {dpi_str}"
         if state == SwitchState.RECEIVING:
@@ -954,6 +1034,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_listen_clicked(self) -> None:
+        self._user_initiated_disconnect = False
         self._peer_info = None
         self._state_ctrl.begin_listening()
         self._conn_panel.on_state_changed(SwitchState.LISTENING)
@@ -968,6 +1049,7 @@ class MainWindow(QMainWindow):
             return
         # Persist the address for next launch (silent, no UI prompt).
         self._settings.setValue("last_peer_address", self._conn_panel.address_text())
+        self._user_initiated_disconnect = False
         self._peer_info = None
         self._state_ctrl.begin_connecting()
         self._conn_panel.on_state_changed(SwitchState.CONNECTING)
@@ -976,6 +1058,10 @@ class MainWindow(QMainWindow):
         self._transport.connect_to_peer(host, port)
 
     def _on_disconnect_clicked(self) -> None:
+        self._user_initiated_disconnect = True
+        # Cancel any in-flight reconnect loop (Step 8).
+        self._reconnect_timer.stop()
+        self._idle_timer.stop()
         self._dead_man_timer.stop()
         self._handoff_ack_timer.stop()  # Step 6: cancel any in-flight handoff
         self._event_capture.set_active(False)
@@ -983,7 +1069,10 @@ class MainWindow(QMainWindow):
         self._canvas.set_local_dimmed(False)
         self._canvas.hide_remote()
         self._transport.close()
-        self._state_ctrl.force_release()
+        if self._state_ctrl.state == SwitchState.RECONNECTING:
+            self._state_ctrl.reconnect_canceled()
+        else:
+            self._state_ctrl.force_release()
         self._peer_info = None
         self._conn_panel.on_state_changed(SwitchState.IDLE)
         self._mirror_panel.on_state_changed(SwitchState.IDLE)
@@ -1064,19 +1153,85 @@ class MainWindow(QMainWindow):
 
         Step 6: if we were mid-handoff (TRANSITIONING), cancel the ack timer and
         restore the canvas before transitioning to IDLE. No stuck state remains.
+
+        Step 8: if the drop was NOT user-initiated and we were in an active mirroring
+        role (CAPTURING, RECEIVING, TRANSITIONING), enter the auto-reconnect path
+        instead of going directly to IDLE.
         """
         self._dead_man_timer.stop()
-        # Cancel any in-flight handoff ack timer -- the peer is gone.
         self._handoff_ack_timer.stop()
+        self._idle_timer.stop()
         self._event_capture.set_active(False)
         self._stop_capture_if_running()
         self._canvas.set_local_dimmed(False)
         self._canvas.hide_remote()
-        self._state_ctrl.connection_lost(reason)
-        self._peer_info = None
-        self._conn_panel.on_state_changed(SwitchState.IDLE, peer_info=None)
-        self._mirror_panel.on_state_changed(SwitchState.IDLE)
-        self._append_log(f"Connection lost: {reason}")
+
+        prev_state = self._state_ctrl.state
+
+        # Determine whether to attempt auto-reconnect.
+        # Active mirroring states where reconnect makes sense.
+        _reconnect_eligible: frozenset[SwitchState] = frozenset({
+            SwitchState.CAPTURING,
+            SwitchState.RECEIVING,
+            SwitchState.TRANSITIONING,
+        })
+        should_reconnect = (
+            not self._user_initiated_disconnect
+            and prev_state in _reconnect_eligible
+        )
+
+        if should_reconnect:
+            # Save the role at time of drop. TRANSITIONING collapses to CAPTURING
+            # because the handoff did not complete.
+            if prev_state == SwitchState.TRANSITIONING:
+                self._reconnect_prev_role = SwitchState.CAPTURING
+            else:
+                self._reconnect_prev_role = prev_state
+
+            # Read the last known peer address from QSettings.
+            saved_addr: str = self._settings.value("last_peer_address", "", type=str)
+            if saved_addr and ":" in saved_addr:
+                parts = saved_addr.rsplit(":", 1)
+                self._reconnect_host = parts[0].strip()
+                try:
+                    self._reconnect_port = int(parts[1].strip())
+                except ValueError:
+                    self._reconnect_port = config.DEFAULT_PORT
+            elif saved_addr:
+                self._reconnect_host = saved_addr
+                self._reconnect_port = config.DEFAULT_PORT
+            else:
+                # No saved address -- cannot reconnect. Fall through to IDLE.
+                should_reconnect = False
+
+        if should_reconnect:
+            # Initialize backoff state.
+            self._reconnect_attempt = 0
+            self._reconnect_delay_s = config.RECONNECT_INITIAL_DELAY_S
+
+            # Use begin_reconnect to transition to RECONNECTING (not IDLE).
+            self._state_ctrl.begin_reconnect(self._reconnect_prev_role)
+
+            self._conn_panel.on_state_changed(SwitchState.RECONNECTING, peer_info=None)
+            self._mirror_panel.on_state_changed(SwitchState.RECONNECTING)
+
+            self._append_log(
+                f"Connection lost ({reason}). "
+                f"Attempting reconnect in {self._reconnect_delay_s:.1f}s..."
+            )
+            logger.info(
+                "Connection lost (%s) -- scheduling reconnect in %.1fs",
+                reason,
+                self._reconnect_delay_s,
+            )
+            self._reconnect_timer.setInterval(int(self._reconnect_delay_s * 1000))
+            self._reconnect_timer.start()
+        else:
+            self._state_ctrl.connection_lost(reason)
+            self._peer_info = None
+            self._conn_panel.on_state_changed(SwitchState.IDLE, peer_info=None)
+            self._mirror_panel.on_state_changed(SwitchState.IDLE)
+            self._append_log(f"Connection lost: {reason}")
 
     def _on_message_received(self, message: dict) -> None:
         """Dispatch incoming messages by type."""
@@ -1098,6 +1253,13 @@ class MainWindow(QMainWindow):
             self._handle_click_message(message)
         elif msg_type == "scroll":
             self._handle_scroll_message(message)
+        elif msg_type == "force_release":
+            # Peer force-released. If we are CAPTURING, return to CONNECTED cleanly.
+            logger.info("Peer sent force_release -- returning to CONNECTED")
+            self._handle_peer_force_release()
+        elif msg_type == "idle_timeout_release":
+            # Informational from peer. Log only; no state change required on this side.
+            logger.info("Peer sent idle_timeout_release (informational)")
         else:
             logger.debug("Unknown message type: %r", msg_type)
 
@@ -1109,6 +1271,9 @@ class MainWindow(QMainWindow):
         """
         Process the peer's hello payload. Transition to CONNECTED and display
         peer info in the connection panel and log.
+
+        Step 8: if _reconnect_restoring_role is set, this is a successful reconnect.
+        Restore the prior role after transitioning to CONNECTED.
         """
         self._peer_info = payload
         name = payload.get("machine_name", "unknown")
@@ -1117,35 +1282,76 @@ class MainWindow(QMainWindow):
         pw, ph = payload.get("screen_physical", [0, 0])
         dpi = payload.get("dpi_scale", 1.0)
 
-        self._state_ctrl.handshake_complete()
+        restoring = self._reconnect_restoring_role
+        self._reconnect_restoring_role = False
+
+        if restoring:
+            # Reconnect succeeded: RECONNECTING -> CONNECTED via state controller.
+            self._state_ctrl.reconnect_succeeded()
+        else:
+            self._state_ctrl.handshake_complete()
+
         self._conn_panel.on_state_changed(SwitchState.CONNECTED, peer_info=payload)
         self._mirror_panel.on_state_changed(SwitchState.CONNECTED)
         self._append_log(
             f"Received hello from peer: {name} ({plat})"
         )
-        # Step 7: log the peer's full display configuration so Master can confirm
-        # what pyautogui is reporting on each machine side by side.
+        # Step 7: log the peer's full display configuration.
         self._append_log(
             f"Peer screen: logical {lw}x{lh}, physical {pw}x{ph}, dpi={dpi}"
         )
-        self._append_log("Connection established")
+
+        if restoring:
+            self._append_log(
+                f"Reconnect succeeded. Restoring role: {self._reconnect_prev_role.value.upper()}"
+            )
+            logger.info(
+                "Reconnect succeeded -- restoring role %s",
+                self._reconnect_prev_role.value.upper(),
+            )
+            # Wire the dead-man timer back (it was started by _on_transport_connected
+            # via connection_established -> HANDSHAKING -> dead_man_timer.start()).
+            # Restore role.
+            if self._reconnect_prev_role == SwitchState.CAPTURING:
+                # Re-send mirror_start to peer so it enters RECEIVING, then go CAPTURING.
+                self._transport.send({"type": "mirror_start"})
+                edge = self._mirror_panel.selected_edge()
+                self._capture.set_peer_edge(edge)
+                self._state_ctrl.start_mirroring()
+                self._capture.start(self._transport.enqueue_delta)
+                self._event_capture.set_active(True)
+                self._conn_panel.on_state_changed(SwitchState.CAPTURING, peer_info=self._peer_info)
+                self._mirror_panel.on_state_changed(SwitchState.CAPTURING)
+                self._append_log("Role restored: this machine is now the Sender again")
+            else:
+                # Was RECEIVING: peer will re-send mirror_start when it restores its
+                # CAPTURING role. No action needed here; we wait for mirror_start.
+                self._append_log(
+                    "Role was RECEIVING -- waiting for peer to re-send mirror_start"
+                )
+        else:
+            self._append_log("Connection established")
 
     def _handle_mirror_start(self) -> None:
         """
         Peer is starting to send deltas. Enter RECEIVING state.
         Reset receiver delta counters and the canvas green square.
+        Step 8: reset idle timer on RECEIVING entry.
         """
         self._state_ctrl.mirror_start_received()
         self._deltas_received = 0
         self._delta_timestamps.clear()
         self._last_sample_log_time = time.monotonic()
+        self._last_delta_received_time = time.monotonic()
         self._canvas.reset_remote_position()
         self._conn_panel.on_state_changed(SwitchState.RECEIVING, peer_info=self._peer_info)
         self._mirror_panel.on_state_changed(SwitchState.RECEIVING)
+        self._idle_timer.start()
         self._append_log("Peer started mirroring -- this machine is now the Receiver")
 
     def _handle_mirror_stop(self) -> None:
         """Peer stopped sending deltas. Return to CONNECTED state."""
+        self._idle_timer.stop()
         self._state_ctrl.mirror_stop_received()
         self._canvas.hide_remote()
         self._conn_panel.on_state_changed(SwitchState.CONNECTED, peer_info=self._peer_info)
@@ -1169,6 +1375,7 @@ class MainWindow(QMainWindow):
 
         self._deltas_received += 1
         self._delta_timestamps.append(time.monotonic())
+        self._last_delta_received_time = time.monotonic()
         self._last_ndx = ndx
         self._last_ndy = ndy
         self._last_seq = seq
@@ -1289,6 +1496,9 @@ class MainWindow(QMainWindow):
             )
             return
 
+        # Leaving RECEIVING -- stop the idle timer (Step 8).
+        self._idle_timer.stop()
+
         perp: float = float(payload.get("perp", 0.5))
         sender_edge: str = payload.get("sender_edge", "right")
 
@@ -1391,11 +1601,13 @@ class MainWindow(QMainWindow):
         self._deltas_received = 0
         self._delta_timestamps.clear()
         self._last_sample_log_time = time.monotonic()
+        self._last_delta_received_time = time.monotonic()
         self._canvas.reset_remote_position()
 
         # Update panels.
         self._conn_panel.on_state_changed(SwitchState.RECEIVING, peer_info=self._peer_info)
         self._mirror_panel.on_state_changed(SwitchState.RECEIVING)
+        self._idle_timer.start()
         self._append_log("Handoff complete -- this machine is now the Receiver")
         logger.info("Handoff complete -- transitioned to RECEIVING")
 
@@ -1457,9 +1669,11 @@ class MainWindow(QMainWindow):
         Inject a click event received from the sender.
 
         Only acts if RECEIVING and injection is enabled -- same gate as delta injection.
+        Step 8: reset the idle timeout on every received click.
         """
         if self._state_ctrl.state != SwitchState.RECEIVING or not self._injection_enabled:
             return
+        self._last_delta_received_time = time.monotonic()
         button: str = message.get("button", "left")
         pressed: bool = bool(message.get("pressed", True))
         logger.debug("Injecting click: button=%s pressed=%s", button, pressed)
@@ -1470,9 +1684,11 @@ class MainWindow(QMainWindow):
         Inject a scroll event received from the sender.
 
         Only acts if RECEIVING and injection is enabled.
+        Step 8: reset the idle timeout on every received scroll.
         """
         if self._state_ctrl.state != SwitchState.RECEIVING or not self._injection_enabled:
             return
+        self._last_delta_received_time = time.monotonic()
         dx: int = int(message.get("dx", 0))
         dy: int = int(message.get("dy", 0))
         logger.debug("Injecting scroll: dx=%d dy=%d", dx, dy)
@@ -1544,17 +1760,22 @@ class MainWindow(QMainWindow):
         self._mirror_panel.set_role_injecting(False)
         self._append_log(
             "Force-released injection (Esc pressed). "
-            f"Canvas mirroring continues. System-wide hotkey ({config.HANDOFF_HOTKEY_RELEASE}) lands in Step 7."
+            "Canvas mirroring continues. "
+            f"For a full disconnect use the system-wide hotkey ({config.HANDOFF_HOTKEY_RELEASE})."
         )
         logger.info("Injection force-released via Esc")
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         """
-        Stop the pynput listener thread cleanly before the window closes.
+        Stop pynput listener threads cleanly before the window closes.
 
         pynput's Listener.stop() + join() must be called explicitly; the daemon
         thread alone is not a safe cleanup path on all platforms.
+        Step 8: also stop the keyboard listener and cancel any in-flight reconnect.
         """
+        self._reconnect_timer.stop()
+        self._idle_timer.stop()
+        self._stop_kb_listener()
         self._event_capture.stop()
         super().closeEvent(event)
 
@@ -1583,12 +1804,17 @@ class MainWindow(QMainWindow):
         Fired by StateController on every transition. Updates status bar and canvas dim.
 
         Step 6: dim the canvas red square in TRANSITIONING; restore in all other states.
+        Step 8: pass reconnecting flag to status bar for amber color.
         """
         mode = state.value.upper()
         x, y = pyautogui.position()
         role = self._role_label_for_state(state)
         transitioning = (state == SwitchState.TRANSITIONING)
-        self._status_bar.update_status(mode, x, y, role=role, transitioning=transitioning)
+        reconnecting = (state == SwitchState.RECONNECTING)
+        self._status_bar.update_status(
+            mode, x, y, role=role,
+            transitioning=transitioning, reconnecting=reconnecting,
+        )
         self._canvas.set_local_dimmed(transitioning)
 
     # ------------------------------------------------------------------
@@ -1621,6 +1847,310 @@ class MainWindow(QMainWindow):
             self._transport.handle_disconnect(
                 f"heartbeat timeout (monitor, no pong for {elapsed:.1f}s)"
             )
+
+    # ------------------------------------------------------------------
+    # Step 8: system-wide force-release hotkey (pynput keyboard listener)
+    # ------------------------------------------------------------------
+
+    def _start_kb_listener(self) -> None:
+        """
+        Start the pynput keyboard listener for the system-wide force-release hotkey.
+
+        Monitors Ctrl+Alt+Shift+Esc globally. When detected, emits
+        force_release_pressed signal which is delivered to _on_system_force_release
+        on the Qt main thread.
+
+        On macOS this requires Accessibility permission (same grant as the mouse
+        listener). Without it the listener starts but silently receives no events.
+        The in-window Esc handler is the fallback in that case.
+        """
+        if self._kb_listener is not None:
+            return
+        self._kb_listener = _pynput_keyboard.Listener(
+            on_press=self._kb_on_press,
+            on_release=self._kb_on_release,
+        )
+        self._kb_listener.start()
+        logger.info(
+            "System-wide keyboard listener started (%s to force-release)",
+            config.HANDOFF_HOTKEY_RELEASE,
+        )
+
+    def _stop_kb_listener(self) -> None:
+        """Stop the keyboard listener and join its thread. Idempotent."""
+        if self._kb_listener is None:
+            return
+        self._kb_listener.stop()
+        self._kb_listener.join()
+        self._kb_listener = None
+        logger.info("System-wide keyboard listener stopped")
+
+    # The four keys that form the force-release combo.
+    _HOTKEY_MODIFIERS: frozenset[_pynput_keyboard.Key] = frozenset({
+        _pynput_keyboard.Key.ctrl,
+        _pynput_keyboard.Key.ctrl_l,
+        _pynput_keyboard.Key.ctrl_r,
+        _pynput_keyboard.Key.alt,
+        _pynput_keyboard.Key.alt_l,
+        _pynput_keyboard.Key.alt_r,
+        _pynput_keyboard.Key.shift,
+        _pynput_keyboard.Key.shift_l,
+        _pynput_keyboard.Key.shift_r,
+    })
+
+    def _kb_combo_active(self) -> bool:
+        """
+        Return True when Ctrl, Alt, Shift, and Esc are all currently pressed.
+
+        Checks against the set of pressed keys maintained by _kb_on_press and
+        _kb_on_release. Called on the pynput listener thread.
+        """
+        # Check for at least one variant of each required modifier.
+        ctrl_variants = {
+            _pynput_keyboard.Key.ctrl,
+            _pynput_keyboard.Key.ctrl_l,
+            _pynput_keyboard.Key.ctrl_r,
+        }
+        alt_variants = {
+            _pynput_keyboard.Key.alt,
+            _pynput_keyboard.Key.alt_l,
+            _pynput_keyboard.Key.alt_r,
+        }
+        shift_variants = {
+            _pynput_keyboard.Key.shift,
+            _pynput_keyboard.Key.shift_l,
+            _pynput_keyboard.Key.shift_r,
+        }
+        with self._kb_pressed_keys_lock:
+            pressed = self._kb_pressed_keys
+            has_ctrl = bool(pressed & ctrl_variants)
+            has_alt = bool(pressed & alt_variants)
+            has_shift = bool(pressed & shift_variants)
+            has_esc = _pynput_keyboard.Key.esc in pressed
+        return has_ctrl and has_alt and has_shift and has_esc
+
+    def _kb_on_press(
+        self,
+        key: _pynput_keyboard.Key | _pynput_keyboard.KeyCode | None,
+    ) -> None:
+        """Called on the pynput listener thread for every key press."""
+        if key is None:
+            return
+        with self._kb_pressed_keys_lock:
+            self._kb_pressed_keys.add(key)
+        logger.debug("KB listener: press %r", key)
+        if self._kb_combo_active():
+            logger.info("Force-release combo detected on keyboard listener thread")
+            self._main_signals.force_release_pressed.emit()
+
+    def _kb_on_release(
+        self,
+        key: _pynput_keyboard.Key | _pynput_keyboard.KeyCode | None,
+    ) -> None:
+        """Called on the pynput listener thread for every key release."""
+        if key is None:
+            return
+        with self._kb_pressed_keys_lock:
+            self._kb_pressed_keys.discard(key)
+
+    def _on_system_force_release(self) -> None:
+        """
+        Qt main thread: system-wide Ctrl+Alt+Shift+Esc was pressed.
+
+        Regardless of current state, transition to IDLE and tear down the
+        connection. Sends a force_release notification to the peer before closing
+        the transport so the peer can also return cleanly.
+
+        Defensively checks isVisible() in case the signal fires during startup
+        before the window is shown.
+        """
+        if not self.isVisible():
+            return
+
+        logger.info("Force-released via system-wide hotkey (Ctrl+Alt+Shift+Esc)")
+        self._append_log(
+            "Force-released via system-wide hotkey (Ctrl+Alt+Shift+Esc)"
+        )
+
+        # Mark as user-initiated so the disconnected signal does not trigger reconnect.
+        self._user_initiated_disconnect = True
+
+        # Cancel any in-flight reconnect or idle timer.
+        self._reconnect_timer.stop()
+        self._idle_timer.stop()
+
+        # Notify peer before closing (best effort -- fire and forget).
+        if self._state_ctrl.state not in (SwitchState.IDLE, SwitchState.RECONNECTING):
+            try:
+                self._transport.send({"type": "force_release"})
+            except Exception:
+                pass  # connection may already be dead; notification is best-effort
+
+        # Tear down.
+        self._dead_man_timer.stop()
+        self._handoff_ack_timer.stop()
+        self._event_capture.set_active(False)
+        self._stop_capture_if_running()
+        self._canvas.set_local_dimmed(False)
+        self._canvas.hide_remote()
+        self._transport.close()
+
+        if self._state_ctrl.state == SwitchState.RECONNECTING:
+            self._state_ctrl.reconnect_canceled()
+        else:
+            self._state_ctrl.force_release()
+
+        self._peer_info = None
+        self._conn_panel.on_state_changed(SwitchState.IDLE, peer_info=None)
+        self._mirror_panel.on_state_changed(SwitchState.IDLE)
+
+    def _handle_peer_force_release(self) -> None:
+        """
+        Peer sent a force_release notification. If this machine is CAPTURING,
+        return to CONNECTED cleanly (peer is no longer receiving).
+        """
+        state = self._state_ctrl.state
+        if state == SwitchState.CAPTURING:
+            self._event_capture.set_active(False)
+            self._stop_capture_if_running()
+            self._state_ctrl.stop_mirroring()
+            self._conn_panel.on_state_changed(SwitchState.CONNECTED, peer_info=self._peer_info)
+            self._mirror_panel.on_state_changed(SwitchState.CONNECTED)
+            self._append_log("Peer force-released -- returned to CONNECTED")
+        elif state == SwitchState.RECEIVING:
+            self._idle_timer.stop()
+            self._canvas.hide_remote()
+            self._state_ctrl.mirror_stop_received()
+            self._conn_panel.on_state_changed(SwitchState.CONNECTED, peer_info=self._peer_info)
+            self._mirror_panel.on_state_changed(SwitchState.CONNECTED)
+            self._append_log("Peer force-released -- returned to CONNECTED")
+
+    # ------------------------------------------------------------------
+    # Step 8: auto-reconnect timer callback
+    # ------------------------------------------------------------------
+
+    def _on_reconnect_attempt(self) -> None:
+        """
+        Qt main thread: reconnect timer fired. Attempt to reconnect to the peer.
+
+        On success the transport will emit connected -> handshake -> CONNECTED,
+        at which point _on_reconnect_connected restores the prior role.
+        On failure the disconnected signal fires again and we schedule the next attempt.
+        """
+        if self._state_ctrl.state != SwitchState.RECONNECTING:
+            return
+
+        self._reconnect_attempt += 1
+        self._append_log(
+            f"Reconnect attempt {self._reconnect_attempt}/{config.RECONNECT_MAX_ATTEMPTS}..."
+        )
+        logger.info(
+            "Reconnect attempt %d/%d to %s:%d",
+            self._reconnect_attempt,
+            config.RECONNECT_MAX_ATTEMPTS,
+            self._reconnect_host,
+            self._reconnect_port,
+        )
+
+        # The transport must be freshly constructed for each attempt because
+        # the old socket objects are in a closed state after _handle_disconnect.
+        self._transport = TcpTransport()
+        self._transport.register_connected_callback(self._on_transport_connected)
+        self._transport.register_disconnected_callback(self._on_reconnect_disconnected)
+        self._transport.register_message_callback(self._on_message_received)
+
+        # Signal _handle_hello to restore the prior role after handshake completes.
+        self._reconnect_restoring_role = True
+
+        self._transport.connect_to_peer(self._reconnect_host, self._reconnect_port)
+
+    def _on_reconnect_disconnected(self, reason: str) -> None:
+        """
+        Qt main thread: a reconnect attempt failed (connect or handshake error).
+
+        Schedule the next attempt with backoff, or give up after max attempts.
+        """
+        if self._state_ctrl.state != SwitchState.RECONNECTING:
+            return
+        self._reconnect_restoring_role = False
+
+        logger.info(
+            "Reconnect attempt %d/%d failed: %s",
+            self._reconnect_attempt,
+            config.RECONNECT_MAX_ATTEMPTS,
+            reason,
+        )
+        self._append_log(
+            f"Reconnect attempt {self._reconnect_attempt}/{config.RECONNECT_MAX_ATTEMPTS} "
+            f"failed: {reason}"
+        )
+
+        if self._reconnect_attempt >= config.RECONNECT_MAX_ATTEMPTS:
+            logger.info(
+                "Reconnect exhausted after %d attempts -- returning to IDLE",
+                config.RECONNECT_MAX_ATTEMPTS,
+            )
+            self._append_log(
+                f"Reconnect exhausted after {config.RECONNECT_MAX_ATTEMPTS} attempts. "
+                "Returning to IDLE."
+            )
+            self._state_ctrl.reconnect_failed_finally()
+            self._peer_info = None
+            self._conn_panel.on_state_changed(SwitchState.IDLE, peer_info=None)
+            self._mirror_panel.on_state_changed(SwitchState.IDLE)
+            return
+
+        # Compute next delay with exponential backoff, capped at max.
+        self._reconnect_delay_s = min(
+            self._reconnect_delay_s * config.RECONNECT_BACKOFF_FACTOR,
+            config.RECONNECT_MAX_DELAY_S,
+        )
+        self._append_log(
+            f"Reconnecting (attempt {self._reconnect_attempt + 1}/"
+            f"{config.RECONNECT_MAX_ATTEMPTS}) in {self._reconnect_delay_s:.1f}s..."
+        )
+        logger.info("Next reconnect in %.1fs", self._reconnect_delay_s)
+        self._reconnect_timer.setInterval(int(self._reconnect_delay_s * 1000))
+        self._reconnect_timer.start()
+
+    # ------------------------------------------------------------------
+    # Step 8: idle timeout in RECEIVING state
+    # ------------------------------------------------------------------
+
+    def _check_idle_timeout(self) -> None:
+        """
+        Called every 1 s by _idle_timer when in RECEIVING state.
+
+        If no delta, click, or scroll has arrived in IDLE_TIMEOUT_S seconds,
+        transition RECEIVING -> CONNECTED and inform the peer.
+        """
+        if self._state_ctrl.state != SwitchState.RECEIVING:
+            self._idle_timer.stop()
+            return
+
+        elapsed = time.monotonic() - self._last_delta_received_time
+        if elapsed >= config.IDLE_TIMEOUT_S:
+            logger.info(
+                "Idle timeout (%.1fs without input). Returning control to local machine.",
+                config.IDLE_TIMEOUT_S,
+            )
+            self._append_log(
+                f"Idle timeout ({config.IDLE_TIMEOUT_S:.1f}s without input). "
+                "Returning control to local machine."
+            )
+            self._idle_timer.stop()
+
+            # Inform peer (best effort -- peer may or may not act on this).
+            try:
+                self._transport.send({"type": "idle_timeout_release"})
+            except Exception:
+                pass
+
+            # Transition RECEIVING -> CONNECTED.
+            self._canvas.hide_remote()
+            self._state_ctrl.mirror_stop_received()
+            self._conn_panel.on_state_changed(SwitchState.CONNECTED, peer_info=self._peer_info)
+            self._mirror_panel.on_state_changed(SwitchState.CONNECTED)
 
     # ------------------------------------------------------------------
     # Log panel

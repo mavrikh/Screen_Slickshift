@@ -59,3 +59,12 @@ DELTA_RATE_WINDOW_S: float = 0.5
 
 # How often (seconds) the receiver logs a sample of the most recent delta.
 DELTA_SAMPLE_LOG_INTERVAL_S: float = 1.0
+
+# Step 8: auto-reconnect on remote-initiated drop.
+RECONNECT_INITIAL_DELAY_S: float = 1.0
+RECONNECT_BACKOFF_FACTOR: float = 2.0
+RECONNECT_MAX_DELAY_S: float = 30.0
+RECONNECT_MAX_ATTEMPTS: int = 5
+
+# Step 8: idle timeout when receiving with no input.
+IDLE_TIMEOUT_S: float = 60.0

@@ -7,7 +7,7 @@ state until the peer ACKs that it has entered CAPTURING state. On timeout, the
 host rolls back to IDLE. This prevents double-cursor chaos and cursor-trap failure
 modes described in brainstorm doc Section 3J.
 
-State diagram (Step 6 -- edge-based handoff added):
+State diagram (Step 8 -- failsafes added):
 
     IDLE ──listen()──> LISTENING ──inbound connection──> HANDSHAKING
     IDLE ──connect()──> CONNECTING ──TCP connected──> HANDSHAKING
@@ -20,6 +20,9 @@ State diagram (Step 6 -- edge-based handoff added):
     RECEIVING ──handoff_request received──> CAPTURING (new sender, via handoff)
     CAPTURING ──stop_mirroring()──> CONNECTED
     RECEIVING ──mirror_stop_received()──> CONNECTED
+    CAPTURING/RECEIVING ──remote drop──> RECONNECTING
+    RECONNECTING ──reconnect succeeded──> CONNECTED
+    RECONNECTING ──max attempts / user cancel──> IDLE
     any active ──force_release() / disconnect──> IDLE
 """
 
@@ -62,8 +65,11 @@ class SwitchState(enum.Enum):
     RECEIVING = "receiving"
 
     # Briefly indeterminate during handoff negotiation. ACK not yet received.
-    # NOT YET REACHABLE -- wired in Step 6.
     TRANSITIONING = "transitioning"
+
+    # Attempting automatic reconnect after a remote-initiated drop.
+    # Not entered on user-initiated disconnects. Step 8.
+    RECONNECTING = "reconnecting"
 
 
 class StateController:
@@ -295,4 +301,68 @@ class StateController:
         Dead-man switch: architecture invariant #4 in Slickshift CLAUDE.md.
         """
         logger.info("Heartbeat timeout -- dead-man switch fired, returning to IDLE")
+        self._transition(SwitchState.IDLE)
+
+    # ------------------------------------------------------------------
+    # Step 8 transitions -- auto-reconnect
+    # ------------------------------------------------------------------
+
+    def begin_reconnect(self, prev_role: SwitchState) -> None:
+        """
+        Enter RECONNECTING after a remote-initiated drop.
+
+        prev_role is the state at time of drop (CAPTURING or RECEIVING) so the
+        reconnect loop can restore the role on success. Only valid from CAPTURING
+        or RECEIVING (including TRANSITIONING, which collapses to CAPTURING).
+
+        Called by MainWindow._on_transport_disconnected when _user_initiated_disconnect
+        is False.
+        """
+        logger.info(
+            "Remote-initiated drop from %s -- entering RECONNECTING", prev_role.value.upper()
+        )
+        self._transition(SwitchState.RECONNECTING)
+
+    def reconnect_succeeded(self) -> None:
+        """
+        TCP link restored and handshake completed. Transition RECONNECTING -> CONNECTED.
+
+        Role restoration (CAPTURING or RECEIVING) happens in MainWindow after this
+        transition fires, matching the normal connect path.
+
+        Only valid from RECONNECTING state.
+        """
+        if self._state != SwitchState.RECONNECTING:
+            logger.warning(
+                "reconnect_succeeded() called in state %s -- ignored", self._state.value
+            )
+            return
+        self._transition(SwitchState.CONNECTED)
+
+    def reconnect_failed_finally(self) -> None:
+        """
+        All reconnect attempts exhausted. Return to IDLE.
+
+        Only valid from RECONNECTING state.
+        """
+        if self._state != SwitchState.RECONNECTING:
+            logger.warning(
+                "reconnect_failed_finally() called in state %s -- ignored", self._state.value
+            )
+            return
+        logger.info("Reconnect exhausted -- returning to IDLE")
+        self._transition(SwitchState.IDLE)
+
+    def reconnect_canceled(self) -> None:
+        """
+        User canceled the reconnect loop (Disconnect button or force-release hotkey).
+
+        Only valid from RECONNECTING state.
+        """
+        if self._state != SwitchState.RECONNECTING:
+            logger.warning(
+                "reconnect_canceled() called in state %s -- ignored", self._state.value
+            )
+            return
+        logger.info("Reconnect canceled by user -- returning to IDLE")
         self._transition(SwitchState.IDLE)
