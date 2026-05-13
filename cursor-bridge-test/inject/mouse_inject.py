@@ -20,6 +20,12 @@ is on, the pixel delta is multiplied by dpi_scale after scaling so that the OS c
 receives the unit the platform expects (physical pixels on systems where pyautogui
 returns physical values from size(), logical otherwise). The sender already corrected
 to logical space, so the receiver multiplies back out to match its own platform units.
+
+Step 8 (DPI asymmetry fix): move_absolute also accepts position_in_physical_pixels.
+On Windows with PyQt6 DPI awareness, pyautogui.moveTo() expects physical pixel
+coordinates while screen_w/screen_h from pyautogui.size() are logical. Multiplying
+by dpi_scale converts the normalized target into physical pixels. On macOS, moveTo
+expects logical pixels, so no multiplication is needed.
 """
 
 from __future__ import annotations
@@ -149,6 +155,8 @@ class MouseInjector:
         ny: float,
         screen_w: int,
         screen_h: int,
+        dpi_scale: float = 1.0,
+        position_in_physical_pixels: bool = False,
     ) -> None:
         """
         Warp the cursor to a normalized absolute position.
@@ -156,10 +164,23 @@ class MouseInjector:
         Used at handoff entry (Step 6) to anchor the secondary cursor at the
         corresponding edge position. nx, ny are in range 0.0-1.0 relative to
         the receiver's logical screen.
+
+        When position_in_physical_pixels is True (Windows with PyQt6 DPI awareness),
+        pyautogui.moveTo expects physical pixel coordinates while screen_w/screen_h
+        are logical. Multiply by dpi_scale to produce the correct physical target.
+        On macOS, moveTo operates in logical pixels, so no multiplication is needed.
         """
-        x_px = int(nx * screen_w)
-        y_px = int(ny * screen_h)
-        logger.debug("inject move_absolute: nx=%.4f ny=%.4f -> x=%d y=%d", nx, ny, x_px, y_px)
+        if position_in_physical_pixels and dpi_scale != 1.0:
+            x_px = int(nx * screen_w * dpi_scale)
+            y_px = int(ny * screen_h * dpi_scale)
+            logger.debug(
+                "inject move_absolute (physical): nx=%.4f ny=%.4f scale=%.2f -> x=%d y=%d",
+                nx, ny, dpi_scale, x_px, y_px,
+            )
+        else:
+            x_px = int(nx * screen_w)
+            y_px = int(ny * screen_h)
+            logger.debug("inject move_absolute: nx=%.4f ny=%.4f -> x=%d y=%d", nx, ny, x_px, y_px)
         pyautogui.moveTo(x_px, y_px, duration=0)
 
     def click(self, button: str = "left") -> None:

@@ -25,6 +25,16 @@ Step 7 additions:
   returns physical or logical values on this platform.
 - set_dpi_correction_enabled(bool) toggles the correction at runtime for A/B testing.
 
+Step 8 (DPI asymmetry fix) additions:
+- position_in_physical_pixels: on Windows with PyQt6 DPI awareness active,
+  pyautogui.position() returns physical pixels but pyautogui.size() returns logical.
+  This flag is detected at MainWindow startup and passed in here.
+  When True, effective screen dimensions are screen_w * dpi_scale and screen_h *
+  dpi_scale. All position comparisons and normalizations use these effective dims so
+  edge detection fires at the real screen edge, not two-thirds across.
+  On macOS and Linux, pyautogui is consistent (both logical), so effective dims
+  equal the logical dims and no multiplication is needed.
+
 Design decisions vs. brainstorm doc (Section 3A):
 - pyautogui.position() is a passive poll, not a CGEventTap event callback.
   Local cursor delivery is NOT suppressed while CAPTURING. That is Step 7+.
@@ -58,37 +68,43 @@ EdgeDwellCallback = Callable[[str, float], None]
 VALID_EDGES: frozenset[str] = frozenset({"right", "left", "top", "bottom"})
 
 
-def _compute_perp(edge: str, x: int, y: int, screen_w: int, screen_h: int) -> float:
+def _compute_perp(edge: str, x: int, y: int, eff_w: int, eff_h: int) -> float:
     """
     Compute the normalized perpendicular coordinate at a given edge.
 
-    For left/right edges the perpendicular axis is Y: return y / screen_h.
-    For top/bottom edges the perpendicular axis is X: return x / screen_w.
-    Clamped to [0.0, 1.0].
+    For left/right edges the perpendicular axis is Y: return y / eff_h.
+    For top/bottom edges the perpendicular axis is X: return x / eff_w.
+    eff_w and eff_h must be the effective screen dimensions that match the
+    unit pyautogui.position() returns on this platform (physical on Windows
+    DPI-aware mode, logical otherwise). Clamped to [0.0, 1.0].
     """
     if edge in ("left", "right"):
-        return max(0.0, min(1.0, y / screen_h))
-    return max(0.0, min(1.0, x / screen_w))
+        return max(0.0, min(1.0, y / eff_h))
+    return max(0.0, min(1.0, x / eff_w))
 
 
-def _in_edge_band(edge: str, x: int, y: int, screen_w: int, screen_h: int) -> bool:
+def _in_edge_band(edge: str, x: int, y: int, eff_w: int, eff_h: int) -> bool:
     """
     Return True if (x, y) is within EDGE_BAND_PX of the named edge boundary.
 
     "left"   -- x <= EDGE_BAND_PX - 1
-    "right"  -- x >= screen_w - EDGE_BAND_PX
+    "right"  -- x >= eff_w - EDGE_BAND_PX
     "top"    -- y <= EDGE_BAND_PX - 1
-    "bottom" -- y >= screen_h - EDGE_BAND_PX
+    "bottom" -- y >= eff_h - EDGE_BAND_PX
+
+    eff_w and eff_h must be the effective screen dimensions that match the
+    unit pyautogui.position() returns on this platform (physical on Windows
+    DPI-aware mode, logical otherwise).
     """
     band = config.EDGE_BAND_PX
     if edge == "left":
         return x < band
     if edge == "right":
-        return x >= screen_w - band
+        return x >= eff_w - band
     if edge == "top":
         return y < band
     if edge == "bottom":
-        return y >= screen_h - band
+        return y >= eff_h - band
     return False
 
 
@@ -99,7 +115,7 @@ class DeltaCapture:
     cursor holds at the configured peer edge long enough.
 
     Lifecycle:
-        capture = DeltaCapture(screen_w, screen_h, dpi_scale)
+        capture = DeltaCapture(screen_w, screen_h, dpi_scale, position_in_physical_pixels)
         capture.set_peer_edge("right")          # configure before start
         capture.set_edge_dwell_callback(fn)
         capture.set_dpi_correction_enabled(True)
@@ -118,6 +134,12 @@ class DeltaCapture:
         need to import PyQt6 to query QScreen.
     dpi_scale: QScreen.devicePixelRatio() from the caller. Used to convert raw
         pyautogui pixel deltas to true logical-pixel deltas when correction is on.
+    position_in_physical_pixels: True on Windows with PyQt6 DPI awareness, where
+        pyautogui.position() returns physical pixels but pyautogui.size() returns
+        logical pixels. When True, effective screen dimensions (used for all
+        position comparisons and delta normalization) are screen_w * dpi_scale.
+        On macOS and Linux, False -- pyautogui is self-consistent and no
+        multiplication is needed.
     """
 
     def __init__(
@@ -125,6 +147,7 @@ class DeltaCapture:
         screen_w: int,
         screen_h: int,
         dpi_scale: float,
+        position_in_physical_pixels: bool = False,
     ) -> None:
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -132,6 +155,17 @@ class DeltaCapture:
         self._screen_w: int = screen_w
         self._screen_h: int = screen_h
         self._dpi_scale: float = dpi_scale
+
+        # Effective screen dimensions: physical on Windows DPI-aware, logical elsewhere.
+        # pyautogui.position() returns physical pixels on Windows with PyQt6 DPI
+        # awareness (size() stays logical), so all comparisons and normalizations
+        # must use the physical-pixel reference to correctly locate the screen edges.
+        if position_in_physical_pixels:
+            self._eff_screen_w: int = round(screen_w * dpi_scale)
+            self._eff_screen_h: int = round(screen_h * dpi_scale)
+        else:
+            self._eff_screen_w = screen_w
+            self._eff_screen_h = screen_h
 
         # Step 7: DPI correction flag. When True, raw pixel deltas are divided by
         # dpi_scale before normalization to produce true logical-pixel fractions.
@@ -156,10 +190,14 @@ class DeltaCapture:
         self._cooldown_lock = threading.Lock()
 
         logger.info(
-            "DeltaCapture initialized. Logical screen: %dx%d  dpi_scale=%.2f  dpi_correction=%s",
+            "DeltaCapture initialized. Logical screen: %dx%d  effective: %dx%d  dpi_scale=%.2f  "
+            "position_in_physical_pixels=%s  dpi_correction=%s",
             self._screen_w,
             self._screen_h,
+            self._eff_screen_w,
+            self._eff_screen_h,
             self._dpi_scale,
+            position_in_physical_pixels,
             self._dpi_correction_enabled,
         )
 
@@ -294,22 +332,18 @@ class DeltaCapture:
                         correction_on = self._dpi_correction_enabled
 
                     if correction_on and self._dpi_scale != 1.0:
-                        # pyautogui.position() may return physical pixels on HiDPI
-                        # systems (e.g., Windows with DPI awareness active) while
-                        # pyautogui.size() returns logical dimensions. Dividing the
-                        # raw physical delta by dpi_scale converts it to logical pixels,
-                        # then normalizing against the logical screen width produces a
-                        # true logical-fraction delta that is consistent across machines.
-                        logical_dx: float = dx_px / self._dpi_scale
-                        logical_dy: float = dy_px / self._dpi_scale
-                        ndx: float = logical_dx / self._screen_w
-                        ndy: float = logical_dy / self._screen_h
+                        # Normalize against the effective screen dimensions (physical on
+                        # Windows DPI-aware mode, logical elsewhere). Dividing the raw
+                        # delta by eff_screen_w produces a true screen-fraction delta
+                        # that is consistent across machines regardless of DPI mode.
+                        ndx: float = dx_px / self._eff_screen_w
+                        ndy: float = dy_px / self._eff_screen_h
                         logger.debug(
-                            "DPI-corrected delta: raw=(%d,%d) scale=%.2f logical=(%.2f,%.2f) n=(%.4f,%.4f)",
-                            dx_px, dy_px, self._dpi_scale, logical_dx, logical_dy, ndx, ndy,
+                            "DPI-corrected delta: raw=(%d,%d) eff=(%dx%d) n=(%.4f,%.4f)",
+                            dx_px, dy_px, self._eff_screen_w, self._eff_screen_h, ndx, ndy,
                         )
                     else:
-                        # Naive mode: use raw pyautogui values directly.
+                        # Naive mode: use raw pyautogui values directly against logical dims.
                         ndx = dx_px / self._screen_w
                         ndy = dy_px / self._screen_h
                         logger.debug(
@@ -345,7 +379,7 @@ class DeltaCapture:
                 continue
 
             edge = self._peer_edge
-            in_band = _in_edge_band(edge, cur_x, cur_y, self._screen_w, self._screen_h)
+            in_band = _in_edge_band(edge, cur_x, cur_y, self._eff_screen_w, self._eff_screen_h)
 
             logger.debug(
                 "Edge check: edge=%s pos=(%d,%d) in_band=%s dwell_start=%s",
@@ -358,7 +392,7 @@ class DeltaCapture:
                     logger.debug("Entered %s edge band at pos=(%d,%d)", edge, cur_x, cur_y)
                 elif now - dwell_start >= _cfg.EDGE_DWELL_S:
                     # Dwell threshold met -- fire handoff.
-                    perp = _compute_perp(edge, cur_x, cur_y, self._screen_w, self._screen_h)
+                    perp = _compute_perp(edge, cur_x, cur_y, self._eff_screen_w, self._eff_screen_h)
                     logger.info(
                         "Edge dwell complete: edge=%s perp=%.3f pos=(%d,%d)",
                         edge, perp, cur_x, cur_y,

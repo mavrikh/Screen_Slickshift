@@ -39,6 +39,7 @@ from __future__ import annotations
 import collections
 import datetime
 import logging
+import sys
 import time
 import pyautogui
 
@@ -644,6 +645,17 @@ class MainWindow(QMainWindow):
         _primary_screen = QApplication.primaryScreen()
         self._dpi_scale: float = _primary_screen.devicePixelRatio() if _primary_screen is not None else 1.0
 
+        # --- Platform DPI mode detection (Step 8 asymmetry fix) ---
+        # On Windows, PyQt6 calls SetProcessDpiAwarenessContext at QApplication init,
+        # which causes pyautogui.position() to return physical pixels while
+        # pyautogui.size() returns logical pixels. On macOS, both are logical (CoreGraphics
+        # handles HiDPI internally). This flag drives effective dimension computation
+        # throughout capture, injection, and absolute warp math.
+        if sys.platform == "win32" and self._dpi_scale != 1.0:
+            self._position_in_physical_pixels: bool = True
+        else:
+            self._position_in_physical_pixels = False
+
         # --- State, transport, capture, and injection ---
         self._state_ctrl = StateController()
         self._transport = TcpTransport()
@@ -651,7 +663,12 @@ class MainWindow(QMainWindow):
         # need to import PyQt6 itself. Values are read again from pyautogui below
         # to keep them consistent; the QScreen ratio is the authoritative scale.
         self._screen_w, self._screen_h = pyautogui.size()
-        self._capture = DeltaCapture(self._screen_w, self._screen_h, self._dpi_scale)
+        self._capture = DeltaCapture(
+            self._screen_w,
+            self._screen_h,
+            self._dpi_scale,
+            position_in_physical_pixels=self._position_in_physical_pixels,
+        )
         self._injector = MouseInjector()
         self._peer_info: dict | None = None  # last received hello payload from peer
 
@@ -765,6 +782,17 @@ class MainWindow(QMainWindow):
         self._dead_man_timer.setInterval(500)
         self._dead_man_timer.timeout.connect(self._check_dead_man)
 
+        if self._position_in_physical_pixels:
+            logger.info(
+                "Pyautogui position units: physical (Windows DPI-aware mode) -- dpi_scale=%.2f",
+                self._dpi_scale,
+            )
+        else:
+            logger.info(
+                "Pyautogui position units: logical (%s) -- dpi_scale=%.2f",
+                sys.platform,
+                self._dpi_scale,
+            )
         logger.info(
             "MainWindow initialized. Screen logical: %dx%d  dpi_scale=%.2f  dpi_correction=%s. Polling at %dms.",
             self._screen_w, self._screen_h, self._dpi_scale,
@@ -777,8 +805,12 @@ class MainWindow(QMainWindow):
 
     def _poll_cursor(self) -> None:
         x, y = pyautogui.position()
-        nx = x / self._screen_w
-        ny = y / self._screen_h
+        # Normalize against effective dimensions so the canvas red square reaches
+        # the actual screen edges on Windows DPI-aware mode (physical pixel coords).
+        eff_w = round(self._screen_w * self._dpi_scale) if self._position_in_physical_pixels else self._screen_w
+        eff_h = round(self._screen_h * self._dpi_scale) if self._position_in_physical_pixels else self._screen_h
+        nx = x / eff_w
+        ny = y / eff_h
         self._canvas.set_local_position(nx, ny)
 
         state = self._state_ctrl.state
@@ -1192,7 +1224,12 @@ class MainWindow(QMainWindow):
 
         # Warp cursor to entry position.
         if self._injection_enabled:
-            self._injector.move_absolute(nx, ny, self._screen_w, self._screen_h)
+            self._injector.move_absolute(
+                nx, ny,
+                self._screen_w, self._screen_h,
+                dpi_scale=self._dpi_scale,
+                position_in_physical_pixels=self._position_in_physical_pixels,
+            )
 
         # Always reset the canvas green square to the entry position so the
         # visual representation matches the handoff landing point.
