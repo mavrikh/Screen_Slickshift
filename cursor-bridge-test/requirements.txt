@@ -13,3 +13,9 @@ PyQt6>=6.6
 # on macOS and SetWindowsHookEx on Windows. That decision is deferred to Step 5
 # diagnostics.
 pyautogui>=0.9.54
+
+# pynput is used for cross-platform mouse button and scroll event capture.
+# It runs a listener in a background thread and provides on_click / on_scroll
+# callbacks. On macOS it requires Accessibility permission (same grant as
+# pyautogui). On Windows no extra permission is needed.
+pynput>=1.7

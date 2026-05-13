@@ -67,6 +67,7 @@ from PyQt6.QtWidgets import (
 )
 
 import config
+from capture.event_capture import EventCapture
 from capture.mouse_capture import DeltaCapture
 from inject.mouse_inject import MouseInjector
 from state.controller import StateController, SwitchState
@@ -100,6 +101,14 @@ class _MainSignals(QObject):
     # Emitted by the capture thread when edge dwell completes.
     # Args: sender_edge (str), perp (float).
     edge_dwell_fired = pyqtSignal(str, float)
+
+    # Emitted by the pynput listener thread when a mouse button event fires.
+    # Args: button_name (str: "left"|"right"|"middle"), pressed (bool).
+    click_fired = pyqtSignal(str, bool)
+
+    # Emitted by the pynput listener thread when a scroll wheel event fires.
+    # Args: dx (int), dy (int).
+    scroll_fired = pyqtSignal(int, int)
 
 
 class _Canvas(QFrame):
@@ -736,6 +745,16 @@ class MainWindow(QMainWindow):
         # to the main thread's event loop. Matches the _TransportSignals pattern.
         self._main_signals = _MainSignals()
         self._main_signals.edge_dwell_fired.connect(self._on_edge_dwell_fired)
+        self._main_signals.click_fired.connect(self._on_click_fired)
+        self._main_signals.scroll_fired.connect(self._on_scroll_fired)
+
+        # Event capture: pynput-based button and scroll event listener.
+        # Runs for the lifetime of the window; the _active gate is toggled with
+        # CAPTURING state. Constructed here so start() can be called below.
+        self._event_capture = EventCapture(
+            on_click=self._on_event_capture_click,
+            on_scroll=self._on_event_capture_scroll,
+        )
 
         # Whether OS cursor injection is currently active on this machine.
         # Defaults to True to match the Inject checkbox default-on state.
@@ -860,6 +879,10 @@ class MainWindow(QMainWindow):
         self._dead_man_timer.setInterval(500)
         self._dead_man_timer.timeout.connect(self._check_dead_man)
 
+        # Start the pynput listener. It runs for the full window lifetime and is
+        # gated off until set_active(True) is called on CAPTURING entry.
+        self._event_capture.start()
+
         logger.info(
             "MainWindow initialized. Screen (pyautogui): %dx%d  dpi_scale=%.2f. Polling at %dms.",
             self._screen_w, self._screen_h, self._dpi_scale, config.CANVAS_REFRESH_MS,
@@ -955,6 +978,7 @@ class MainWindow(QMainWindow):
     def _on_disconnect_clicked(self) -> None:
         self._dead_man_timer.stop()
         self._handoff_ack_timer.stop()  # Step 6: cancel any in-flight handoff
+        self._event_capture.set_active(False)
         self._stop_capture_if_running()
         self._canvas.set_local_dimmed(False)
         self._canvas.hide_remote()
@@ -982,6 +1006,7 @@ class MainWindow(QMainWindow):
         self._state_ctrl.start_mirroring()
         self._transport.send({"type": "mirror_start"})
         self._capture.start(self._transport.enqueue_delta)
+        self._event_capture.set_active(True)
         self._conn_panel.on_state_changed(SwitchState.CAPTURING, peer_info=self._peer_info)
         self._mirror_panel.on_state_changed(SwitchState.CAPTURING)
         self._append_log(f"Mirroring started -- this machine is now the Sender (peer to the {edge})")
@@ -999,6 +1024,7 @@ class MainWindow(QMainWindow):
 
     def _on_stop_mirroring_clicked(self) -> None:
         """Stop capturing and notify peer to exit RECEIVING."""
+        self._event_capture.set_active(False)
         self._stop_capture_if_running()
         self._state_ctrl.stop_mirroring()
         self._transport.send({"type": "mirror_stop"})
@@ -1042,6 +1068,7 @@ class MainWindow(QMainWindow):
         self._dead_man_timer.stop()
         # Cancel any in-flight handoff ack timer -- the peer is gone.
         self._handoff_ack_timer.stop()
+        self._event_capture.set_active(False)
         self._stop_capture_if_running()
         self._canvas.set_local_dimmed(False)
         self._canvas.hide_remote()
@@ -1067,6 +1094,10 @@ class MainWindow(QMainWindow):
             self._handle_handoff_request(message)
         elif msg_type == "handoff_ack":
             self._handle_handoff_ack()
+        elif msg_type == "click":
+            self._handle_click_message(message)
+        elif msg_type == "scroll":
+            self._handle_scroll_message(message)
         else:
             logger.debug("Unknown message type: %r", msg_type)
 
@@ -1198,6 +1229,8 @@ class MainWindow(QMainWindow):
         self._append_log(f"Handoff triggered: cursor at {sender_edge} edge, perp={perp:.3f}")
 
         # Transition to TRANSITIONING and pause delta delivery.
+        # Gate off click/scroll forwarding while awaiting handoff ack.
+        self._event_capture.set_active(False)
         self._state_ctrl.begin_handoff()
         self._capture.set_paused(True)
 
@@ -1233,6 +1266,7 @@ class MainWindow(QMainWindow):
         )
         self._state_ctrl.handoff_ack_timeout()
         self._capture.set_paused(False)
+        self._event_capture.set_active(True)
         self._conn_panel.on_state_changed(SwitchState.CAPTURING, peer_info=self._peer_info)
         self._mirror_panel.on_state_changed(SwitchState.CAPTURING)
 
@@ -1319,6 +1353,7 @@ class MainWindow(QMainWindow):
         self._capture.set_peer_edge(edge)
         self._capture.set_paused(False)
         self._capture.start(self._transport.enqueue_delta)
+        self._event_capture.set_active(True)
 
         # Hide the remote green square (we are now the sender, not receiver).
         self._canvas.hide_remote()
@@ -1363,6 +1398,85 @@ class MainWindow(QMainWindow):
         self._mirror_panel.on_state_changed(SwitchState.RECEIVING)
         self._append_log("Handoff complete -- this machine is now the Receiver")
         logger.info("Handoff complete -- transitioned to RECEIVING")
+
+    # ------------------------------------------------------------------
+    # EventCapture pynput thread callbacks (cross-thread signal emitters)
+    # ------------------------------------------------------------------
+
+    def _on_event_capture_click(self, button_name: str, pressed: bool) -> None:
+        """
+        Called from the pynput listener thread when a button event fires.
+
+        Emits click_fired signal which is queued to the Qt main thread.
+        Must not touch Qt widgets directly.
+        """
+        self._main_signals.click_fired.emit(button_name, pressed)
+
+    def _on_event_capture_scroll(self, dx: int, dy: int) -> None:
+        """
+        Called from the pynput listener thread when a scroll event fires.
+
+        Emits scroll_fired signal which is queued to the Qt main thread.
+        Must not touch Qt widgets directly.
+        """
+        self._main_signals.scroll_fired.emit(dx, dy)
+
+    # ------------------------------------------------------------------
+    # Click and scroll sender handlers (Qt main thread)
+    # ------------------------------------------------------------------
+
+    def _on_click_fired(self, button: str, pressed: bool) -> None:
+        """
+        Main thread: a mouse button event was captured on this machine (sender).
+
+        Gate: only forward if still in CAPTURING state. The signal may arrive
+        slightly after a state transition; discard silently if so.
+        """
+        if self._state_ctrl.state != SwitchState.CAPTURING:
+            return
+        logger.debug("Sending click: button=%s pressed=%s", button, pressed)
+        self._transport.send({"type": "click", "button": button, "pressed": pressed})
+
+    def _on_scroll_fired(self, dx: int, dy: int) -> None:
+        """
+        Main thread: a scroll wheel event was captured on this machine (sender).
+
+        Gate: only forward if still in CAPTURING state.
+        """
+        if self._state_ctrl.state != SwitchState.CAPTURING:
+            return
+        logger.debug("Sending scroll: dx=%d dy=%d", dx, dy)
+        self._transport.send({"type": "scroll", "dx": dx, "dy": dy})
+
+    # ------------------------------------------------------------------
+    # Click and scroll receiver handlers (Qt main thread)
+    # ------------------------------------------------------------------
+
+    def _handle_click_message(self, message: dict) -> None:
+        """
+        Inject a click event received from the sender.
+
+        Only acts if RECEIVING and injection is enabled -- same gate as delta injection.
+        """
+        if self._state_ctrl.state != SwitchState.RECEIVING or not self._injection_enabled:
+            return
+        button: str = message.get("button", "left")
+        pressed: bool = bool(message.get("pressed", True))
+        logger.debug("Injecting click: button=%s pressed=%s", button, pressed)
+        self._injector.click(button, pressed)
+
+    def _handle_scroll_message(self, message: dict) -> None:
+        """
+        Inject a scroll event received from the sender.
+
+        Only acts if RECEIVING and injection is enabled.
+        """
+        if self._state_ctrl.state != SwitchState.RECEIVING or not self._injection_enabled:
+            return
+        dx: int = int(message.get("dx", 0))
+        dy: int = int(message.get("dy", 0))
+        logger.debug("Injecting scroll: dx=%d dy=%d", dx, dy)
+        self._injector.scroll(dx, dy)
 
     # ------------------------------------------------------------------
     # Inject toggle and force-release (Step 5)
@@ -1433,6 +1547,16 @@ class MainWindow(QMainWindow):
             f"Canvas mirroring continues. System-wide hotkey ({config.HANDOFF_HOTKEY_RELEASE}) lands in Step 7."
         )
         logger.info("Injection force-released via Esc")
+
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        """
+        Stop the pynput listener thread cleanly before the window closes.
+
+        pynput's Listener.stop() + join() must be called explicitly; the daemon
+        thread alone is not a safe cleanup path on all platforms.
+        """
+        self._event_capture.stop()
+        super().closeEvent(event)
 
     def keyPressEvent(self, event) -> None:  # type: ignore[override]
         """

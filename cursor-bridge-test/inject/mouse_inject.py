@@ -147,6 +147,33 @@ class MouseInjector:
         logger.debug("inject move_absolute: nx=%.4f ny=%.4f -> x=%d y=%d", nx, ny, x_px, y_px)
         pyautogui.moveTo(x_px, y_px, duration=0)
 
-    def click(self, button: str = "left") -> None:
-        """Inject a synthetic click at the current cursor position. Step 8+."""
-        raise NotImplementedError
+    def click(self, button: str, pressed: bool) -> None:
+        """
+        Inject a synthetic mouse button down or up at the current cursor position.
+
+        button must be one of "left", "right", "middle" -- the canonical strings
+        produced by EventCapture and expected by pyautogui.mouseDown/mouseUp.
+        pressed=True injects a button-down event; pressed=False injects button-up.
+        """
+        logger.debug("inject click: button=%s pressed=%s", button, pressed)
+        if pressed:
+            pyautogui.mouseDown(button=button)
+        else:
+            pyautogui.mouseUp(button=button)
+
+    def scroll(self, dx: int, dy: int) -> None:
+        """
+        Inject scroll wheel movement.
+
+        dy is vertical scroll (positive = up, matches pynput convention).
+        dx is horizontal scroll.
+        pyautogui scroll units are platform-specific (roughly one click/line
+        per integer unit). pynput delivers integer deltas; we pass them through
+        directly. If scroll speed feels wrong during testing, a scaling factor
+        can be added here later.
+        """
+        logger.debug("inject scroll: dx=%d dy=%d", dx, dy)
+        if dy != 0:
+            pyautogui.scroll(dy)
+        if dx != 0:
+            pyautogui.hscroll(dx)
