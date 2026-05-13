@@ -1,5 +1,5 @@
 """
-cursor-bridge-test -- input capture (Steps 4 and 6).
+cursor-bridge-test -- input capture (Steps 4, 6, and 7).
 
 Step 4: pyautogui.position() at ~60 Hz computes normalized cursor deltas and
 delivers them to a bounded outbound queue consumed by the transport sender thread.
@@ -17,11 +17,19 @@ Step 6 additions:
   window during TRANSITIONING). Pausing does NOT stop the thread -- edge detection
   keeps running so the rollback path can still poll cursor state.
 
+Step 7 additions:
+- DPI correction: MainWindow passes dpi_scale (from QScreen.devicePixelRatio()) and
+  the pre-computed logical screen dimensions into DeltaCapture at construction time.
+  When dpi_correction_enabled=True, raw pixel deltas are divided by dpi_scale before
+  normalization, yielding true logical-pixel deltas regardless of whether pyautogui
+  returns physical or logical values on this platform.
+- set_dpi_correction_enabled(bool) toggles the correction at runtime for A/B testing.
+
 Design decisions vs. brainstorm doc (Section 3A):
 - pyautogui.position() is a passive poll, not a CGEventTap event callback.
   Local cursor delivery is NOT suppressed while CAPTURING. That is Step 7+.
-- Normalization: raw pixel deltas divided by the local logical screen dimensions.
-  The receiver scales using its own screen dimensions from the hello payload.
+- Normalization: raw pixel deltas are corrected to true logical space, then divided
+  by the logical screen dimensions. The receiver scales to its own logical space.
 - No-op suppression: (dx, dy) == (0, 0) skips the queue enqueue but edge-band
   checks still run on every tick so the dwell timer advances correctly.
 """
@@ -91,9 +99,10 @@ class DeltaCapture:
     cursor holds at the configured peer edge long enough.
 
     Lifecycle:
-        capture = DeltaCapture()
+        capture = DeltaCapture(screen_w, screen_h, dpi_scale)
         capture.set_peer_edge("right")          # configure before start
         capture.set_edge_dwell_callback(fn)
+        capture.set_dpi_correction_enabled(True)
         capture.start(enqueue_fn)               # starts background polling thread
         ...
         capture.set_paused(True)                # suppress delta enqueue (TRANSITIONING)
@@ -103,13 +112,32 @@ class DeltaCapture:
     The enqueue_fn is called from the polling thread and must be thread-safe.
     The on_edge_dwell callback fires from the polling thread; route to the Qt
     main thread via signal if it touches Qt widgets.
+
+    screen_w, screen_h: logical screen dimensions (pyautogui.size() on the caller's
+        side, already available in MainWindow). Passed in so DeltaCapture does not
+        need to import PyQt6 to query QScreen.
+    dpi_scale: QScreen.devicePixelRatio() from the caller. Used to convert raw
+        pyautogui pixel deltas to true logical-pixel deltas when correction is on.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        screen_w: int,
+        screen_h: int,
+        dpi_scale: float,
+    ) -> None:
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._seq: int = 0
-        self._screen_w, self._screen_h = pyautogui.size()
+        self._screen_w: int = screen_w
+        self._screen_h: int = screen_h
+        self._dpi_scale: float = dpi_scale
+
+        # Step 7: DPI correction flag. When True, raw pixel deltas are divided by
+        # dpi_scale before normalization to produce true logical-pixel fractions.
+        # Toggled at runtime via set_dpi_correction_enabled() for A/B comparison.
+        self._dpi_correction_enabled: bool = True
+        self._dpi_lock = threading.Lock()
 
         # Edge configuration. Default "right" matches the dropdown default.
         self._peer_edge: str = "right"
@@ -128,14 +156,29 @@ class DeltaCapture:
         self._cooldown_lock = threading.Lock()
 
         logger.info(
-            "DeltaCapture initialized. Logical screen: %dx%d",
+            "DeltaCapture initialized. Logical screen: %dx%d  dpi_scale=%.2f  dpi_correction=%s",
             self._screen_w,
             self._screen_h,
+            self._dpi_scale,
+            self._dpi_correction_enabled,
         )
 
     # ------------------------------------------------------------------
     # Configuration setters (call before or during operation)
     # ------------------------------------------------------------------
+
+    def set_dpi_correction_enabled(self, enabled: bool) -> None:
+        """
+        Enable or disable sender-side DPI correction.
+
+        When enabled, raw pixel deltas from pyautogui are divided by dpi_scale
+        before normalization, yielding true logical-pixel fractions for transmission.
+        When disabled, raw pyautogui values are normalized directly (naive mode).
+        Toggle via Ctrl+Shift+D in MainWindow for A/B comparison on real hardware.
+        """
+        with self._dpi_lock:
+            self._dpi_correction_enabled = enabled
+        logger.info("DeltaCapture DPI correction enabled=%s", enabled)
 
     def set_peer_edge(self, edge: str) -> None:
         """
@@ -247,8 +290,33 @@ class DeltaCapture:
                 with self._paused_lock:
                     currently_paused = self._paused
                 if not currently_paused:
-                    ndx: float = dx_px / self._screen_w
-                    ndy: float = dy_px / self._screen_h
+                    with self._dpi_lock:
+                        correction_on = self._dpi_correction_enabled
+
+                    if correction_on and self._dpi_scale != 1.0:
+                        # pyautogui.position() may return physical pixels on HiDPI
+                        # systems (e.g., Windows with DPI awareness active) while
+                        # pyautogui.size() returns logical dimensions. Dividing the
+                        # raw physical delta by dpi_scale converts it to logical pixels,
+                        # then normalizing against the logical screen width produces a
+                        # true logical-fraction delta that is consistent across machines.
+                        logical_dx: float = dx_px / self._dpi_scale
+                        logical_dy: float = dy_px / self._dpi_scale
+                        ndx: float = logical_dx / self._screen_w
+                        ndy: float = logical_dy / self._screen_h
+                        logger.debug(
+                            "DPI-corrected delta: raw=(%d,%d) scale=%.2f logical=(%.2f,%.2f) n=(%.4f,%.4f)",
+                            dx_px, dy_px, self._dpi_scale, logical_dx, logical_dy, ndx, ndy,
+                        )
+                    else:
+                        # Naive mode: use raw pyautogui values directly.
+                        ndx = dx_px / self._screen_w
+                        ndy = dy_px / self._screen_h
+                        logger.debug(
+                            "Naive delta: raw=(%d,%d) n=(%.4f,%.4f)",
+                            dx_px, dy_px, ndx, ndy,
+                        )
+
                     self._seq += 1
                     delta: dict = {
                         "type": "delta",

@@ -14,6 +14,12 @@ silently losing events. See _verify_permission_probe() in this module.
 pyautogui's failsafe (corner abort) is disabled globally because the cursor
 legitimately reaches screen corners in a KVM workflow. The dead-man-switch
 (Step 3 heartbeat) and the Esc force-release (Step 5) replace it. See config.py.
+
+Step 7: move_relative accepts dpi_scale and dpi_correction_enabled. When correction
+is on, the pixel delta is multiplied by dpi_scale after scaling so that the OS call
+receives the unit the platform expects (physical pixels on systems where pyautogui
+returns physical values from size(), logical otherwise). The sender already corrected
+to logical space, so the receiver multiplies back out to match its own platform units.
 """
 
 from __future__ import annotations
@@ -98,18 +104,43 @@ class MouseInjector:
         ndy: float,
         screen_w: int,
         screen_h: int,
+        dpi_scale: float = 1.0,
+        dpi_correction_enabled: bool = True,
     ) -> None:
         """
         Inject a relative cursor movement.
 
-        ndx, ndy are normalized deltas (fractions of the sender's logical canvas).
-        They are translated to pixel deltas using the RECEIVER's logical screen
-        dimensions before being sent to the OS. DPI-aware normalization is Step 7;
-        this is the naive pass-through that matches Step 4's canvas math.
+        ndx, ndy are normalized deltas (fractions of the sender's logical canvas,
+        already corrected to true logical space by the sender in Step 7).
+
+        When dpi_correction_enabled is True, the receiver scales the normalized delta
+        against its logical screen dimensions, then multiplies by dpi_scale to produce
+        the physical-pixel value that pyautogui.moveRel expects on this machine.
+        This is the inverse of what the sender did: sender divided by dpi_scale,
+        receiver multiplies by dpi_scale, so the round-trip is pixel-accurate.
+
+        When dpi_correction_enabled is False, the naive pass-through applies:
+        multiply ndx/ndy by screen_w/screen_h directly, matching Step 4 behavior.
         """
-        dx_px = int(ndx * screen_w)
-        dy_px = int(ndy * screen_h)
-        logger.debug("inject move_relative: ndx=%.4f ndy=%.4f -> dx=%d dy=%d", ndx, ndy, dx_px, dy_px)
+        if dpi_correction_enabled and dpi_scale != 1.0:
+            # The sender normalized against logical pixels (physical delta / dpi_scale
+            # / logical screen width). To invert: multiply ndx by logical screen width
+            # to get a logical pixel count, then multiply by dpi_scale to get the
+            # physical pixel count that pyautogui.moveRel expects on this machine.
+            # screen_w from pyautogui.size() is the logical width on this platform.
+            dx_px = int(ndx * screen_w * dpi_scale)
+            dy_px = int(ndy * screen_h * dpi_scale)
+            logger.debug(
+                "inject DPI-corrected: ndx=%.4f ndy=%.4f scale=%.2f -> dx=%d dy=%d",
+                ndx, ndy, dpi_scale, dx_px, dy_px,
+            )
+        else:
+            dx_px = int(ndx * screen_w)
+            dy_px = int(ndy * screen_h)
+            logger.debug(
+                "inject naive: ndx=%.4f ndy=%.4f -> dx=%d dy=%d",
+                ndx, ndy, dx_px, dy_px,
+            )
         pyautogui.moveRel(dx_px, dy_px, duration=0)
 
     def move_absolute(
