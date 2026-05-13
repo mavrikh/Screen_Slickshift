@@ -43,7 +43,7 @@ import sys
 import time
 import pyautogui
 
-from PyQt6.QtCore import QObject, Qt, QTimer, QSize, pyqtSignal
+from PyQt6.QtCore import QObject, QSettings, Qt, QTimer, QSize, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QPen
 from PyQt6.QtWidgets import (
     QApplication,
@@ -443,6 +443,10 @@ class _ConnectionPanel(QGroupBox):
             port = config.DEFAULT_PORT
         return (host, port)
 
+    def address_text(self) -> str:
+        """Return the raw text currently in the peer address field."""
+        return self._addr_field.text().strip()
+
     @property
     def listen_btn(self) -> QPushButton:
         return self._listen_btn
@@ -516,9 +520,13 @@ class _MirrorPanel(QGroupBox):
         self._stop_btn.setEnabled(False)
         layout.addWidget(self._stop_btn)
 
-        # Step 5: Inject checkbox. Defaults to unchecked. Only meaningful in RECEIVING.
+        # Step 5: Inject checkbox. Defaults to checked so injection starts
+        # immediately when the machine first enters RECEIVING (assuming the
+        # macOS Accessibility probe passes). The checkbox is disabled (greyed)
+        # in all states except RECEIVING, so the visual "checked" state is
+        # inert until the machine receives a mirror_start message.
         self._inject_chk = QCheckBox("Inject")
-        self._inject_chk.setChecked(False)
+        self._inject_chk.setChecked(True)
         self._inject_chk.setEnabled(False)
         self._inject_chk.setStyleSheet(
             "QCheckBox { color: #b0b0b0; font-family: monospace; font-size: 12px; }"
@@ -639,30 +647,80 @@ class MainWindow(QMainWindow):
         self.resize(960, 740)
         self.setStyleSheet("background-color: #0f0f1a;")
 
+        # --- QSettings: cross-platform persistent key/value store ---
+        # Used to remember the last peer address across launches.
+        # macOS: ~/Library/Preferences/com.Slickshift.CursorBridgeTest.plist
+        # Windows: registry under HKCU\Software\Slickshift\CursorBridgeTest
+        # Linux:   ~/.config/Slickshift/CursorBridgeTest.ini
+        self._settings = QSettings("Slickshift", "CursorBridgeTest")
+
         # --- DPI scale for this machine (Step 7) ---
         # Read from Qt's primary screen so it matches what the hello payload reports.
         # Stored here so both DeltaCapture and move_relative use the same value.
         _primary_screen = QApplication.primaryScreen()
-        self._dpi_scale: float = _primary_screen.devicePixelRatio() if _primary_screen is not None else 1.0
+        self._dpi_scale: float = (
+            _primary_screen.devicePixelRatio() if _primary_screen is not None else 1.0
+        )
 
-        # --- Platform DPI mode detection (Step 8 asymmetry fix) ---
-        # On Windows, PyQt6 calls SetProcessDpiAwarenessContext at QApplication init,
-        # which causes pyautogui.position() to return physical pixels while
-        # pyautogui.size() returns logical pixels. On macOS, both are logical (CoreGraphics
-        # handles HiDPI internally). This flag drives effective dimension computation
-        # throughout capture, injection, and absolute warp math.
-        if sys.platform == "win32" and self._dpi_scale != 1.0:
-            self._position_in_physical_pixels: bool = True
+        # --- Empirical DPI mode detection (replaces platform heuristic) ---
+        # Gather display diagnostics from both Qt and pyautogui at startup so the
+        # comparison is grounded in actual reported values, not sys.platform.
+        #
+        # Qt reports logical pixels (device-independent points). pyautogui.size()
+        # may report either logical or physical pixels depending on the OS DPI
+        # awareness mode. If pyautogui is running in physical-pixel mode its size
+        # will be larger than Qt's logical size by approximately dpi_scale.
+        #
+        # Diagnostic values (logged below for Master to paste back):
+        _qt_size = _primary_screen.size() if _primary_screen is not None else None
+        _qt_geom_size = _primary_screen.geometry().size() if _primary_screen is not None else None
+        _qt_logical_w: int = _qt_size.width() if _qt_size is not None else 0
+        _qt_logical_h: int = _qt_size.height() if _qt_size is not None else 0
+        _qt_geom_w: int = _qt_geom_size.width() if _qt_geom_size is not None else 0
+        _qt_geom_h: int = _qt_geom_size.height() if _qt_geom_size is not None else 0
+        _pyautogui_size = pyautogui.size()
+        _pyautogui_w: int = _pyautogui_size[0]
+        _pyautogui_h: int = _pyautogui_size[1]
+        _pyautogui_pos = pyautogui.position()
+
+        # Empirical flag: if pyautogui reports a wider screen than Qt's logical
+        # width by more than 10%, pyautogui is operating in physical-pixel mode.
+        # The 10% tolerance absorbs minor rounding differences.
+        _position_in_physical_pixels_empirical: bool = (
+            _pyautogui_w > _qt_logical_w * 1.1
+        )
+        self._position_in_physical_pixels: bool = _position_in_physical_pixels_empirical
+
+        logger.info(
+            "Startup display info: qt_size=%dx%d qt_geom=%dx%d "
+            "qt_pixel_ratio=%.2f pyautogui_size=%dx%d pyautogui_pos=(%d,%d)",
+            _qt_logical_w, _qt_logical_h,
+            _qt_geom_w, _qt_geom_h,
+            self._dpi_scale,
+            _pyautogui_w, _pyautogui_h,
+            _pyautogui_pos[0], _pyautogui_pos[1],
+        )
+        if self._position_in_physical_pixels:
+            logger.info(
+                "position_in_physical_pixels=True "
+                "(pyautogui_w=%d > qt_logical_w=%d * 1.1)",
+                _pyautogui_w, _qt_logical_w,
+            )
         else:
-            self._position_in_physical_pixels = False
+            logger.info(
+                "position_in_physical_pixels=False "
+                "(pyautogui_w=%d <= qt_logical_w=%d * 1.1)",
+                _pyautogui_w, _qt_logical_w,
+            )
 
         # --- State, transport, capture, and injection ---
         self._state_ctrl = StateController()
         self._transport = TcpTransport()
-        # Pass logical screen dimensions and dpi_scale so DeltaCapture does not
-        # need to import PyQt6 itself. Values are read again from pyautogui below
-        # to keep them consistent; the QScreen ratio is the authoritative scale.
-        self._screen_w, self._screen_h = pyautogui.size()
+        # Reuse the pyautogui size already captured above for the diagnostic log.
+        # This avoids a second OS call and guarantees the values are identical
+        # to what the startup diagnostic line reported.
+        self._screen_w: int = _pyautogui_w
+        self._screen_h: int = _pyautogui_h
         self._capture = DeltaCapture(
             self._screen_w,
             self._screen_h,
@@ -683,8 +741,10 @@ class MainWindow(QMainWindow):
         self._main_signals.edge_dwell_fired.connect(self._on_edge_dwell_fired)
 
         # Whether OS cursor injection is currently active on this machine.
-        # Controlled by the Inject checkbox; only meaningful in RECEIVING state.
-        self._injection_enabled: bool = False
+        # Defaults to True to match the Inject checkbox default-on state.
+        # The checkbox is disabled until RECEIVING state, so this flag is inert
+        # until the probe runs on first RECEIVING entry.
+        self._injection_enabled: bool = True
 
         # Step 6: QTimer that fires after HANDOFF_ACK_TIMEOUT_S if no handoff_ack
         # arrives from the peer. On timeout, rolls back TRANSITIONING -> CAPTURING.
@@ -782,22 +842,17 @@ class MainWindow(QMainWindow):
         self._dead_man_timer.setInterval(500)
         self._dead_man_timer.timeout.connect(self._check_dead_man)
 
-        if self._position_in_physical_pixels:
-            logger.info(
-                "Pyautogui position units: physical (Windows DPI-aware mode) -- dpi_scale=%.2f",
-                self._dpi_scale,
-            )
-        else:
-            logger.info(
-                "Pyautogui position units: logical (%s) -- dpi_scale=%.2f",
-                sys.platform,
-                self._dpi_scale,
-            )
         logger.info(
             "MainWindow initialized. Screen logical: %dx%d  dpi_scale=%.2f  dpi_correction=%s. Polling at %dms.",
             self._screen_w, self._screen_h, self._dpi_scale,
             self._dpi_correction_enabled, config.CANVAS_REFRESH_MS,
         )
+
+        # --- QSettings: restore last peer address on startup (Ask 3) ---
+        _last_addr: str = self._settings.value("last_peer_address", "", type=str)
+        if _last_addr:
+            self._conn_panel._addr_field.setText(_last_addr)
+            logger.info("Restored last peer address from settings: %s", _last_addr)
 
     # ------------------------------------------------------------------
     # Cursor polling (local red square + status bar coordinates)
@@ -872,6 +927,8 @@ class MainWindow(QMainWindow):
         if not host:
             self._append_log("Error: enter a peer address before connecting")
             return
+        # Persist the address for next launch (silent, no UI prompt).
+        self._settings.setValue("last_peer_address", self._conn_panel.address_text())
         self._peer_info = None
         self._state_ctrl.begin_connecting()
         self._conn_panel.on_state_changed(SwitchState.CONNECTING)
