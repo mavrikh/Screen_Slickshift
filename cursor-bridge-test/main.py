@@ -35,7 +35,7 @@ def _configure_logging() -> None:
 def main() -> None:
     _configure_logging()
     logger = logging.getLogger(__name__)
-    logger.info("cursor-bridge-test starting -- Step 4: one-way delta mirroring")
+    logger.info("cursor-bridge-test starting -- Step 5: OS-level mouse injection on receiver")
 
     app = QApplication(sys.argv)
     app.setApplicationName("Cursor Bridge Test")

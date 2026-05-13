@@ -1,18 +1,20 @@
 """
 cursor-bridge-test -- PyQt6 main window.
 
-Four regions:
+Five regions:
   1. Connection panel (top): peer address field, Listen/Connect/Disconnect buttons,
      connection state indicator with peer info. Added in Step 3.
-  2. Mirroring panel (below connection): Start/Stop Mirroring toggle and role display.
-     Added in Step 4.
+  2. Mirroring panel (below connection): Start/Stop Mirroring toggle, role display,
+     and Inject checkbox (receiver only). Added in Step 4; Inject added in Step 5.
   3. Status bar: current switch-state, cursor coordinates, FPS, role, delta stats.
   4. Canvas (center): red square represents the local cursor position (always).
      In RECEIVING state a second green square mirrors the incoming sender deltas.
   5. Log panel (bottom, collapsible): last N lines from the event log.
 
 Step 4 wires the mirroring button to DeltaCapture and the transport send queue.
-Step 5 will add OS-level injection on the receiver side.
+Step 5 adds OS-level injection on the receiver side via MouseInjector, an Inject
+checkbox (defaults off), macOS Accessibility permission probe, Esc force-release,
+and status bar distinction between canvas-only and injecting receiver roles.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ import pyautogui
 from PyQt6.QtCore import Qt, QTimer, QSize
 from PyQt6.QtGui import QColor, QPainter, QPen
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QFrame,
     QGroupBox,
     QHBoxLayout,
@@ -42,6 +45,7 @@ from PyQt6.QtWidgets import (
 
 import config
 from capture.mouse_capture import DeltaCapture
+from inject.mouse_inject import MouseInjector
 from state.controller import StateController, SwitchState
 from transport.socket_io import TcpTransport
 
@@ -401,6 +405,7 @@ class _MirrorPanel(QGroupBox):
     _COLOR_IDLE = "#888888"
     _COLOR_SENDER = "#f0c040"
     _COLOR_RECEIVER = "#40a0ff"
+    _COLOR_RECEIVER_INJECTING = "#40ffc0"
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("Mirroring", parent)
@@ -432,6 +437,18 @@ class _MirrorPanel(QGroupBox):
         self._stop_btn.setEnabled(False)
         layout.addWidget(self._stop_btn)
 
+        # Step 5: Inject checkbox. Defaults to unchecked so canvas-mirror-only
+        # behavior (Step 4) is preserved until the user opts in. Only meaningful
+        # when this machine is the Receiver.
+        self._inject_chk = QCheckBox("Inject")
+        self._inject_chk.setChecked(False)
+        self._inject_chk.setEnabled(False)
+        self._inject_chk.setStyleSheet(
+            "QCheckBox { color: #b0b0b0; font-family: monospace; font-size: 12px; }"
+            "QCheckBox:disabled { color: #555555; }"
+        )
+        layout.addWidget(self._inject_chk)
+
         layout.addStretch()
 
         self._role_label = QLabel("Role: Idle")
@@ -445,20 +462,34 @@ class _MirrorPanel(QGroupBox):
         if state == SwitchState.CONNECTED:
             self._start_btn.setEnabled(True)
             self._stop_btn.setEnabled(False)
+            self._inject_chk.setEnabled(False)
             self._set_role("Idle", self._COLOR_IDLE)
         elif state == SwitchState.CAPTURING:
             self._start_btn.setEnabled(False)
             self._stop_btn.setEnabled(True)
+            self._inject_chk.setEnabled(False)
             self._set_role("Sender", self._COLOR_SENDER)
         elif state == SwitchState.RECEIVING:
             self._start_btn.setEnabled(False)
             self._stop_btn.setEnabled(False)
+            self._inject_chk.setEnabled(True)
             self._set_role("Receiver", self._COLOR_RECEIVER)
         else:
             # IDLE, LISTENING, CONNECTING, HANDSHAKING, TRANSITIONING -- all buttons off.
             self._start_btn.setEnabled(False)
             self._stop_btn.setEnabled(False)
+            self._inject_chk.setEnabled(False)
             self._set_role("Idle", self._COLOR_IDLE)
+
+    def set_role_injecting(self, injecting: bool) -> None:
+        """
+        Switch the role label between 'Receiver' and 'Receiver (injecting)'.
+        Called by MainWindow when the Inject checkbox toggles while in RECEIVING.
+        """
+        if injecting:
+            self._set_role("Receiver (injecting)", self._COLOR_RECEIVER_INJECTING)
+        else:
+            self._set_role("Receiver", self._COLOR_RECEIVER)
 
     def _set_role(self, role: str, color: str) -> None:
         self._role_label.setText(f"Role: {role}")
@@ -474,6 +505,10 @@ class _MirrorPanel(QGroupBox):
     def stop_btn(self) -> QPushButton:
         return self._stop_btn
 
+    @property
+    def inject_chk(self) -> QCheckBox:
+        return self._inject_chk
+
 
 class MainWindow(QMainWindow):
     """Root application window. Owns all panels, state, transport, and capture."""
@@ -485,11 +520,16 @@ class MainWindow(QMainWindow):
         self.resize(960, 740)
         self.setStyleSheet("background-color: #0f0f1a;")
 
-        # --- State, transport, and capture ---
+        # --- State, transport, capture, and injection ---
         self._state_ctrl = StateController()
         self._transport = TcpTransport()
         self._capture = DeltaCapture()
+        self._injector = MouseInjector()
         self._peer_info: dict | None = None  # last received hello payload from peer
+
+        # Whether OS cursor injection is currently active on this machine.
+        # Controlled by the Inject checkbox; only meaningful in RECEIVING state.
+        self._injection_enabled: bool = False
 
         # Wire transport signals to main-thread handlers.
         self._transport.register_connected_callback(self._on_transport_connected)
@@ -525,6 +565,9 @@ class MainWindow(QMainWindow):
         # Wire mirroring buttons.
         self._mirror_panel.start_btn.clicked.connect(self._on_start_mirroring_clicked)
         self._mirror_panel.stop_btn.clicked.connect(self._on_stop_mirroring_clicked)
+
+        # Wire Inject checkbox (Step 5).
+        self._mirror_panel.inject_chk.stateChanged.connect(self._on_inject_toggled)
 
         # Splitter lets the user resize the log panel vertically.
         splitter = QSplitter(Qt.Orientation.Vertical)
@@ -580,7 +623,7 @@ class MainWindow(QMainWindow):
         if state == SwitchState.CAPTURING:
             return "Sender"
         if state == SwitchState.RECEIVING:
-            return "Receiver"
+            return "Receiver (injecting)" if self._injection_enabled else "Receiver"
         return "Idle"
 
     def _extra_status_for_state(self, state: SwitchState) -> str:
@@ -759,10 +802,10 @@ class MainWindow(QMainWindow):
         """
         Process an incoming cursor delta from the sender.
 
-        Does NOT inject into the OS cursor (Step 5). Updates:
-        - The canvas green square (visual confirmation).
-        - The delta rate counter.
-        - A periodic 1-second sample log line.
+        Always updates the canvas green square. When in RECEIVING state and
+        injection is enabled, also moves the OS cursor via MouseInjector.
+        The receiver uses its own screen dimensions (captured at startup via
+        pyautogui.size()), NOT the sender's, for pixel translation.
         """
         ndx: float = message.get("ndx", 0.0)
         ndy: float = message.get("ndy", 0.0)
@@ -774,8 +817,12 @@ class MainWindow(QMainWindow):
         self._last_ndy = ndy
         self._last_seq = seq
 
-        # Apply to the canvas green square.
+        # Apply to the canvas green square (always).
         self._canvas.apply_remote_delta(ndx, ndy)
+
+        # OS cursor injection (only when RECEIVING and Inject is checked).
+        if self._state_ctrl.state == SwitchState.RECEIVING and self._injection_enabled:
+            self._injector.move_relative(ndx, ndy, self._screen_w, self._screen_h)
 
         # Log a sample line roughly once per second.
         now = time.monotonic()
@@ -786,6 +833,92 @@ class MainWindow(QMainWindow):
                 f"Last delta: ndx={ndx:.4f} ndy={ndy:.4f} seq={seq}  "
                 f"({self._deltas_received} total, {rate:.1f} Hz)"
             )
+
+    # ------------------------------------------------------------------
+    # Inject toggle and force-release (Step 5)
+    # ------------------------------------------------------------------
+
+    def _on_inject_toggled(self, state: int) -> None:
+        """
+        Called when the Inject checkbox changes state.
+
+        When enabling: run the macOS Accessibility probe first. If the probe
+        fails, uncheck the box and leave injection disabled -- the log panel
+        explains what to do. The probe runs only once per session after a
+        successful pass (MouseInjector._injection_verified flag).
+
+        When disabling: deactivate injection immediately. Reset the verified
+        flag so the probe re-runs if the user re-enables after fixing permissions.
+        """
+        checked: bool = state != 0
+        if checked:
+            # Run (or re-run) the permission probe before committing to injection.
+            if not self._injector.verify_permission_probe():
+                # Permission denied -- surface the message to the log panel and
+                # uncheck the box without enabling injection.
+                self._append_log(
+                    "macOS Accessibility permission missing. "
+                    "Grant in System Settings > Privacy & Security > Accessibility, "
+                    "then re-toggle Inject."
+                )
+                # Block signal temporarily to avoid re-entering this handler.
+                self._mirror_panel.inject_chk.blockSignals(True)
+                self._mirror_panel.inject_chk.setChecked(False)
+                self._mirror_panel.inject_chk.blockSignals(False)
+                return
+            self._injection_enabled = True
+            self._mirror_panel.set_role_injecting(True)
+            self._append_log(
+                "Injection enabled -- OS cursor will follow sender deltas. "
+                "Press Esc in this window to force-release."
+            )
+            logger.info("OS cursor injection enabled")
+        else:
+            self._injection_enabled = False
+            self._injector.reset_verification()
+            if self._state_ctrl.state == SwitchState.RECEIVING:
+                self._mirror_panel.set_role_injecting(False)
+            logger.info("OS cursor injection disabled")
+
+    def _force_release_injection(self) -> None:
+        """
+        Immediately disable OS injection while keeping RECEIVING state active.
+
+        This is the minimum viable escape hatch for Step 5 testing. Canvas
+        mirroring continues; only OS cursor movement stops. The system-wide
+        hotkey (config.HANDOFF_HOTKEY_RELEASE) that works regardless of window
+        focus is implemented in Step 7.
+        """
+        if not self._injection_enabled:
+            return
+        self._injection_enabled = False
+        self._injector.reset_verification()
+        # Uncheck without re-entering _on_inject_toggled.
+        self._mirror_panel.inject_chk.blockSignals(True)
+        self._mirror_panel.inject_chk.setChecked(False)
+        self._mirror_panel.inject_chk.blockSignals(False)
+        self._mirror_panel.set_role_injecting(False)
+        self._append_log(
+            "Force-released injection (Esc pressed). "
+            f"Canvas mirroring continues. System-wide hotkey ({config.HANDOFF_HOTKEY_RELEASE}) lands in Step 7."
+        )
+        logger.info("Injection force-released via Esc")
+
+    def keyPressEvent(self, event) -> None:  # type: ignore[override]
+        """
+        Intercept Esc while the window has focus to force-release OS injection.
+
+        Only active when in RECEIVING state with injection enabled; otherwise
+        the event passes through to the default handler.
+        """
+        if (
+            event.key() == Qt.Key.Key_Escape
+            and self._state_ctrl.state == SwitchState.RECEIVING
+            and self._injection_enabled
+        ):
+            self._force_release_injection()
+        else:
+            super().keyPressEvent(event)
 
     # ------------------------------------------------------------------
     # State change handler
