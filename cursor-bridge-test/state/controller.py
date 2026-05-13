@@ -7,15 +7,18 @@ state until the peer ACKs that it has entered CAPTURING state. On timeout, the
 host rolls back to IDLE. This prevents double-cursor chaos and cursor-trap failure
 modes described in brainstorm doc Section 3J.
 
-State diagram for Step 3 (connection and handshake):
+State diagram for Step 4 (one-way delta mirroring):
 
     IDLE ──listen()──> LISTENING ──inbound connection──> HANDSHAKING
     IDLE ──connect()──> CONNECTING ──TCP connected──> HANDSHAKING
     HANDSHAKING ──hello received──> CONNECTED
-    CONNECTED ──close()──> IDLE
-    any ──force_release()──> IDLE
+    CONNECTED ──start_mirroring()──> CAPTURING
+    CONNECTED ──mirror_start_received()──> RECEIVING
+    CAPTURING ──stop_mirroring()──> CONNECTED
+    RECEIVING ──mirror_stop_received()──> CONNECTED
+    any active ──force_release() / disconnect──> IDLE
 
-CAPTURING and RECEIVING are defined but not yet reachable -- Step 4+.
+TRANSITIONING is defined but not yet reachable -- Step 6 (edge-based handoff).
 """
 
 from __future__ import annotations
@@ -46,14 +49,14 @@ class SwitchState(enum.Enum):
     # Ready for Step 4+ (capture/injection) to be wired in.
     CONNECTED = "connected"
 
-    # This machine is the active host. Local cursor is visible and tracked.
-    # Mouse deltas are being captured and forwarded to the peer.
-    # NOT YET REACHABLE -- wired in Step 4.
+    # This machine is the active sender. Local cursor is visible and tracked.
+    # Mouse deltas are being captured and forwarded to the peer via the send queue.
+    # Reachable in Step 4 via start_mirroring().
     CAPTURING = "capturing"
 
-    # This machine is the secondary. Local cursor is hidden. Receiving and
-    # injecting deltas from the peer.
-    # NOT YET REACHABLE -- wired in Step 5.
+    # This machine is the secondary receiver. Incoming deltas are logged and
+    # used to mirror the sender's cursor motion on the in-app canvas square.
+    # OS cursor is NOT moved yet (Step 5). Reachable in Step 4 via mirror_start_received().
     RECEIVING = "receiving"
 
     # Briefly indeterminate during handoff negotiation. ACK not yet received.
@@ -144,7 +147,67 @@ class StateController:
         self._transition(SwitchState.IDLE)
 
     # ------------------------------------------------------------------
-    # Step 4+ transitions -- not yet reachable
+    # Step 4 transitions -- one-way delta mirroring
+    # ------------------------------------------------------------------
+
+    def start_mirroring(self) -> None:
+        """
+        User clicked Start Mirroring on this machine while CONNECTED.
+
+        Transitions to CAPTURING. The caller is responsible for sending
+        {"type": "mirror_start"} to the peer so it enters RECEIVING.
+        Only valid from CONNECTED state.
+        """
+        if self._state != SwitchState.CONNECTED:
+            logger.warning(
+                "start_mirroring() called in state %s -- ignored", self._state.value
+            )
+            return
+        self._transition(SwitchState.CAPTURING)
+
+    def stop_mirroring(self) -> None:
+        """
+        User clicked Stop Mirroring on this machine while CAPTURING.
+
+        Transitions back to CONNECTED. The caller is responsible for sending
+        {"type": "mirror_stop"} to the peer so it exits RECEIVING.
+        Only valid from CAPTURING state.
+        """
+        if self._state != SwitchState.CAPTURING:
+            logger.warning(
+                "stop_mirroring() called in state %s -- ignored", self._state.value
+            )
+            return
+        self._transition(SwitchState.CONNECTED)
+
+    def mirror_start_received(self) -> None:
+        """
+        Peer sent {"type": "mirror_start"}. This machine becomes the receiver.
+
+        Transitions to RECEIVING. Only valid from CONNECTED state.
+        """
+        if self._state != SwitchState.CONNECTED:
+            logger.warning(
+                "mirror_start_received() in state %s -- ignored", self._state.value
+            )
+            return
+        self._transition(SwitchState.RECEIVING)
+
+    def mirror_stop_received(self) -> None:
+        """
+        Peer sent {"type": "mirror_stop"}. Mirroring session is over.
+
+        Transitions back to CONNECTED. Only valid from RECEIVING state.
+        """
+        if self._state != SwitchState.RECEIVING:
+            logger.warning(
+                "mirror_stop_received() in state %s -- ignored", self._state.value
+            )
+            return
+        self._transition(SwitchState.CONNECTED)
+
+    # ------------------------------------------------------------------
+    # Step 6+ transitions -- edge-based handoff (not yet reachable)
     # ------------------------------------------------------------------
 
     def request_handoff_to_peer(self) -> None:

@@ -34,3 +34,14 @@ LOG_PANEL_MAX_LINES: int = 50
 # pyautogui FailSafe is intentionally disabled in all rebuilt versions.
 # The cursor legitimately reaches corners in a KVM. See commit 523ee03.
 PYAUTOGUI_FAILSAFE: bool = False
+
+# Step 4: delta mirroring
+# Maximum number of outbound delta messages queued in the sender's send queue.
+# When the queue is full the oldest entry is dropped and DELTAS_DROPPED increments.
+DELTA_QUEUE_MAX: int = 32
+
+# Window length (seconds) over which the receiver computes the incoming delta rate.
+DELTA_RATE_WINDOW_S: float = 0.5
+
+# How often (seconds) the receiver logs a sample of the most recent delta.
+DELTA_SAMPLE_LOG_INTERVAL_S: float = 1.0

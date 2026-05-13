@@ -8,11 +8,21 @@ All socket I/O runs on a background thread. Received messages are delivered to
 the Qt main thread via a pyqtSignal -- never call Qt widgets directly from the
 receive thread.
 
+Step 4 additions:
+- A bounded outbound queue (size DELTA_QUEUE_MAX) serializes all sends through
+  a dedicated sender thread. This decouples the 60 Hz polling thread from the
+  TCP write path. When the queue is full, the oldest entry is dropped and
+  _deltas_dropped is incremented.
+- enqueue_delta() is the fast path for the capture loop. It never blocks.
+- send() is kept for low-volume messages (hello, ping, pong, mirror_start/stop).
+  It writes directly to the socket from the calling thread -- only call it from
+  the sender thread or from threads where blocking is acceptable.
+
 PLAINTEXT WARNING: This transport sends data unencrypted over the LAN. It is
 suitable for a two-machine dev test on a trusted private network only. Encryption
 is deferred -- see brainstorm doc Section 3I and the deferred items in Section 6.
 
-No reconnection logic is implemented here. That is Step 7 (failsafes).
+No reconnection logic is implemented here. That is Step 8 (failsafes).
 """
 
 from __future__ import annotations
@@ -20,6 +30,7 @@ from __future__ import annotations
 import json
 import logging
 import platform
+import queue
 import socket
 import struct
 import threading
@@ -176,6 +187,7 @@ class TcpTransport:
 
         self._recv_thread: threading.Thread | None = None
         self._heartbeat_thread: threading.Thread | None = None
+        self._sender_thread: threading.Thread | None = None
 
         # Threading event to signal all background threads to stop cleanly.
         self._stop_event = threading.Event()
@@ -183,6 +195,14 @@ class TcpTransport:
         # Tracks when the last pong arrived. Used by the dead-man check in the
         # heartbeat thread. Initialized to now so the first interval is fair.
         self._last_pong_time: float = 0.0
+
+        # Step 4: bounded outbound queue for delta messages.
+        # maxsize=0 means unbounded; we set it in _start_sender_loop() after clearing
+        # any previous state. The sentinel value None signals the sender thread to exit.
+        self._send_queue: queue.Queue[dict | None] = queue.Queue(maxsize=config.DELTA_QUEUE_MAX)
+
+        # Monotonic counter: number of delta messages dropped because the queue was full.
+        self._deltas_dropped: int = 0
 
     # ------------------------------------------------------------------
     # Callback registration
@@ -226,10 +246,47 @@ class TcpTransport:
         t = threading.Thread(target=self._client_loop, args=(host, port), daemon=True, name="transport-client")
         t.start()
 
+    @property
+    def deltas_dropped(self) -> int:
+        """Number of outbound delta messages dropped due to send-queue backpressure."""
+        return self._deltas_dropped
+
+    def enqueue_delta(self, message: dict[str, Any]) -> bool:
+        """
+        Non-blocking enqueue of a delta message into the bounded send queue.
+
+        Called from the capture polling thread at ~60 Hz. If the queue is full,
+        the oldest item is dropped to make room and _deltas_dropped is incremented.
+        Returns True if the message was accepted, False if a drop occurred.
+
+        This method is the only correct path for high-frequency delta traffic.
+        Do NOT call send() for deltas -- it blocks the calling thread on TCP I/O.
+        """
+        if not self._connected:
+            return False
+        try:
+            self._send_queue.put_nowait(message)
+            return True
+        except queue.Full:
+            # Drop the oldest item to make room for the newest delta.
+            try:
+                self._send_queue.get_nowait()
+            except queue.Empty:
+                pass
+            self._deltas_dropped += 1
+            try:
+                self._send_queue.put_nowait(message)
+            except queue.Full:
+                pass  # another thread raced -- just accept the loss
+            return False
+
     def send(self, message: dict[str, Any]) -> None:
         """
-        Serialize message to JSON, frame with 4-byte length prefix, and send.
+        Serialize message to JSON, frame with 4-byte length prefix, and send
+        directly on the calling thread.
 
+        For low-volume control messages (hello, ping, pong, mirror_start/stop).
+        Do NOT use this for delta messages -- use enqueue_delta() instead.
         Must only be called after connected fires. Logs and surfaces errors
         if the send fails -- does not swallow them silently.
         """
@@ -250,6 +307,11 @@ class TcpTransport:
         """
         self._stop_event.set()
         self._connected = False
+        # Unblock the sender thread by posting a sentinel.
+        try:
+            self._send_queue.put_nowait(None)
+        except queue.Full:
+            pass
         if self._sock is not None:
             try:
                 self._sock.shutdown(socket.SHUT_RDWR)
@@ -300,6 +362,7 @@ class TcpTransport:
             self._connected = True
             self._last_pong_time = time.monotonic()
             self._signals.connected.emit()
+            self._start_sender_loop()
             self._start_recv_loop()
             self._start_heartbeat_loop()
             break  # only one peer at a time
@@ -322,6 +385,7 @@ class TcpTransport:
         self._connected = True
         self._last_pong_time = time.monotonic()
         self._signals.connected.emit()
+        self._start_sender_loop()
         self._start_recv_loop()
         self._start_heartbeat_loop()
 
@@ -334,6 +398,50 @@ class TcpTransport:
         t = threading.Thread(target=self._heartbeat_loop, daemon=True, name="transport-heartbeat")
         self._heartbeat_thread = t
         t.start()
+
+    def _start_sender_loop(self) -> None:
+        """
+        Start the dedicated sender thread that drains the outbound queue.
+
+        All delta messages flow through this thread so the capture polling thread
+        never blocks on TCP I/O. Control messages (hello, ping, pong) bypass the
+        queue via send() and are written on whichever thread calls them.
+        """
+        # Drain any stale items from a previous session.
+        while not self._send_queue.empty():
+            try:
+                self._send_queue.get_nowait()
+            except queue.Empty:
+                break
+        self._deltas_dropped = 0
+        t = threading.Thread(target=self._sender_loop, daemon=True, name="transport-sender")
+        self._sender_thread = t
+        t.start()
+
+    def _sender_loop(self) -> None:
+        """
+        Background thread: drain the outbound queue and write frames to the socket.
+
+        Blocks on queue.get() so it uses zero CPU when the queue is empty.
+        A None sentinel posted by close() causes a clean exit.
+        """
+        while not self._stop_event.is_set():
+            try:
+                item = self._send_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+            if item is None:
+                # Sentinel from close() -- exit cleanly.
+                break
+            if self._sock is None or not self._connected:
+                break
+            try:
+                _send_frame(self._sock, item)
+            except OSError as exc:
+                if not self._stop_event.is_set():
+                    logger.error("sender_loop send failed: %s", exc)
+                    self._handle_disconnect(str(exc))
+                break
 
     def _recv_loop(self) -> None:
         """Background thread: read frames from the peer and dispatch via signal."""
