@@ -45,6 +45,7 @@ import pyautogui
 from PyQt6.QtCore import QObject, Qt, QTimer, QSize, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QPen
 from PyQt6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QFrame,
