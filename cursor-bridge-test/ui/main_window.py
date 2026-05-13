@@ -598,6 +598,14 @@ class MainWindow(QMainWindow):
         self._poll_timer.timeout.connect(self._poll_cursor)
         self._poll_timer.start()
 
+        # Dead-man monitor: independent of the heartbeat sender thread.
+        # Ticks every 500 ms on the Qt main thread so it fires even when the
+        # sender thread is blocked on send(). Primary detection path for
+        # dead-man invariant #4. Started/stopped on connection state transitions.
+        self._dead_man_timer = QTimer(self)
+        self._dead_man_timer.setInterval(500)
+        self._dead_man_timer.timeout.connect(self._check_dead_man)
+
         logger.info(
             "MainWindow initialized. Screen logical: %dx%d. Polling at %dms.",
             self._screen_w, self._screen_h, config.CANVAS_REFRESH_MS,
@@ -674,6 +682,7 @@ class MainWindow(QMainWindow):
         self._transport.connect_to_peer(host, port)
 
     def _on_disconnect_clicked(self) -> None:
+        self._dead_man_timer.stop()
         self._stop_capture_if_running()
         self._canvas.hide_remote()
         self._transport.close()
@@ -723,11 +732,13 @@ class MainWindow(QMainWindow):
         self._state_ctrl.connection_established()
         self._conn_panel.on_state_changed(SwitchState.HANDSHAKING)
         self._mirror_panel.on_state_changed(SwitchState.HANDSHAKING)
+        self._dead_man_timer.start()
         self._append_log("Sending hello")
         self._transport.send_hello()
 
     def _on_transport_disconnected(self, reason: str) -> None:
         """Connection dropped or timed out."""
+        self._dead_man_timer.stop()
         self._stop_capture_if_running()
         self._canvas.hide_remote()
         self._state_ctrl.connection_lost(reason)
@@ -930,6 +941,37 @@ class MainWindow(QMainWindow):
         x, y = pyautogui.position()
         role = self._role_label_for_state(state)
         self._status_bar.update_status(mode, x, y, role=role)
+
+    # ------------------------------------------------------------------
+    # Dead-man monitor (Qt main thread, 500 ms tick)
+    # ------------------------------------------------------------------
+
+    # States where the heartbeat is active and the monitor should run.
+    _DEAD_MAN_ACTIVE_STATES: frozenset[SwitchState] = frozenset({
+        SwitchState.CONNECTED,
+        SwitchState.CAPTURING,
+        SwitchState.RECEIVING,
+        SwitchState.HANDSHAKING,
+    })
+
+    def _check_dead_man(self) -> None:
+        """
+        Called every 500 ms by _dead_man_timer on the Qt main thread.
+
+        Reads seconds_since_last_pong() from the transport -- a single float
+        read that is safe under the GIL without a lock. If the elapsed time
+        exceeds HEARTBEAT_TIMEOUT_S, fire the disconnect path immediately.
+        This fires even when the heartbeat sender thread is blocked on send().
+        """
+        elapsed: float = self._transport.seconds_since_last_pong()
+        if elapsed > config.HEARTBEAT_TIMEOUT_S:
+            logger.error(
+                "Connection lost: heartbeat timeout (monitor, no pong for %.1fs)",
+                elapsed,
+            )
+            self._transport.handle_disconnect(
+                f"heartbeat timeout (monitor, no pong for {elapsed:.1f}s)"
+            )
 
     # ------------------------------------------------------------------
     # Log panel

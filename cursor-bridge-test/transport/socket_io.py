@@ -31,6 +31,7 @@ import json
 import logging
 import platform
 import queue
+import select
 import socket
 import struct
 import threading
@@ -52,6 +53,50 @@ _FRAME_HEADER = struct.Struct("!I")  # unsigned int, network (big-endian) byte o
 
 # App version for the test app. Separate from main Slickshift versioning.
 _TEST_APP_VERSION = "0.0001"
+
+
+def _apply_socket_options(sock: socket.socket) -> None:
+    """
+    Apply socket-level keepalive and (where available) TCP_USER_TIMEOUT to a
+    freshly connected or accepted peer socket.
+
+    SO_KEEPALIVE is the primary secondary defense: the OS will probe the peer
+    after the kernel's keepalive idle period and close the socket if no ACK
+    arrives. Default kernel idle is long (2 hours on most OSes) but we tune it
+    down on Linux. On macOS the minimum is 1 second via TCP_KEEPALIVE; on Windows
+    the default is 2 hours but shortening it requires WSAIoctl, which we skip --
+    the QTimer dead-man monitor (Part 2) is the primary detection path.
+
+    TCP_USER_TIMEOUT (Linux/Windows only) tells the kernel to abort the
+    connection if sent data goes unacknowledged for N milliseconds. This unblocks
+    a stuck sendall() within ~3 s instead of waiting for the full TCP retransmit
+    window (~30-120 s). The try/except is platform-detection scaffolding, not
+    control-flow: the constant does not exist on macOS so we must probe at runtime.
+    """
+    # Enable TCP keepalive probing.
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+
+    system = platform.system()
+    if system == "Linux":
+        # Probe after 3 s idle, retry every 1 s, give up after 3 failures.
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 3)   # type: ignore[attr-defined]
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 1)  # type: ignore[attr-defined]
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)    # type: ignore[attr-defined]
+    elif system == "Darwin":
+        # macOS: TCP_KEEPALIVE sets the idle-before-first-probe interval (seconds).
+        # The constant is 0x10 on IPPROTO_TCP; use getattr so the linter stays quiet
+        # on other platforms.
+        tcp_keepalive = getattr(socket, "TCP_KEEPALIVE", 0x10)
+        sock.setsockopt(socket.IPPROTO_TCP, tcp_keepalive, 3)
+
+    # TCP_USER_TIMEOUT (milliseconds): abort if unacked data sits this long.
+    # Platform-detection scaffolding -- the constant does not exist on macOS;
+    # silently no-op rather than crashing.
+    try:
+        tcp_user_timeout = getattr(socket, "TCP_USER_TIMEOUT")  # Linux 2.6.37+, Windows 10+
+        sock.setsockopt(socket.IPPROTO_TCP, tcp_user_timeout, 3000)
+    except AttributeError:
+        pass  # macOS: not supported; QTimer monitor is the primary detection path
 
 
 def _build_hello_payload() -> dict[str, Any]:
@@ -296,8 +341,34 @@ class TcpTransport:
         try:
             _send_frame(self._sock, message)
         except OSError as exc:
-            logger.error("send failed: %s", exc)
-            self._handle_disconnect(str(exc))
+            elapsed = self.seconds_since_last_pong()
+            logger.error(
+                "Connection lost: send failed (no pong for %.1fs): %s",
+                elapsed,
+                exc,
+            )
+            self._handle_disconnect(f"send failed (no pong for {elapsed:.1f}s): {exc}")
+
+    def seconds_since_last_pong(self) -> float:
+        """
+        Return seconds elapsed since the last pong arrived.
+
+        Returns 0.0 when not connected so the dead-man monitor in MainWindow
+        does not fire while idle. Reading a float attribute under the GIL is
+        atomic enough for this single-reader use case.
+        """
+        if not self._connected:
+            return 0.0
+        return time.monotonic() - self._last_pong_time
+
+    def handle_disconnect(self, reason: str) -> None:
+        """
+        Public wrapper around _handle_disconnect.
+
+        Exposed so the Qt-thread dead-man monitor in MainWindow can trigger
+        the teardown path without reaching into a private method.
+        """
+        self._handle_disconnect(reason)
 
     def close(self) -> None:
         """
@@ -358,6 +429,7 @@ class TcpTransport:
                 break
 
             logger.info("Inbound connection from %s:%d", peer_addr[0], peer_addr[1])
+            _apply_socket_options(peer_sock)
             self._sock = peer_sock
             self._connected = True
             self._last_pong_time = time.monotonic()
@@ -381,6 +453,7 @@ class TcpTransport:
             return
 
         logger.info("Connected to %s:%d", host, port)
+        _apply_socket_options(sock)
         self._sock = sock
         self._connected = True
         self._last_pong_time = time.monotonic()
@@ -491,11 +564,12 @@ class TcpTransport:
             elapsed = time.monotonic() - self._last_pong_time
             if elapsed > config.HEARTBEAT_TIMEOUT_S:
                 logger.error(
-                    "Heartbeat timeout: no pong for %.1fs (threshold %.1fs)",
+                    "Connection lost: heartbeat timeout (sender, no pong for %.1fs)",
                     elapsed,
-                    config.HEARTBEAT_TIMEOUT_S,
                 )
-                self._handle_disconnect("heartbeat timeout")
+                self._handle_disconnect(
+                    f"heartbeat timeout (sender, no pong for {elapsed:.1f}s)"
+                )
                 break
 
     def _handle_disconnect(self, reason: str) -> None:
