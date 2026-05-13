@@ -888,50 +888,48 @@ class MainWindow(QMainWindow):
         self._keyboard_forwarding_active: bool = False
 
         # Translation map: pynput Key enum -> pyautogui key name string.
-        # Used by _translate_pynput_key(). Keys not in this map and not
-        # KeyCode-with-char are logged at DEBUG and skipped.
-        self._PYNPUT_KEY_MAP: dict[_pynput_keyboard.Key, str] = {
-            _pynput_keyboard.Key.shift: "shift",
-            _pynput_keyboard.Key.shift_l: "shift",
-            _pynput_keyboard.Key.shift_r: "shiftright",
-            _pynput_keyboard.Key.ctrl: "ctrl",
-            _pynput_keyboard.Key.ctrl_l: "ctrl",
-            _pynput_keyboard.Key.ctrl_r: "ctrlright",
-            _pynput_keyboard.Key.alt: "alt",
-            _pynput_keyboard.Key.alt_l: "alt",
-            _pynput_keyboard.Key.alt_r: "altright",
-            _pynput_keyboard.Key.cmd: "command",
-            _pynput_keyboard.Key.cmd_r: "cmdright",
-            _pynput_keyboard.Key.enter: "enter",
-            _pynput_keyboard.Key.esc: "esc",
-            _pynput_keyboard.Key.space: "space",
-            _pynput_keyboard.Key.tab: "tab",
-            _pynput_keyboard.Key.backspace: "backspace",
-            _pynput_keyboard.Key.delete: "delete",
-            _pynput_keyboard.Key.up: "up",
-            _pynput_keyboard.Key.down: "down",
-            _pynput_keyboard.Key.left: "left",
-            _pynput_keyboard.Key.right: "right",
-            _pynput_keyboard.Key.f1: "f1",
-            _pynput_keyboard.Key.f2: "f2",
-            _pynput_keyboard.Key.f3: "f3",
-            _pynput_keyboard.Key.f4: "f4",
-            _pynput_keyboard.Key.f5: "f5",
-            _pynput_keyboard.Key.f6: "f6",
-            _pynput_keyboard.Key.f7: "f7",
-            _pynput_keyboard.Key.f8: "f8",
-            _pynput_keyboard.Key.f9: "f9",
-            _pynput_keyboard.Key.f10: "f10",
-            _pynput_keyboard.Key.f11: "f11",
-            _pynput_keyboard.Key.f12: "f12",
-            _pynput_keyboard.Key.home: "home",
-            _pynput_keyboard.Key.end: "end",
-            _pynput_keyboard.Key.page_up: "pageup",
-            _pynput_keyboard.Key.page_down: "pagedown",
-            _pynput_keyboard.Key.insert: "insert",
-            _pynput_keyboard.Key.caps_lock: "capslock",
-            _pynput_keyboard.Key.num_lock: "numlock",
-        }
+        # Built dynamically via getattr because pynput's Key enum varies by
+        # platform (e.g., Key.insert does not exist on macOS). Missing attrs
+        # are skipped silently. Keys not in this map and not KeyCode-with-char
+        # are logged at DEBUG and skipped by _translate_pynput_key().
+        _key_pairs: list[tuple[str, str]] = [
+            ("shift", "shift"),
+            ("shift_l", "shift"),
+            ("shift_r", "shiftright"),
+            ("ctrl", "ctrl"),
+            ("ctrl_l", "ctrl"),
+            ("ctrl_r", "ctrlright"),
+            ("alt", "alt"),
+            ("alt_l", "alt"),
+            ("alt_r", "altright"),
+            ("cmd", "command"),
+            ("cmd_r", "cmdright"),
+            ("enter", "enter"),
+            ("esc", "esc"),
+            ("space", "space"),
+            ("tab", "tab"),
+            ("backspace", "backspace"),
+            ("delete", "delete"),
+            ("up", "up"),
+            ("down", "down"),
+            ("left", "left"),
+            ("right", "right"),
+            ("f1", "f1"), ("f2", "f2"), ("f3", "f3"), ("f4", "f4"),
+            ("f5", "f5"), ("f6", "f6"), ("f7", "f7"), ("f8", "f8"),
+            ("f9", "f9"), ("f10", "f10"), ("f11", "f11"), ("f12", "f12"),
+            ("home", "home"),
+            ("end", "end"),
+            ("page_up", "pageup"),
+            ("page_down", "pagedown"),
+            ("insert", "insert"),
+            ("caps_lock", "capslock"),
+            ("num_lock", "numlock"),
+        ]
+        self._PYNPUT_KEY_MAP: dict = {}
+        for _attr, _target in _key_pairs:
+            _key_obj = getattr(_pynput_keyboard.Key, _attr, None)
+            if _key_obj is not None:
+                self._PYNPUT_KEY_MAP[_key_obj] = _target
 
         # Wire transport signals to main-thread handlers.
         self._transport.register_connected_callback(self._on_transport_connected)
