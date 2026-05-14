@@ -1092,9 +1092,15 @@ class _ScreenArrangementPanel(QGroupBox):
 
         self._unlock_chk = QCheckBox("Unlock Same PC Monitors")
         self._unlock_chk.setChecked(False)
+        # Feature temporarily disabled. Re-enable once the arrangement wire
+        # format is extended to carry spatial pairing (which peer monitor is
+        # adjacent to which local monitor). Until then, multi-monitor splits
+        # cannot be inverted correctly on the receiver. Locked group-drag mode
+        # works for "peer on one side" layouts even with multiple monitors.
+        self._unlock_chk.setEnabled(False)
         self._unlock_chk.setToolTip(
-            "When checked, each peer monitor can be dragged independently to form "
-            "L-shaped or other non-rectangular layouts."
+            "Temporarily disabled. Re-enables when the cross-machine arrangement "
+            "protocol is extended to carry per-monitor spatial pairing."
         )
         self._unlock_chk.setStyleSheet(
             "QCheckBox { color: #b0b0b0; font-family: monospace; font-size: 12px; border: none; }"
@@ -1968,7 +1974,8 @@ class _ScreenArrangementPanel(QGroupBox):
             or bool(self._peer_items_unlocked)
         )
         self._commit_btn.setEnabled(not locked and has_item)
-        self._unlock_chk.setEnabled(not locked)
+        # Unlock checkbox is temporarily force-disabled (see __init__).
+        self._unlock_chk.setEnabled(False)
         if self._peer_item is not None:
             self._peer_item.setFlag(
                 QGraphicsItem.GraphicsItemFlag.ItemIsMovable, not locked
@@ -2428,15 +2435,10 @@ class MainWindow(QMainWindow):
         self._event_capture.set_scroll_multiplier(_scroll_mult_clamped)
         logger.info("Restored scroll multiplier: %dx", _scroll_mult_clamped)
 
-        # --- QSettings: restore unlock-same-pc-monitors toggle preference ---
-        _unlock_saved: bool = self._settings.value(
-            "monitors_unlocked",
-            False,
-            type=bool,
-        )
-        self._arr_panel.set_monitors_unlocked(_unlock_saved)
-        if _unlock_saved:
-            logger.info("Restored monitors_unlocked preference: True")
+        # --- QSettings: monitors_unlocked preference is preserved on disk but
+        # the feature is temporarily disabled (see _ScreenArrangementPanel.__init__).
+        # Force runtime state to locked regardless of saved value.
+        self._arr_panel.set_monitors_unlocked(False)
 
     # ------------------------------------------------------------------
     # Helper: default edge from the mirror panel dropdown at construction time
