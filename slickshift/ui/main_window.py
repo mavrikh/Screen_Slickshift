@@ -64,6 +64,7 @@ from slickshift.edge_detection.edge_detector import EdgeDetector
 from slickshift.injection.mouse_inject import MouseInjector
 from slickshift.state_machine.controller import StateController, SwitchState
 from slickshift.transport.socket_io import TcpTransport
+from slickshift.transport.topology import MonitorInfo
 
 logger = logging.getLogger(__name__)
 
@@ -817,6 +818,9 @@ class MainWindow(QMainWindow):
 
         self._injector = MouseInjector()
         self._peer_info: dict | None = None  # last received hello payload from peer
+        # Parsed monitor list from the peer's most recent hello. None means the
+        # peer did not send a monitors field (old peer or not yet connected).
+        self._peer_monitors: list[MonitorInfo] | None = None
 
         # Signal bridge: capture-thread -> Qt main thread.
         # Must be created on the main thread (here in __init__) so Qt assigns it
@@ -1170,6 +1174,7 @@ class MainWindow(QMainWindow):
     def _on_listen_clicked(self) -> None:
         self._user_initiated_disconnect = False
         self._peer_info = None
+        self._peer_monitors = None
         self._state_ctrl.begin_listening()
         self._conn_panel.on_state_changed(SwitchState.LISTENING)
         self._mirror_panel.on_state_changed(SwitchState.LISTENING)
@@ -1184,6 +1189,7 @@ class MainWindow(QMainWindow):
         self._settings.setValue("last_peer_address", self._conn_panel.address_text())
         self._user_initiated_disconnect = False
         self._peer_info = None
+        self._peer_monitors = None
         self._state_ctrl.begin_connecting()
         self._conn_panel.on_state_changed(SwitchState.CONNECTING)
         self._mirror_panel.on_state_changed(SwitchState.CONNECTING)
@@ -1212,6 +1218,7 @@ class MainWindow(QMainWindow):
         else:
             self._state_ctrl.force_release()
         self._peer_info = None
+        self._peer_monitors = None
         self._conn_panel.on_state_changed(SwitchState.IDLE)
         self._mirror_panel.on_state_changed(SwitchState.IDLE)
         self._append_log("Disconnected by user")
@@ -1356,6 +1363,7 @@ class MainWindow(QMainWindow):
         else:
             self._state_ctrl.connection_lost(reason)
             self._peer_info = None
+            self._peer_monitors = None
             self._conn_panel.on_state_changed(SwitchState.IDLE, peer_info=None)
             self._mirror_panel.on_state_changed(SwitchState.IDLE)
             self._append_log(f"Connection lost: {reason}")
@@ -1404,6 +1412,10 @@ class MainWindow(QMainWindow):
 
         If _reconnect_restoring_role is set, this is a successful reconnect.
         Restore the prior role after transitioning to CONNECTED.
+
+        Task #5 (monitors field): if the peer sent a "monitors" list, deserialize
+        it into self._peer_monitors. If absent (old peer), store None and log a
+        debug note so future tasks can detect the backward-compat path.
         """
         self._peer_info = payload
         name = payload.get("machine_name", "unknown")
@@ -1411,6 +1423,20 @@ class MainWindow(QMainWindow):
         lw, lh = payload.get("screen_logical", [0, 0])
         pw, ph = payload.get("screen_physical", [0, 0])
         dpi = payload.get("dpi_scale", 1.0)
+
+        # Parse multi-monitor topology if present (Task #5).
+        raw_monitors: list[dict] | None = payload.get("monitors")
+        if raw_monitors is not None:
+            self._peer_monitors = [MonitorInfo.from_dict(m) for m in raw_monitors]
+            logger.debug(
+                "Peer sent monitor topology: %d monitor(s)", len(self._peer_monitors)
+            )
+        else:
+            self._peer_monitors = None
+            logger.debug(
+                "Peer hello has no 'monitors' field (old peer or pre-Task-5 build); "
+                "falling back to scalar screen_logical/screen_physical fields"
+            )
 
         restoring = self._reconnect_restoring_role
         self._reconnect_restoring_role = False
@@ -1428,6 +1454,10 @@ class MainWindow(QMainWindow):
         self._append_log(
             f"Peer screen: logical {lw}x{lh}, physical {pw}x{ph}, dpi={dpi}"
         )
+        if self._peer_monitors is not None:
+            self._append_log(
+                f"Peer monitor count: {len(self._peer_monitors)}"
+            )
 
         if restoring:
             self._append_log(
@@ -2157,6 +2187,7 @@ class MainWindow(QMainWindow):
             self._state_ctrl.force_release()
 
         self._peer_info = None
+        self._peer_monitors = None
         self._conn_panel.on_state_changed(SwitchState.IDLE, peer_info=None)
         self._mirror_panel.on_state_changed(SwitchState.IDLE)
 
@@ -2244,6 +2275,7 @@ class MainWindow(QMainWindow):
             )
             self._state_ctrl.reconnect_failed_finally()
             self._peer_info = None
+            self._peer_monitors = None
             self._conn_panel.on_state_changed(SwitchState.IDLE, peer_info=None)
             self._mirror_panel.on_state_changed(SwitchState.IDLE)
             return

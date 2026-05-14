@@ -36,12 +36,10 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-import pyautogui
 from PyQt6.QtCore import QObject, pyqtSignal
-from PyQt6.QtGui import QScreen
-from PyQt6.QtWidgets import QApplication
 
 from slickshift import config
+from slickshift.transport.topology import MonitorInfo, enumerate_local_monitors
 
 logger = logging.getLogger(__name__)
 
@@ -104,24 +102,38 @@ def _build_hello_payload() -> dict[str, Any]:
         app_version     -- Slickshift mainline version string
         machine_name    -- socket.gethostname()
         platform        -- platform.system() ("Darwin" / "Windows" / "Linux")
-        screen_logical  -- (width, height) in logical pixels via pyautogui.size()
-        screen_physical -- (width, height) in physical pixels via QScreen
-        dpi_scale       -- ratio of physical to logical (1.0 on non-Retina, 2.0 on Retina, varies on Windows)
+        screen_logical  -- (width, height) of the primary monitor in logical pixels
+                           Kept for backward compatibility with Phase 1 peers.
+        screen_physical -- (width, height) of the primary monitor in physical pixels
+                           Kept for backward compatibility with Phase 1 peers.
+        dpi_scale       -- DPI ratio of the primary monitor
+                           Kept for backward compatibility with Phase 1 peers.
+        monitors        -- list of MonitorInfo dicts for all monitors (Task #5+).
+                           Each dict: {x, y, width, height, dpi_scale, is_primary}
         role_preference -- "either" (real role negotiation is a future step)
     """
-    logical_w, logical_h = pyautogui.size()
+    monitors: list[MonitorInfo] = enumerate_local_monitors()
 
-    # Physical pixel size from Qt's primary screen. logical size * devicePixelRatio
-    # is the reliable cross-platform approach for physical pixel counts.
-    screen: QScreen | None = QApplication.primaryScreen()
-    if screen is not None:
-        dpi_ratio: float = screen.devicePixelRatio()
-        phys_w = int(logical_w * dpi_ratio)
-        phys_h = int(logical_h * dpi_ratio)
+    # Derive legacy scalar fields from the primary monitor (index 0 by
+    # convention in enumerate_local_monitors). This keeps old peers that only
+    # understand screen_logical/screen_physical working without change.
+    if monitors:
+        primary = monitors[0]
+        logical_w: int = primary.width
+        logical_h: int = primary.height
+        dpi_ratio: float = primary.dpi_scale
+        phys_w: int = int(logical_w * dpi_ratio)
+        phys_h: int = int(logical_h * dpi_ratio)
     else:
+        # Fallback: no Qt screen available (headless / test environment).
+        logical_w = 1920
+        logical_h = 1080
         dpi_ratio = 1.0
-        phys_w = logical_w
-        phys_h = logical_h
+        phys_w = 1920
+        phys_h = 1080
+        logger.warning(
+            "_build_hello_payload: no monitors enumerated; using fallback 1920x1080"
+        )
 
     return {
         "type": "hello",
@@ -131,6 +143,7 @@ def _build_hello_payload() -> dict[str, Any]:
         "screen_logical": [logical_w, logical_h],
         "screen_physical": [phys_w, phys_h],
         "dpi_scale": round(dpi_ratio, 4),
+        "monitors": [m.to_dict() for m in monitors],
         "role_preference": "either",
     }
 
