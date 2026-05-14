@@ -77,6 +77,6 @@ KEYBOARD_FORWARDING_DEFAULT: bool = False
 # events to the peer. Mac trackpad senders benefit from 3-5x because pynput
 # delivers fewer events per gesture than a hi-res mouse wheel. Tunable at
 # runtime via the Mirror panel slider; persisted per machine via QSettings.
-SCROLL_MULTIPLIER_DEFAULT: int = 3 if sys.platform == "darwin" else 1
+SCROLL_MULTIPLIER_DEFAULT: int = 4 if sys.platform == "darwin" else 1
 SCROLL_MULTIPLIER_MIN: int = 1
 SCROLL_MULTIPLIER_MAX: int = 10
