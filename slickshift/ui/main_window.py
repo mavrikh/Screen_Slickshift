@@ -73,6 +73,11 @@ from PyQt6.QtWidgets import (
 from slickshift import config
 from slickshift.capture.event_capture import EventCapture
 from slickshift.capture.mouse_capture import MouseCapture
+from slickshift.edge_detection.arrangement import (
+    arrangement_to_wire,
+    invert_arrangement,
+    wire_to_arrangement,
+)
 from slickshift.edge_detection.edge_detector import EdgeDetector
 from slickshift.injection.mouse_inject import MouseInjector
 from slickshift.state_machine.controller import StateController, SwitchState
@@ -116,6 +121,10 @@ class _MainSignals(QObject):
     # Emitted by the pynput listener thread when a scroll wheel event fires.
     # Args: dx (int), dy (int).
     scroll_fired = pyqtSignal(int, int)
+
+    # Emitted when an arrangement_update message arrives from the peer.
+    # Args: wire_arrangement (dict -- JSON-safe wire format).
+    arrangement_update_received = pyqtSignal(object)
 
     # Emitted by the pynput keyboard listener thread when the system-wide
     # Ctrl+Alt+Shift+Esc combo is detected.
@@ -1007,6 +1016,22 @@ class _ScreenArrangementPanel(QGroupBox):
 
         outer.addLayout(bottom_row)
 
+        # Peer-set banner: shown briefly after a remote arrangement_update is
+        # applied.  Starts hidden; auto-dismissed after 3 s via QTimer.
+        self._peer_banner = QLabel("Arrangement set by peer")
+        self._peer_banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._peer_banner.setStyleSheet(
+            "color: #40ffc0; background-color: #0f2020; font-family: monospace; "
+            "font-size: 11px; border: 1px solid #20a070; padding: 3px 8px; border-radius: 3px;"
+        )
+        self._peer_banner.hide()
+        outer.addWidget(self._peer_banner)
+
+        self._peer_banner_timer = QTimer(self)
+        self._peer_banner_timer.setSingleShot(True)
+        self._peer_banner_timer.setInterval(3000)
+        self._peer_banner_timer.timeout.connect(self._peer_banner.hide)
+
         # Internal state.
         self._local_monitors: list[MonitorInfo] = []
         self._peer_monitors: list[MonitorInfo] = []
@@ -1114,6 +1139,67 @@ class _ScreenArrangementPanel(QGroupBox):
             # CONNECTING, HANDSHAKING -- show but lock.
             self.show()
             self._set_locked(True)
+
+    def apply_remote_arrangement(self, arrangement: dict[int, set[str]]) -> None:
+        """
+        Programmatically apply an arrangement received from the peer.
+
+        Moves the peer block to the snap position matching the arrangement,
+        updates the snap state and status label, and marks the arrangement as
+        committed.  The Commit button does NOT fire -- the remote arrangement
+        is already committed by definition.
+
+        Shows a 3-second "Arrangement set by peer" banner so the user knows
+        the panel was updated remotely.
+
+        Parameters
+        ----------
+        arrangement:
+            Inverted arrangement computed by the caller (already suitable for
+            this machine's EdgeDetector -- the caller has applied
+            invert_arrangement() before calling here).
+        """
+        # Collect all edges in the arrangement to find the snap position.
+        all_edges: set[str] = set()
+        for edge_set in arrangement.values():
+            all_edges.update(edge_set)
+
+        # Map the edge set to the closest named snap position.
+        # Corner positions match when both relevant edges are present.
+        snap_pos: str | None = None
+        has_right = "right" in all_edges
+        has_left = "left" in all_edges
+        has_top = "top" in all_edges
+        has_bottom = "bottom" in all_edges
+
+        if has_right and has_top:
+            snap_pos = _SNAP_TOP_RIGHT
+        elif has_right and has_bottom:
+            snap_pos = _SNAP_BOTTOM_RIGHT
+        elif has_left and has_top:
+            snap_pos = _SNAP_TOP_LEFT
+        elif has_left and has_bottom:
+            snap_pos = _SNAP_BOTTOM_LEFT
+        elif has_right:
+            snap_pos = _SNAP_RIGHT
+        elif has_left:
+            snap_pos = _SNAP_LEFT
+        elif has_top:
+            snap_pos = _SNAP_TOP
+        elif has_bottom:
+            snap_pos = _SNAP_BOTTOM
+
+        if snap_pos is not None and self._peer_item is not None:
+            self._apply_snap(snap_pos)
+
+        self._last_arrangement = arrangement
+        self._arrangement_committed = True
+        if self._current_snap is not None:
+            self._update_status_label(self._current_snap)
+
+        # Show the peer-set banner for 3 seconds.
+        self._peer_banner.show()
+        self._peer_banner_timer.start()
 
     # ------------------------------------------------------------------
     # Private: scene building
@@ -1583,6 +1669,9 @@ class MainWindow(QMainWindow):
         self._main_signals.edge_dwell_fired.connect(self._on_edge_dwell_fired)
         self._main_signals.click_fired.connect(self._on_click_fired)
         self._main_signals.scroll_fired.connect(self._on_scroll_fired)
+        self._main_signals.arrangement_update_received.connect(
+            self._handle_arrangement_update
+        )
 
         # Event capture: pynput-based button and scroll event listener.
         self._event_capture = EventCapture(
@@ -2066,6 +2155,11 @@ class MainWindow(QMainWindow):
         peer-edge dropdown to the dominant edge derived from the arrangement.
         Re-evaluates whether the Inject checkbox should be enabled (Inject
         requires a committed arrangement).
+
+        Sends an arrangement_update message to the peer so the peer can apply
+        the geometric inverse automatically.  The send is wrapped in try/except
+        because the peer may be mid-handoff or disconnecting; a failed send
+        must not prevent the local commit from completing.
         """
         logger.info("Arrangement committed: %s", arrangement)
         self._edge_detector.set_exit_edges(arrangement)
@@ -2084,6 +2178,26 @@ class MainWindow(QMainWindow):
         )
         if dominant_edge is not None:
             self._mirror_panel.set_dropdown_edge(dominant_edge)
+
+        # Send the arrangement to the peer so the peer applies the inverse.
+        # Only send when connected (transport is live); skip in IDLE/LISTENING/
+        # CONNECTING/HANDSHAKING when no peer socket exists yet.
+        _sendable_states = frozenset({
+            SwitchState.CONNECTED,
+            SwitchState.CAPTURING,
+            SwitchState.RECEIVING,
+            SwitchState.TRANSITIONING,
+            SwitchState.RECONNECTING,
+        })
+        if self._state_ctrl.state in _sendable_states:
+            wire = arrangement_to_wire(arrangement)
+            try:
+                self._transport.send({"type": "arrangement_update", "arrangement": wire})
+                logger.info("Sent arrangement_update to peer: %s", wire)
+            except Exception as exc:
+                logger.warning(
+                    "arrangement_update send failed (peer may be disconnecting): %s", exc
+                )
 
         # Re-evaluate Inject gate: if we are in RECEIVING and the arrangement
         # is now committed, enable Inject.
@@ -2229,6 +2343,10 @@ class MainWindow(QMainWindow):
             self._handle_scroll_message(message)
         elif msg_type == "key":
             self._handle_key_message(message)
+        elif msg_type == "arrangement_update":
+            self._main_signals.arrangement_update_received.emit(
+                message.get("arrangement", {})
+            )
         elif msg_type == "force_release":
             logger.info("Peer sent force_release -- returning to CONNECTED")
             self._handle_peer_force_release()
@@ -2366,6 +2484,59 @@ class MainWindow(QMainWindow):
         self._append_log(
             f"Peer stopped mirroring. Total deltas received: {self._deltas_received}"
         )
+
+    def _handle_arrangement_update(self, wire_arrangement: dict) -> None:
+        """
+        Process an arrangement_update message from the peer (Qt main thread).
+
+        The peer has committed an arrangement on its side.  Steps:
+        1. Deserialize the wire format.
+        2. Compute the geometric inverse for this machine.
+        3. Apply to EdgeDetector.
+        4. Update the arrangement panel visually.
+        5. Re-evaluate the Inject gate (a remote arrangement counts as committed).
+
+        The signal carries the raw wire dict from _on_message_received so the
+        JSON boundary conversion happens here rather than in the transport thread.
+        """
+        if not wire_arrangement:
+            logger.warning("Received empty arrangement_update -- ignored")
+            return
+
+        peer_arrangement = wire_to_arrangement(wire_arrangement)
+        peer_monitor_count = len(self._peer_monitors) if self._peer_monitors else 1
+        local_arrangement = invert_arrangement(peer_arrangement, peer_monitor_count)
+
+        self._edge_detector.set_exit_edges(local_arrangement)
+        self._arr_panel.apply_remote_arrangement(local_arrangement)
+
+        # Sync the dropdown to the dominant edge of the inverted arrangement.
+        all_edges: set[str] = set()
+        for edge_set in local_arrangement.values():
+            all_edges.update(edge_set)
+        _dropdown_priority = ["right", "left", "top", "bottom"]
+        dominant_edge = next(
+            (e for e in _dropdown_priority if e in all_edges),
+            None,
+        )
+        if dominant_edge is not None:
+            self._mirror_panel.set_dropdown_edge(dominant_edge)
+
+        self._append_log(
+            f"Arrangement set by peer: applied inverse {local_arrangement}"
+        )
+        logger.info(
+            "Applied arrangement_update from peer: arrangement=%s, inverted to=%s",
+            peer_arrangement,
+            local_arrangement,
+        )
+
+        # Re-evaluate Inject gate: remote arrangement counts as committed.
+        if self._state_ctrl.state == SwitchState.RECEIVING:
+            self._mirror_panel.on_state_changed(
+                SwitchState.RECEIVING,
+                arrangement_committed=self._arr_panel.arrangement_committed(),
+            )
 
     def _handle_delta(self, message: dict) -> None:
         """
