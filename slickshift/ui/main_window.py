@@ -1390,6 +1390,7 @@ class _ScreenArrangementPanel(QGroupBox):
         """Clear and repopulate the scene from the current monitor lists."""
         self._scene.clear()
         self._peer_item = None
+        self._peer_items_unlocked = []
         self._local_scene_rects = []
         self._snap_offsets = {}
 
@@ -1422,8 +1423,36 @@ class _ScreenArrangementPanel(QGroupBox):
             label.setFont(font)
             label.setPos(rx + 4, ry + 4)
 
+        # Compute the bounding box of the local group in scene coords.
+        lbx0 = min(r.x() for r in self._local_scene_rects)
+        lby0 = min(r.y() for r in self._local_scene_rects)
+        lbx1 = max(r.x() + r.width() for r in self._local_scene_rects)
+        lby1 = max(r.y() + r.height() for r in self._local_scene_rects)
+
+        # Connect mouseRelease via scene event filter approach.
+        self._view.viewport().installEventFilter(self)
+
+        if self._monitors_unlocked:
+            self._rebuild_scene_unlocked(scale, lbx0, lby0, lbx1, lby1)
+        else:
+            self._rebuild_scene_locked(scale, lbx0, lby0, lbx1, lby1)
+
+    def _rebuild_scene_locked(
+        self,
+        scale: float,
+        lbx0: float,
+        lby0: float,
+        lbx1: float,
+        lby1: float,
+    ) -> None:
+        """
+        Rebuild the scene in locked (group-drag) mode.
+
+        All peer monitors move as a single unit. Snap positions are the same 8
+        positions relative to the local monitor cluster as in the original Task #7
+        design.
+        """
         # --- Peer monitors (draggable group) ---
-        # Compute peer group bounding box in scene coords.
         px0 = min(m.x for m in self._peer_monitors)
         py0 = min(m.y for m in self._peer_monitors)
         peer_rects_local: list[QRectF] = []
@@ -1437,22 +1466,17 @@ class _ScreenArrangementPanel(QGroupBox):
         self._peer_item = _DraggablePeerGroup(peer_rects_local)
         self._scene.addItem(self._peer_item)
 
-        # Compute the bounding box of the local group in scene coords.
-        lbx0 = min(r.x() for r in self._local_scene_rects)
-        lby0 = min(r.y() for r in self._local_scene_rects)
-        lbx1 = max(r.x() + r.width() for r in self._local_scene_rects)
-        lby1 = max(r.y() + r.height() for r in self._local_scene_rects)
-
         # Peer group bounding box dimensions.
-        pgw = max(
-            r.x() + r.width() for r in peer_rects_local
-        ) - min(r.x() for r in peer_rects_local)
-        pgh = max(
-            r.y() + r.height() for r in peer_rects_local
-        ) - min(r.y() for r in peer_rects_local)
+        pgw = (
+            max(r.x() + r.width() for r in peer_rects_local)
+            - min(r.x() for r in peer_rects_local)
+        )
+        pgh = (
+            max(r.y() + r.height() for r in peer_rects_local)
+            - min(r.y() for r in peer_rects_local)
+        )
 
-        # Compute snap-position top-left corners (item.pos()) for the peer group.
-        # The peer group's internal rects start at (0,0) relative to item origin.
+        # Snap-position top-left corners for the peer group.
         self._snap_offsets = {
             _SNAP_RIGHT: QPointF(lbx1, lby0 + (lby1 - lby0) / 2 - pgh / 2),
             _SNAP_LEFT: QPointF(lbx0 - pgw, lby0 + (lby1 - lby0) / 2 - pgh / 2),
@@ -1464,13 +1488,7 @@ class _ScreenArrangementPanel(QGroupBox):
             _SNAP_BOTTOM_LEFT: QPointF(lbx0 - pgw, lby1),
         }
 
-        # Connect mouseRelease via scene change notification.
-        # We poll position changes using ItemSendsScenePositionChanges flag,
-        # but Qt's itemChange only fires during move. We use a scene event filter
-        # approach: override the view's mouse release.
-        self._view.viewport().installEventFilter(self)
-
-        # Place the peer group at the default snap position (right).
+        # Place at default snap position.
         default_snap = _SNAP_RIGHT
         if self._current_snap is not None and self._current_snap in self._snap_offsets:
             default_snap = self._current_snap
@@ -1490,6 +1508,62 @@ class _ScreenArrangementPanel(QGroupBox):
         sy0 = min(r.y() for r in all_rects) - self._SCENE_MARGIN
         sx1 = max(r.x() + r.width() for r in all_rects) + self._SCENE_MARGIN
         sy1 = max(r.y() + r.height() for r in all_rects) + self._SCENE_MARGIN
+        self._scene.setSceneRect(QRectF(sx0, sy0, sx1 - sx0, sy1 - sy0))
+        self._view.fitInView(self._scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+
+        self._commit_btn.setEnabled(not self._locked)
+
+    def _rebuild_scene_unlocked(
+        self,
+        scale: float,
+        lbx0: float,
+        lby0: float,
+        lbx1: float,
+        lby1: float,
+    ) -> None:
+        """
+        Rebuild the scene in unlocked (per-monitor independent drag) mode.
+
+        Each peer monitor gets its own _DraggablePeerItem. Items are placed in a
+        vertical stack to the right of the local monitor cluster by default so
+        they are visible and do not overlap on first render.
+        """
+        lw = lbx1 - lbx0
+        lh = lby1 - lby0
+
+        y_cursor = lby0
+        for idx, mon in enumerate(self._peer_monitors):
+            prw = max(mon.width * scale, 4.0)
+            prh = max(mon.height * scale, 4.0)
+            # item-local rect always starts at (0,0).
+            item_rect = QRectF(0.0, 0.0, prw, prh)
+            peer_item = _DraggablePeerItem(item_rect, idx)
+            if self._locked:
+                peer_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
+            self._scene.addItem(peer_item)
+            # Position: stack to the right of local monitors.
+            peer_item.setPos(QPointF(lbx1, y_cursor))
+            y_cursor += prh + 4.0
+            self._peer_items_unlocked.append(peer_item)
+            # Label the item with its monitor index.
+            label = self._scene.addText(f"P{idx}")
+            label.setDefaultTextColor(QColor("#1a1a2e"))
+            font = QFont("monospace", 7)
+            label.setFont(font)
+            label.setPos(peer_item.pos().x() + 2, peer_item.pos().y() + 2)
+
+        # Scene rect: include local + all peer items with margin.
+        all_scene_rects: list[QRectF] = list(self._local_scene_rects)
+        for item in self._peer_items_unlocked:
+            all_scene_rects.append(item.scene_rect())
+
+        sx0 = min(r.x() for r in all_scene_rects) - self._SCENE_MARGIN
+        sy0 = min(r.y() for r in all_scene_rects) - self._SCENE_MARGIN
+        sx1 = max(r.x() + r.width() for r in all_scene_rects) + self._SCENE_MARGIN
+        sy1 = max(r.y() + r.height() for r in all_scene_rects) + self._SCENE_MARGIN
+        # Add extra margin to give dragging room.
+        sx1 += lw
+        sy1 += lh
         self._scene.setSceneRect(QRectF(sx0, sy0, sx1 - sx0, sy1 - sy0))
         self._view.fitInView(self._scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
 
@@ -1551,19 +1625,153 @@ class _ScreenArrangementPanel(QGroupBox):
         """
         Intercept mouse-release on the scene viewport.
 
-        When the user releases the mouse after dragging the peer group, find
-        the nearest snap position and snap to it. Threshold: _SNAP_THRESHOLD
-        scene pixels from the nearest snap point.
+        In locked (group-drag) mode: find the nearest snap position for the
+        peer group and snap to it.
+
+        In unlocked (per-monitor) mode: snap each peer item independently to
+        the nearest edge of any local monitor or other peer monitor. Updates
+        highlights on all items after snapping.
         """
         from PyQt6.QtCore import QEvent
         if (
             obj is self._view.viewport()
             and event.type() == QEvent.Type.MouseButtonRelease
-            and self._peer_item is not None
             and not self._locked
         ):
-            self._snap_to_nearest()
+            if self._monitors_unlocked:
+                self._snap_unlocked_items()
+            elif self._peer_item is not None:
+                self._snap_to_nearest()
         return super().eventFilter(obj, event)
+
+    def _snap_unlocked_items(self) -> None:
+        """
+        Snap each independent peer-monitor item to the nearest qualifying edge.
+
+        For each peer item, candidate snap targets are:
+          1. Edges of every local monitor rectangle (in scene coords).
+          2. Edges of every other peer monitor item (in scene coords).
+
+        A "snap" aligns the item so it abuts the target edge with zero gap.
+        Only the closest edge within _SNAP_THRESHOLD is used. Candidates use
+        center-to-center proximity on the dominant axis to avoid bizarre
+        snapping when the item is far away on the perpendicular axis.
+
+        After all items have been repositioned, highlights are refreshed.
+        """
+        if not self._peer_items_unlocked:
+            return
+
+        for item in self._peer_items_unlocked:
+            item_sr = item.scene_rect()
+            iw = item_sr.width()
+            ih = item_sr.height()
+            icx = item_sr.x() + iw / 2
+            icy = item_sr.y() + ih / 2
+
+            best_pos: QPointF | None = None
+            best_dist: float = self._SNAP_THRESHOLD
+
+            # --- Candidates from local monitor rects ---
+            for local_rect in self._local_scene_rects:
+                lx = local_rect.x()
+                ly = local_rect.y()
+                lw = local_rect.width()
+                lh = local_rect.height()
+
+                candidates: list[tuple[float, float]] = [
+                    # right edge of local -> item's left attaches
+                    (lx + lw, ly + lh / 2 - ih / 2),
+                    # left edge of local -> item's right attaches
+                    (lx - iw, ly + lh / 2 - ih / 2),
+                    # bottom edge of local -> item's top attaches
+                    (lx + lw / 2 - iw / 2, ly + lh),
+                    # top edge of local -> item's bottom attaches
+                    (lx + lw / 2 - iw / 2, ly - ih),
+                ]
+                for sx, sy in candidates:
+                    ccx = sx + iw / 2
+                    ccy = sy + ih / 2
+                    dist = ((icx - ccx) ** 2 + (icy - ccy) ** 2) ** 0.5
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_pos = QPointF(sx, sy)
+
+            # --- Candidates from other peer items ---
+            for other in self._peer_items_unlocked:
+                if other is item:
+                    continue
+                other_sr = other.scene_rect()
+                ox = other_sr.x()
+                oy = other_sr.y()
+                ow = other_sr.width()
+                oh = other_sr.height()
+
+                candidates_peer: list[tuple[float, float]] = [
+                    (ox + ow, oy + oh / 2 - ih / 2),
+                    (ox - iw, oy + oh / 2 - ih / 2),
+                    (ox + ow / 2 - iw / 2, oy + oh),
+                    (ox + ow / 2 - iw / 2, oy - ih),
+                ]
+                for sx, sy in candidates_peer:
+                    ccx = sx + iw / 2
+                    ccy = sy + ih / 2
+                    dist = ((icx - ccx) ** 2 + (icy - ccy) ** 2) ** 0.5
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_pos = QPointF(sx, sy)
+
+            if best_pos is not None:
+                item.setPos(best_pos)
+
+        # Refresh highlights after all items are snapped.
+        self._update_highlights_unlocked()
+
+    def _update_highlights_unlocked(self) -> None:
+        """
+        Refresh edge highlights on all peer items in unlocked mode.
+
+        For each peer item, find every local monitor edge it is touching (within
+        2 scene pixels of abutting). Collect highlights as (local_rect_in_item_coords,
+        edge) pairs and pass to the item.
+        """
+        touch_px = 2.0
+        for item in self._peer_items_unlocked:
+            item_sr = item.scene_rect()
+            item_pos = item.pos()
+            highlights: list[tuple[QRectF, str]] = []
+
+            for local_rect in self._local_scene_rects:
+                # Convert local_rect to item-local coordinates.
+                local_in_item = QRectF(
+                    local_rect.x() - item_pos.x(),
+                    local_rect.y() - item_pos.y(),
+                    local_rect.width(),
+                    local_rect.height(),
+                )
+                lx = local_rect.x()
+                ly = local_rect.y()
+                lw = local_rect.width()
+                lh = local_rect.height()
+                ix = item_sr.x()
+                iy = item_sr.y()
+                iw = item_sr.width()
+                ih = item_sr.height()
+
+                # right edge of local touches left edge of item
+                if abs((lx + lw) - ix) < touch_px:
+                    highlights.append((local_in_item, "right"))
+                # left edge of local touches right edge of item
+                if abs(lx - (ix + iw)) < touch_px:
+                    highlights.append((local_in_item, "left"))
+                # bottom edge of local touches top edge of item
+                if abs((ly + lh) - iy) < touch_px:
+                    highlights.append((local_in_item, "bottom"))
+                # top edge of local touches bottom edge of item
+                if abs(ly - (iy + ih)) < touch_px:
+                    highlights.append((local_in_item, "top"))
+
+            item.set_highlights(highlights)
 
     def _snap_to_nearest(self) -> None:
         """Snap the peer group to the nearest snap position, if within threshold."""
