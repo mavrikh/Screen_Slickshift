@@ -51,6 +51,7 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QSizePolicy,
+    QSlider,
     QSplitter,
     QVBoxLayout,
     QWidget,
@@ -596,6 +597,36 @@ class _MirrorPanel(QGroupBox):
         self._peer_edge_combo.setEnabled(True)
         layout.addWidget(self._peer_edge_combo)
 
+        scroll_label = QLabel("Scroll:")
+        scroll_label.setStyleSheet("color: #b0b0b0; font-family: monospace; font-size: 12px;")
+        layout.addWidget(scroll_label)
+
+        self._scroll_slider = QSlider(Qt.Orientation.Horizontal)
+        self._scroll_slider.setMinimum(config.SCROLL_MULTIPLIER_MIN)
+        self._scroll_slider.setMaximum(config.SCROLL_MULTIPLIER_MAX)
+        self._scroll_slider.setValue(config.SCROLL_MULTIPLIER_DEFAULT)
+        self._scroll_slider.setFixedWidth(90)
+        self._scroll_slider.setToolTip(
+            "Multiplier applied to outgoing scroll events. "
+            "Increase if trackpad scrolling on this machine feels slow on the peer."
+        )
+        self._scroll_slider.setStyleSheet(
+            "QSlider::groove:horizontal { background: #16213e; height: 4px; border: 1px solid #3a3a6e; } "
+            "QSlider::handle:horizontal { background: #e0e0e0; width: 10px; margin: -4px 0; border-radius: 2px; } "
+            "QSlider::sub-page:horizontal { background: #40a0ff; }"
+        )
+        layout.addWidget(self._scroll_slider)
+
+        self._scroll_value_label = QLabel(f"{config.SCROLL_MULTIPLIER_DEFAULT}x")
+        self._scroll_value_label.setStyleSheet(
+            "color: #e0e0e0; font-family: monospace; font-size: 12px; min-width: 24px;"
+        )
+        layout.addWidget(self._scroll_value_label)
+
+        self._scroll_slider.valueChanged.connect(
+            lambda v: self._scroll_value_label.setText(f"{v}x")
+        )
+
         layout.addStretch()
 
         self._role_label = QLabel("Role: Idle")
@@ -691,6 +722,10 @@ class _MirrorPanel(QGroupBox):
     @property
     def peer_edge_combo(self) -> QComboBox:
         return self._peer_edge_combo
+
+    @property
+    def scroll_slider(self) -> QSlider:
+        return self._scroll_slider
 
 
 class MainWindow(QMainWindow):
@@ -956,6 +991,10 @@ class MainWindow(QMainWindow):
             self._on_peer_edge_changed
         )
 
+        self._mirror_panel.scroll_slider.valueChanged.connect(
+            self._event_capture.set_scroll_multiplier
+        )
+
         # EdgeDetector callback is already registered above on _edge_detector.
         # (In the test app this was: self._capture.set_edge_dwell_callback(...))
         # Now: self._edge_detector.register_callback(self._schedule_handoff_fire)
@@ -1029,6 +1068,19 @@ class MainWindow(QMainWindow):
         self._mirror_panel.kbd_fwd_chk.blockSignals(False)
         if _kbd_fwd_saved:
             logger.info("Restored keyboard forwarding preference: enabled (checkbox pre-checked)")
+
+        _scroll_mult_saved: int = self._settings.value(
+            "scroll_multiplier",
+            config.SCROLL_MULTIPLIER_DEFAULT,
+            type=int,
+        )
+        _scroll_mult_clamped = max(
+            config.SCROLL_MULTIPLIER_MIN,
+            min(config.SCROLL_MULTIPLIER_MAX, _scroll_mult_saved),
+        )
+        self._mirror_panel.scroll_slider.setValue(_scroll_mult_clamped)
+        self._event_capture.set_scroll_multiplier(_scroll_mult_clamped)
+        logger.info("Restored scroll multiplier: %dx", _scroll_mult_clamped)
 
     # ------------------------------------------------------------------
     # Helper: default edge from the mirror panel dropdown at construction time
@@ -1139,6 +1191,7 @@ class MainWindow(QMainWindow):
         self._transport.connect_to_peer(host, port)
 
     def _on_disconnect_clicked(self) -> None:
+        self._settings.setValue("scroll_multiplier", self._mirror_panel.scroll_slider.value())
         self._user_initiated_disconnect = True
         self._reconnect_timer.stop()
         self._idle_timer.stop()
@@ -1242,6 +1295,7 @@ class MainWindow(QMainWindow):
         (CAPTURING, RECEIVING, TRANSITIONING), enter the auto-reconnect path
         instead of going directly to IDLE.
         """
+        self._settings.setValue("scroll_multiplier", self._mirror_panel.scroll_slider.value())
         self._dead_man_timer.stop()
         self._handoff_ack_timer.stop()
         self._idle_timer.stop()
@@ -1864,6 +1918,7 @@ class MainWindow(QMainWindow):
         Stop pynput listener threads cleanly before the window closes.
         Also stop the keyboard listener and cancel any in-flight reconnect.
         """
+        self._settings.setValue("scroll_multiplier", self._mirror_panel.scroll_slider.value())
         self._reconnect_timer.stop()
         self._idle_timer.stop()
         self._stop_kb_listener()

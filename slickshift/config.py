@@ -5,6 +5,8 @@ Change values here to tune behavior without touching module code.
 Port 51847 is in the ephemeral/user range and is not assigned by IANA.
 """
 
+import sys
+
 # Network
 DEFAULT_PORT: int = 51847
 DEFAULT_HOST: str = "0.0.0.0"  # listen on all interfaces when acting as server
@@ -70,3 +72,11 @@ IDLE_TIMEOUT_S: float = 60.0
 # Sender's local keystrokes still fire on local apps -- this forwards them
 # additionally to the peer. Use with explicit caution.
 KEYBOARD_FORWARDING_DEFAULT: bool = False
+
+# Outgoing scroll multiplier. Applied at capture time before sending scroll
+# events to the peer. Mac trackpad senders benefit from 3-5x because pynput
+# delivers fewer events per gesture than a hi-res mouse wheel. Tunable at
+# runtime via the Mirror panel slider; persisted per machine via QSettings.
+SCROLL_MULTIPLIER_DEFAULT: int = 3 if sys.platform == "darwin" else 1
+SCROLL_MULTIPLIER_MIN: int = 1
+SCROLL_MULTIPLIER_MAX: int = 10

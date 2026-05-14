@@ -70,6 +70,12 @@ class EventCapture:
         self._on_scroll = on_scroll
         self._active: bool = False
         self._listener: _pynput_mouse.Listener | None = None
+        self._scroll_multiplier: int = 1
+
+    def set_scroll_multiplier(self, value: int) -> None:
+        """Set the outgoing scroll multiplier applied to each captured scroll event."""
+        self._scroll_multiplier = value
+        logger.debug("EventCapture scroll_multiplier=%d", value)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -172,8 +178,10 @@ class EventCapture:
         if not self._active:
             return
 
+        dx_scaled = dx * self._scroll_multiplier
+        dy_scaled = dy * self._scroll_multiplier
         logger.debug(
-            "EventCapture scroll: dx=%d dy=%d pos=(%d,%d)",
-            dx, dy, x, y,
+            "EventCapture scroll: dx=%d dy=%d (x%d) pos=(%d,%d)",
+            dx_scaled, dy_scaled, self._scroll_multiplier, x, y,
         )
-        self._on_scroll(dx, dy)
+        self._on_scroll(dx_scaled, dy_scaled)
