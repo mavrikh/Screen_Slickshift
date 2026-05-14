@@ -6,7 +6,7 @@ edges that are exit edges toward the peer (set[str]).  When machine A commits
 an arrangement, it must send the geometric inverse to machine B so that B's
 exit edges face back toward A consistently.
 
-Single-monitor inversion table (the only case handled precisely here):
+Single-monitor inversion table:
 
     local side  ->  peer side
     {0: {"right"}}          ->  {0: {"left"}}
@@ -18,11 +18,23 @@ Single-monitor inversion table (the only case handled precisely here):
     {0: {"left", "top"}}    ->  {0: {"right", "bottom"}}
     {0: {"left", "bottom"}} ->  {0: {"right", "top"}}
 
-Multi-monitor inversion (peer_monitor_count > 1 OR arrangement spans more than
-one monitor index) is deferred to Task #9.  For now the simple per-edge
-opposite is applied to each monitor index independently, a warning is logged,
-and the caller proceeds.  The result is good enough to unblock testing on
-single-monitor setups.
+Multi-monitor inversion (unlocked mode):
+
+    When the user has unlocked peer monitors and positioned them independently,
+    the arrangement on machine A is {local_idx: {edges...}} for each local monitor
+    that has an exit edge facing a peer monitor.  The inversion applies the
+    opposite edge to each local_idx entry and maps the result to the same index
+    on the peer's monitor list.  This is correct when the peer's monitor indices
+    correspond to the same relative positions -- which is the natural case when
+    both machines have monitors with identical layout indices.
+
+    When the arrangement spans more local monitor indices than the peer has
+    monitors (index out of range), those entries are dropped and a WARNING is
+    logged.  The caller should use the returned arrangement as-is.
+
+    Locked-mode multi-monitor (arrangement spans more than one index but no
+    explicit per-monitor positioning was done) applies the same per-edge
+    opposite, identical to the unlocked path.
 
 Wire format helpers:
 
@@ -56,27 +68,32 @@ def invert_arrangement(
     """
     Compute the geometric inverse of a local arrangement for the peer machine.
 
-    For a single-monitor setup (one monitor index in arrangement AND
-    peer_monitor_count == 1) this applies the simple opposite-edge table:
-        right <-> left,  top <-> bottom.
+    For each (monitor_idx, edges) pair in the arrangement, the inverted
+    arrangement maps monitor_idx to the set of opposite edges:
+        right -> left,  left -> right,  top -> bottom,  bottom -> top.
 
-    For multi-monitor cases (arrangement spans more than one index, or
-    peer_monitor_count > 1) the same per-edge opposite is applied to each
-    index independently.  A WARNING is logged so Task #9 can pick up real
-    cases that need proper cross-monitor inversion.
+    The monitor index in the returned dict is the same as in the input. The
+    caller is responsible for applying the result to the peer's monitor list.
+    This works correctly when both machines number their monitors from 0 in the
+    same relative order (which is the common case for the unlocked multi-monitor
+    path introduced in Task #10).
 
-    The returned arrangement uses the same monitor index space as the input.
-    That is, monitor 0 in the input maps to monitor 0 in the output.  The
-    caller is responsible for applying the result to the peer's own monitor
-    list (which may number differently -- Task #9 handles remapping).
+    When an arrangement index is out of range for the peer's monitor list (i.e.,
+    index >= peer_monitor_count), the entry is dropped and a WARNING is logged.
+    This handles the case where the peer has fewer monitors than local.
+
+    When all indices are dropped (no valid entries remain), the function falls
+    back to {0: inverse_edges_of_first_entry} and logs a WARNING so the caller
+    is informed that a best-effort result was used.
 
     Parameters
     ----------
     arrangement:
-        Local arrangement dict, e.g. {0: {"right"}} or {0: {"right", "top"}}.
+        Local arrangement dict, e.g. {0: {"right"}} or
+        {0: {"right", "top"}, 1: {"right"}}.
     peer_monitor_count:
-        Number of monitors on the peer machine.  Used only to decide whether
-        to emit the multi-monitor warning.
+        Number of monitors on the peer machine. Indices >= this value are
+        dropped.
 
     Returns
     -------
@@ -84,21 +101,14 @@ def invert_arrangement(
         Inverted arrangement suitable for passing to
         EdgeDetector.set_exit_edges() on the peer machine.
     """
-    local_monitor_count = len(arrangement)
-    multi_monitor = local_monitor_count > 1 or peer_monitor_count > 1
-
-    if multi_monitor:
-        logger.warning(
-            "invert_arrangement: multi-monitor case detected "
-            "(local_monitors_in_arrangement=%d, peer_monitor_count=%d). "
-            "Applying simple per-edge inversion -- Task #9 will handle "
-            "proper cross-monitor remapping.",
-            local_monitor_count,
-            peer_monitor_count,
-        )
-
     inverted: dict[int, set[str]] = {}
+    dropped: list[int] = []
+
     for monitor_idx, edges in arrangement.items():
+        if monitor_idx >= peer_monitor_count:
+            dropped.append(monitor_idx)
+            continue
+
         inv_edges: set[str] = set()
         for edge in edges:
             opposite = _OPPOSITE_EDGE.get(edge)
@@ -112,6 +122,28 @@ def invert_arrangement(
                 )
         if inv_edges:
             inverted[monitor_idx] = inv_edges
+
+    if dropped:
+        logger.warning(
+            "invert_arrangement: arrangement indices %s are out of range for "
+            "peer (peer_monitor_count=%d) -- dropped from inverted result",
+            dropped,
+            peer_monitor_count,
+        )
+
+    if not inverted and arrangement:
+        # Best-effort fallback: apply inverse of the first valid entry to index 0.
+        first_edges = next(iter(arrangement.values()))
+        fb_edges: set[str] = {
+            _OPPOSITE_EDGE[e] for e in first_edges if e in _OPPOSITE_EDGE
+        }
+        if not fb_edges:
+            fb_edges = {"left"}  # absolute last resort
+        inverted = {0: fb_edges}
+        logger.warning(
+            "invert_arrangement: all entries dropped -- falling back to {0: %s}",
+            fb_edges,
+        )
 
     logger.debug(
         "invert_arrangement: %s -> %s (peer_monitor_count=%d)",

@@ -1802,9 +1802,10 @@ class _ScreenArrangementPanel(QGroupBox):
 
     def _on_commit_clicked(self) -> None:
         """Commit the current snap arrangement."""
-        if self._current_snap is None:
-            return
-        self._do_commit()
+        if self._monitors_unlocked:
+            self._do_commit_unlocked()
+        elif self._current_snap is not None:
+            self._do_commit()
 
     def _do_commit(self) -> None:
         """Derive the arrangement from the current snap position and emit it."""
@@ -1814,6 +1815,23 @@ class _ScreenArrangementPanel(QGroupBox):
         self._last_arrangement = arrangement
         self._arrangement_committed = True
         self._update_status_label(self._current_snap)
+        self.arrangement_changed.emit(arrangement)
+
+    def _do_commit_unlocked(self) -> None:
+        """
+        Derive and emit the per-monitor arrangement from independently positioned items.
+
+        Calls _compute_arrangement_unlocked() to derive {local_idx: {edges}} from
+        geometric proximity of peer items to local monitor rects.
+        """
+        if not self._peer_items_unlocked:
+            return
+        arrangement = self._compute_arrangement_unlocked()
+        self._last_arrangement = arrangement
+        self._arrangement_committed = True
+        self._status_label.setText(
+            f"Arrangement: {len(self._peer_items_unlocked)} peer monitor(s) placed (committed)"
+        )
         self.arrangement_changed.emit(arrangement)
 
     def _compute_arrangement(self, snap_pos: str) -> dict[int, set[str]]:
@@ -1860,6 +1878,86 @@ class _ScreenArrangementPanel(QGroupBox):
                 for idx, mon in enumerate(self._local_monitors):
                     if mon.y + mon.height == extreme:
                         result.setdefault(idx, set()).add(edge)
+        return result
+
+    def _compute_arrangement_unlocked(self) -> dict[int, set[str]]:
+        """
+        Derive a per-local-monitor exit-edge arrangement from independently placed items.
+
+        For each peer monitor item, determine which local monitor(s) it is touching
+        and on which edge(s). A touch is detected when the peer item's bounding box
+        abuts a local monitor's edge within _SNAP_THRESHOLD scene pixels.
+
+        The returned dict maps local_monitor_index -> set of exit edges that face
+        the peer on that monitor.
+
+        If a peer item does not touch any local monitor, a WARNING is logged and
+        that item is skipped. The arrangement is still emitted with whatever valid
+        entries exist (no gate on layout sanity per task spec).
+
+        If no items touch any local monitor (fully disconnected layout), falls back
+        to {0: {"right"}} and logs a WARNING.
+
+        Edge determination per peer item and local monitor:
+          - item's left abuts local's right  -> local has exit edge "right"
+          - item's right abuts local's left  -> local has exit edge "left"
+          - item's top abuts local's bottom  -> local has exit edge "bottom"
+          - item's bottom abuts local's top  -> local has exit edge "top"
+        """
+        touch_px = self._SNAP_THRESHOLD
+        result: dict[int, set[str]] = {}
+        any_touch = False
+
+        for item in self._peer_items_unlocked:
+            item_sr = item.scene_rect()
+            ix = item_sr.x()
+            iy = item_sr.y()
+            iw = item_sr.width()
+            ih = item_sr.height()
+            item_touched = False
+
+            for local_idx, local_rect in enumerate(self._local_scene_rects):
+                lx = local_rect.x()
+                ly = local_rect.y()
+                lw = local_rect.width()
+                lh = local_rect.height()
+
+                # Horizontal adjacency: item's left abuts local's right (exit "right").
+                if abs(ix - (lx + lw)) < touch_px:
+                    result.setdefault(local_idx, set()).add("right")
+                    item_touched = True
+                    any_touch = True
+                # item's right abuts local's left (exit "left").
+                if abs((ix + iw) - lx) < touch_px:
+                    result.setdefault(local_idx, set()).add("left")
+                    item_touched = True
+                    any_touch = True
+                # Vertical adjacency: item's top abuts local's bottom (exit "bottom").
+                if abs(iy - (ly + lh)) < touch_px:
+                    result.setdefault(local_idx, set()).add("bottom")
+                    item_touched = True
+                    any_touch = True
+                # item's bottom abuts local's top (exit "top").
+                if abs((iy + ih) - ly) < touch_px:
+                    result.setdefault(local_idx, set()).add("top")
+                    item_touched = True
+                    any_touch = True
+
+            if not item_touched:
+                logger.warning(
+                    "_compute_arrangement_unlocked: peer monitor %d does not touch "
+                    "any local monitor -- skipped in arrangement. "
+                    "The resulting layout may be disconnected.",
+                    item.monitor_index,
+                )
+
+        if not any_touch:
+            logger.warning(
+                "_compute_arrangement_unlocked: no peer items touch any local monitor. "
+                "Falling back to {0: {'right'}} so EdgeDetector has a valid arrangement."
+            )
+            return {0: {"right"}}
+
         return result
 
     def _set_locked(self, locked: bool) -> None:
