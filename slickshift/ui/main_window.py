@@ -36,13 +36,26 @@ import time
 import pyautogui
 from pynput import keyboard as _pynput_keyboard
 
-from PyQt6.QtCore import QObject, QSettings, Qt, QTimer, QSize, pyqtSignal
+from PyQt6.QtCore import (
+    QObject,
+    QPointF,
+    QRectF,
+    QSettings,
+    Qt,
+    QTimer,
+    QSize,
+    pyqtSignal,
+)
 from PyQt6.QtGui import QColor, QFont, QPainter, QPen
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
     QFrame,
+    QGraphicsItem,
+    QGraphicsRectItem,
+    QGraphicsScene,
+    QGraphicsView,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -728,6 +741,660 @@ class _MirrorPanel(QGroupBox):
     @property
     def scroll_slider(self) -> QSlider:
         return self._scroll_slider
+
+
+class _DraggablePeerGroup(QGraphicsItem):
+    """
+    A group of peer-monitor rectangles that move together as a single unit.
+
+    Renders all peer monitors scaled to the scene coordinate space. The user
+    drags this item to position the peer machine relative to the local monitors.
+    When released, the parent scene's snap logic fires.
+
+    Colors:
+        Peer rectangles: amber #f0c040
+        Snap-edge highlight: green #40ffc0
+    """
+
+    _PEER_COLOR = QColor("#f0c040")
+    _PEER_BORDER = QColor("#c09020")
+    _HIGHLIGHT_COLOR = QColor("#40ffc0")
+
+    def __init__(
+        self,
+        peer_rects_scene: list[QRectF],
+        parent: QGraphicsItem | None = None,
+    ) -> None:
+        super().__init__(parent)
+        # peer_rects_scene: rectangles in scene coordinates (already scaled)
+        self._rects: list[QRectF] = peer_rects_scene
+        # Which edges of which local rectangles to highlight.
+        # List of (local_rect: QRectF, edge: str) pairs.
+        self._highlights: list[tuple[QRectF, str]] = []
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsScenePositionChanges, True)
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+
+    def set_highlights(self, highlights: list[tuple[QRectF, str]]) -> None:
+        """
+        Set which local monitor edges to draw a highlight on.
+
+        highlights is a list of (local_rect_in_scene_coords, edge_str) pairs.
+        The local_rect must be in SCENE coordinates (not accounting for this item's
+        own position -- the caller converts before calling).
+        """
+        self._highlights = highlights
+        self.update()
+
+    def bounding_rect_of_rects(self) -> QRectF:
+        """Return the union bounding box of all peer rectangles."""
+        if not self._rects:
+            return QRectF(0, 0, 1, 1)
+        x0 = min(r.x() for r in self._rects)
+        y0 = min(r.y() for r in self._rects)
+        x1 = max(r.x() + r.width() for r in self._rects)
+        y1 = max(r.y() + r.height() for r in self._rects)
+        return QRectF(x0, y0, x1 - x0, y1 - y0)
+
+    def boundingRect(self) -> QRectF:  # type: ignore[override]
+        # Expand by highlight line width so it is not clipped.
+        br = self.bounding_rect_of_rects()
+        pad = 6.0
+        return br.adjusted(-pad, -pad, pad, pad)
+
+    def paint(self, painter: QPainter, option, widget=None) -> None:  # type: ignore[override]
+        # Draw peer rectangles.
+        for rect in self._rects:
+            painter.setBrush(self._PEER_COLOR)
+            pen = QPen(self._PEER_BORDER)
+            pen.setWidth(1)
+            painter.setPen(pen)
+            painter.drawRect(rect)
+
+        # Draw snap-edge highlights on local rects.
+        # The highlight is drawn in the item's local coordinate system; the caller
+        # passes local-rect positions that are already offset to this item's frame.
+        if self._highlights:
+            hpen = QPen(self._HIGHLIGHT_COLOR)
+            hpen.setWidth(3)
+            painter.setPen(hpen)
+            for local_rect, edge in self._highlights:
+                if edge == "right":
+                    x = local_rect.x() + local_rect.width()
+                    painter.drawLine(
+                        QPointF(x, local_rect.y()),
+                        QPointF(x, local_rect.y() + local_rect.height()),
+                    )
+                elif edge == "left":
+                    x = local_rect.x()
+                    painter.drawLine(
+                        QPointF(x, local_rect.y()),
+                        QPointF(x, local_rect.y() + local_rect.height()),
+                    )
+                elif edge == "top":
+                    y = local_rect.y()
+                    painter.drawLine(
+                        QPointF(local_rect.x(), y),
+                        QPointF(local_rect.x() + local_rect.width(), y),
+                    )
+                elif edge == "bottom":
+                    y = local_rect.y() + local_rect.height()
+                    painter.drawLine(
+                        QPointF(local_rect.x(), y),
+                        QPointF(local_rect.x() + local_rect.width(), y),
+                    )
+
+
+# Snap position constants. These describe where the peer group sits relative
+# to the local monitor cluster.
+_SNAP_RIGHT = "right"
+_SNAP_LEFT = "left"
+_SNAP_TOP = "top"
+_SNAP_BOTTOM = "bottom"
+_SNAP_TOP_RIGHT = "top_right"
+_SNAP_TOP_LEFT = "top_left"
+_SNAP_BOTTOM_RIGHT = "bottom_right"
+_SNAP_BOTTOM_LEFT = "bottom_left"
+
+# Map from snap position to the set of exit edges it implies on monitor 0.
+# For multi-monitor local setups the panel derives per-monitor edges in
+# _compute_arrangement(), but single-monitor uses this table directly.
+_SNAP_TO_EDGES: dict[str, set[str]] = {
+    _SNAP_RIGHT: {"right"},
+    _SNAP_LEFT: {"left"},
+    _SNAP_TOP: {"top"},
+    _SNAP_BOTTOM: {"bottom"},
+    _SNAP_TOP_RIGHT: {"right", "top"},
+    _SNAP_TOP_LEFT: {"left", "top"},
+    _SNAP_BOTTOM_RIGHT: {"right", "bottom"},
+    _SNAP_BOTTOM_LEFT: {"left", "bottom"},
+}
+
+# Map from snap position to the dominant dropdown-compatible edge.
+# Corner positions collapse to the horizontal axis (right/left takes priority).
+_SNAP_TO_DROPDOWN_EDGE: dict[str, str] = {
+    _SNAP_RIGHT: "right",
+    _SNAP_LEFT: "left",
+    _SNAP_TOP: "top",
+    _SNAP_BOTTOM: "bottom",
+    _SNAP_TOP_RIGHT: "right",
+    _SNAP_TOP_LEFT: "left",
+    _SNAP_BOTTOM_RIGHT: "right",
+    _SNAP_BOTTOM_LEFT: "left",
+}
+
+
+class _ScreenArrangementPanel(QGroupBox):
+    """
+    Screen Arrangement panel.
+
+    Visualizes both machines' monitors as scaled rectangles. Local monitors are
+    shown in blue-gray and are not draggable. Peer monitors are amber and move as
+    a unit when dragged. When the peer group is within SNAP_THRESHOLD scene pixels
+    of any snap position, it snaps there automatically.
+
+    On "Commit Arrangement", derives per-monitor exit edges and stores them. The
+    caller uses arrangement_committed() to check whether a commit has happened
+    and calls committed_arrangement() to retrieve the dict for EdgeDetector.
+
+    Signals:
+        arrangement_changed(dict): emitted when a new arrangement is committed.
+            The dict is arrangement: dict[int, set[str]] suitable for
+            EdgeDetector.set_exit_edges().
+    """
+
+    arrangement_changed = pyqtSignal(object)  # emits dict[int, set[str]]
+
+    # Scene layout constants (in scene pixels).
+    _LOCAL_COLOR = QColor("#40a0ff")
+    _LOCAL_BORDER = QColor("#206080")
+    _SCENE_MARGIN = 20.0
+    _LOCAL_SCENE_W = 160.0  # scene width for the local group bounding box
+    _LOCAL_SCENE_H = 120.0  # scene height for the local group bounding box
+    _SNAP_THRESHOLD = 30.0  # scene pixels -- how close before snapping
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__("Screen Arrangement", parent)
+        self.setStyleSheet(
+            "QGroupBox { color: #e0e0e0; font-family: monospace; font-size: 12px; "
+            "border: 1px solid #2a2a4e; margin-top: 6px; padding-top: 4px; } "
+            "QGroupBox::title { subcontrol-origin: margin; left: 8px; }"
+        )
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(8, 14, 8, 8)
+        outer.setSpacing(6)
+
+        # Hint label.
+        self._hint_label = QLabel(
+            "Drag the amber (peer) block to match the physical screen layout. "
+            "Click Commit when done."
+        )
+        self._hint_label.setStyleSheet(
+            "color: #909090; font-family: monospace; font-size: 11px; border: none;"
+        )
+        self._hint_label.setWordWrap(True)
+        outer.addWidget(self._hint_label)
+
+        # Graphics view.
+        self._scene = QGraphicsScene()
+        self._scene.setBackgroundBrush(QColor("#1a1a2e"))
+
+        self._view = QGraphicsView(self._scene)
+        self._view.setFixedHeight(220)
+        self._view.setStyleSheet(
+            "QGraphicsView { background-color: #1a1a2e; border: 1px solid #3a3a6e; }"
+        )
+        self._view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._view.setRenderHint(QPainter.RenderHint.Antialiasing)
+        outer.addWidget(self._view)
+
+        # Bottom row: status label + commit button.
+        bottom_row = QHBoxLayout()
+        bottom_row.setSpacing(8)
+
+        self._status_label = QLabel("Arrangement: not set")
+        self._status_label.setStyleSheet(
+            "color: #b0b0b0; font-family: monospace; font-size: 11px; border: none;"
+        )
+        bottom_row.addWidget(self._status_label)
+        bottom_row.addStretch()
+
+        btn_style = (
+            "QPushButton { background-color: #16213e; color: #e0e0e0; "
+            "font-family: monospace; font-size: 12px; border: 1px solid #3a3a6e; "
+            "padding: 4px 12px; } "
+            "QPushButton:hover { background-color: #1e2f5e; } "
+            "QPushButton:disabled { color: #555555; border-color: #2a2a4e; }"
+        )
+        self._commit_btn = QPushButton("Commit Arrangement")
+        self._commit_btn.setStyleSheet(btn_style)
+        self._commit_btn.setEnabled(False)
+        self._commit_btn.clicked.connect(self._on_commit_clicked)
+        bottom_row.addWidget(self._commit_btn)
+
+        outer.addLayout(bottom_row)
+
+        # Internal state.
+        self._local_monitors: list[MonitorInfo] = []
+        self._peer_monitors: list[MonitorInfo] = []
+
+        # Scene-space rectangles for local monitors (not items, just geometry).
+        self._local_scene_rects: list[QRectF] = []
+
+        # Snap position -> scene offset for the peer group's top-left corner.
+        self._snap_offsets: dict[str, QPointF] = {}
+
+        # Current snap position (may be None before first snap).
+        self._current_snap: str | None = None
+
+        # Whether a commit has happened in this session.
+        self._arrangement_committed: bool = False
+
+        # Last committed arrangement dict.
+        self._last_arrangement: dict[int, set[str]] = {}
+
+        # Draggable peer group item.
+        self._peer_item: _DraggablePeerGroup | None = None
+
+        # Whether the panel is locked (CAPTURING/RECEIVING/TRANSITIONING).
+        self._locked: bool = False
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def arrangement_committed(self) -> bool:
+        """Return True if the user has committed an arrangement at least once."""
+        return self._arrangement_committed
+
+    def committed_arrangement(self) -> dict[int, set[str]]:
+        """Return the last committed arrangement dict."""
+        return self._last_arrangement
+
+    def set_monitors(
+        self,
+        local_monitors: list[MonitorInfo],
+        peer_monitors: list[MonitorInfo] | None,
+    ) -> None:
+        """
+        Populate the panel with monitor geometries and rebuild the scene.
+
+        local_monitors: this machine's monitor list.
+        peer_monitors: peer machine's monitor list, or None (fallback to one 1x1 rect).
+
+        Call this whenever a new connection is established (peer monitors arrive
+        in the hello payload). Re-calling clears any prior arrangement.
+        """
+        self._local_monitors = local_monitors
+        if peer_monitors:
+            self._peer_monitors = peer_monitors
+        else:
+            # Fallback: synthesize a single generic peer monitor.
+            # Use a size proportional to local[0] if available, else 1920x1080.
+            if local_monitors:
+                pw = local_monitors[0].width
+                ph = local_monitors[0].height
+            else:
+                pw, ph = 1920, 1080
+            self._peer_monitors = [
+                MonitorInfo(x=0, y=0, width=pw, height=ph, dpi_scale=1.0, is_primary=True)
+            ]
+        self._arrangement_committed = False
+        self._last_arrangement = {}
+        self._current_snap = None
+        self._rebuild_scene()
+
+    def apply_dropdown_edge(self, edge: str) -> None:
+        """
+        Synchronize the panel to a dropdown selection.
+
+        Snaps the peer group to the cardinal position matching edge and
+        auto-commits the arrangement. Called by MainWindow when the dropdown
+        changes (and also at startup/connect to seed the default).
+        """
+        cardinal_map: dict[str, str] = {
+            "right": _SNAP_RIGHT,
+            "left": _SNAP_LEFT,
+            "top": _SNAP_TOP,
+            "bottom": _SNAP_BOTTOM,
+        }
+        snap_pos = cardinal_map.get(edge)
+        if snap_pos is None:
+            return
+        self._apply_snap(snap_pos)
+        self._do_commit()
+
+    def on_state_changed(self, state: SwitchState) -> None:
+        """
+        Update panel visibility and locked state to match the switch state.
+
+        Hidden in IDLE. Visible-and-editable in CONNECTED. Visible-but-locked
+        in CAPTURING/RECEIVING/TRANSITIONING/RECONNECTING.
+        """
+        if state == SwitchState.IDLE:
+            self.hide()
+        elif state == SwitchState.CONNECTED:
+            self.show()
+            self._set_locked(False)
+        else:
+            # CAPTURING, RECEIVING, TRANSITIONING, RECONNECTING, LISTENING,
+            # CONNECTING, HANDSHAKING -- show but lock.
+            self.show()
+            self._set_locked(True)
+
+    # ------------------------------------------------------------------
+    # Private: scene building
+    # ------------------------------------------------------------------
+
+    def _scale_factor(self) -> float:
+        """
+        Compute a scale factor so the local monitor group fits within _LOCAL_SCENE_W
+        x _LOCAL_SCENE_H scene pixels. All monitors (local and peer) use this same
+        factor so their relative sizes are preserved.
+        """
+        if not self._local_monitors:
+            return 1.0
+        # Compute the local virtual-desktop bounding box.
+        lx0 = min(m.x for m in self._local_monitors)
+        ly0 = min(m.y for m in self._local_monitors)
+        lx1 = max(m.x + m.width for m in self._local_monitors)
+        ly1 = max(m.y + m.height for m in self._local_monitors)
+        local_w = lx0 + (lx1 - lx0) - lx0  # == lx1 - lx0
+        local_h = ly0 + (ly1 - ly0) - ly0  # == ly1 - ly0
+        # Protect against zero.
+        local_w = max(local_w, 1)
+        local_h = max(local_h, 1)
+        sx = self._LOCAL_SCENE_W / local_w
+        sy = self._LOCAL_SCENE_H / local_h
+        return min(sx, sy)
+
+    def _monitor_to_scene_rect(self, monitor: MonitorInfo, scale: float) -> QRectF:
+        """Convert a monitor's virtual-desktop rect to a scene-space QRectF."""
+        return QRectF(
+            monitor.x * scale,
+            monitor.y * scale,
+            max(monitor.width * scale, 4.0),
+            max(monitor.height * scale, 4.0),
+        )
+
+    def _rebuild_scene(self) -> None:
+        """Clear and repopulate the scene from the current monitor lists."""
+        self._scene.clear()
+        self._peer_item = None
+        self._local_scene_rects = []
+        self._snap_offsets = {}
+
+        if not self._local_monitors:
+            return
+
+        scale = self._scale_factor()
+
+        # --- Local monitors (static, not draggable) ---
+        # Normalize so the local group's top-left is at (margin, margin).
+        lx0 = min(m.x for m in self._local_monitors)
+        ly0 = min(m.y for m in self._local_monitors)
+
+        for mon in self._local_monitors:
+            rx = (mon.x - lx0) * scale + self._SCENE_MARGIN
+            ry = (mon.y - ly0) * scale + self._SCENE_MARGIN
+            rw = max(mon.width * scale, 4.0)
+            rh = max(mon.height * scale, 4.0)
+            rect = QRectF(rx, ry, rw, rh)
+            self._local_scene_rects.append(rect)
+            item = QGraphicsRectItem(rect)
+            item.setBrush(self._LOCAL_COLOR)
+            item.setPen(QPen(self._LOCAL_BORDER, 1))
+            item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
+            self._scene.addItem(item)
+            # Label: show resolution.
+            label = self._scene.addText(f"{mon.width}x{mon.height}")
+            label.setDefaultTextColor(QColor("#1a1a2e"))
+            font = QFont("monospace", 7)
+            label.setFont(font)
+            label.setPos(rx + 4, ry + 4)
+
+        # --- Peer monitors (draggable group) ---
+        # Compute peer group bounding box in scene coords.
+        px0 = min(m.x for m in self._peer_monitors)
+        py0 = min(m.y for m in self._peer_monitors)
+        peer_rects_local: list[QRectF] = []
+        for mon in self._peer_monitors:
+            prx = (mon.x - px0) * scale
+            pry = (mon.y - py0) * scale
+            prw = max(mon.width * scale, 4.0)
+            prh = max(mon.height * scale, 4.0)
+            peer_rects_local.append(QRectF(prx, pry, prw, prh))
+
+        self._peer_item = _DraggablePeerGroup(peer_rects_local)
+        self._scene.addItem(self._peer_item)
+
+        # Compute the bounding box of the local group in scene coords.
+        lbx0 = min(r.x() for r in self._local_scene_rects)
+        lby0 = min(r.y() for r in self._local_scene_rects)
+        lbx1 = max(r.x() + r.width() for r in self._local_scene_rects)
+        lby1 = max(r.y() + r.height() for r in self._local_scene_rects)
+
+        # Peer group bounding box dimensions.
+        pgw = max(
+            r.x() + r.width() for r in peer_rects_local
+        ) - min(r.x() for r in peer_rects_local)
+        pgh = max(
+            r.y() + r.height() for r in peer_rects_local
+        ) - min(r.y() for r in peer_rects_local)
+
+        # Compute snap-position top-left corners (item.pos()) for the peer group.
+        # The peer group's internal rects start at (0,0) relative to item origin.
+        self._snap_offsets = {
+            _SNAP_RIGHT: QPointF(lbx1, lby0 + (lby1 - lby0) / 2 - pgh / 2),
+            _SNAP_LEFT: QPointF(lbx0 - pgw, lby0 + (lby1 - lby0) / 2 - pgh / 2),
+            _SNAP_TOP: QPointF(lbx0 + (lbx1 - lbx0) / 2 - pgw / 2, lby0 - pgh),
+            _SNAP_BOTTOM: QPointF(lbx0 + (lbx1 - lbx0) / 2 - pgw / 2, lby1),
+            _SNAP_TOP_RIGHT: QPointF(lbx1, lby0 - pgh),
+            _SNAP_TOP_LEFT: QPointF(lbx0 - pgw, lby0 - pgh),
+            _SNAP_BOTTOM_RIGHT: QPointF(lbx1, lby1),
+            _SNAP_BOTTOM_LEFT: QPointF(lbx0 - pgw, lby1),
+        }
+
+        # Connect mouseRelease via scene change notification.
+        # We poll position changes using ItemSendsScenePositionChanges flag,
+        # but Qt's itemChange only fires during move. We use a scene event filter
+        # approach: override the view's mouse release.
+        self._view.viewport().installEventFilter(self)
+
+        # Place the peer group at the default snap position (right).
+        default_snap = _SNAP_RIGHT
+        if self._current_snap is not None and self._current_snap in self._snap_offsets:
+            default_snap = self._current_snap
+        self._apply_snap(default_snap)
+
+        # Set scene rect to include everything with margin.
+        all_rects = self._local_scene_rects + [
+            QRectF(
+                self._peer_item.pos().x() + r.x(),
+                self._peer_item.pos().y() + r.y(),
+                r.width(),
+                r.height(),
+            )
+            for r in peer_rects_local
+        ]
+        sx0 = min(r.x() for r in all_rects) - self._SCENE_MARGIN
+        sy0 = min(r.y() for r in all_rects) - self._SCENE_MARGIN
+        sx1 = max(r.x() + r.width() for r in all_rects) + self._SCENE_MARGIN
+        sy1 = max(r.y() + r.height() for r in all_rects) + self._SCENE_MARGIN
+        self._scene.setSceneRect(QRectF(sx0, sy0, sx1 - sx0, sy1 - sy0))
+        self._view.fitInView(self._scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+
+        self._commit_btn.setEnabled(not self._locked)
+
+    def _apply_snap(self, snap_pos: str) -> None:
+        """Move the peer group item to the named snap position and update highlights."""
+        if self._peer_item is None:
+            return
+        offset = self._snap_offsets.get(snap_pos)
+        if offset is None:
+            return
+        self._peer_item.setPos(offset)
+        self._current_snap = snap_pos
+        self._update_highlights(snap_pos)
+        self._update_status_label(snap_pos)
+
+    def _update_highlights(self, snap_pos: str) -> None:
+        """Draw green highlights on the local monitor edges that touch the peer."""
+        if self._peer_item is None:
+            return
+        edges = _SNAP_TO_EDGES.get(snap_pos, set())
+        # Build highlight list: for each local monitor rect, for each touching edge.
+        # Convert local scene rects to item-local coordinates (subtract item.pos()).
+        item_pos = self._peer_item.pos()
+        highlights: list[tuple[QRectF, str]] = []
+        for scene_rect in self._local_scene_rects:
+            local_rect = QRectF(
+                scene_rect.x() - item_pos.x(),
+                scene_rect.y() - item_pos.y(),
+                scene_rect.width(),
+                scene_rect.height(),
+            )
+            for edge in edges:
+                highlights.append((local_rect, edge))
+        self._peer_item.set_highlights(highlights)
+
+    def _update_status_label(self, snap_pos: str) -> None:
+        """Update the status label to describe the current snap position."""
+        readable = {
+            _SNAP_RIGHT: "Peer is to the right",
+            _SNAP_LEFT: "Peer is to the left",
+            _SNAP_TOP: "Peer is above",
+            _SNAP_BOTTOM: "Peer is below",
+            _SNAP_TOP_RIGHT: "Peer is top-right",
+            _SNAP_TOP_LEFT: "Peer is top-left",
+            _SNAP_BOTTOM_RIGHT: "Peer is bottom-right",
+            _SNAP_BOTTOM_LEFT: "Peer is bottom-left",
+        }
+        text = readable.get(snap_pos, snap_pos)
+        committed_note = " (committed)" if self._arrangement_committed else ""
+        self._status_label.setText(f"Arrangement: {text}{committed_note}")
+
+    # ------------------------------------------------------------------
+    # Private: event filter for drag-end snapping
+    # ------------------------------------------------------------------
+
+    def eventFilter(self, obj, event) -> bool:  # type: ignore[override]
+        """
+        Intercept mouse-release on the scene viewport.
+
+        When the user releases the mouse after dragging the peer group, find
+        the nearest snap position and snap to it. Threshold: _SNAP_THRESHOLD
+        scene pixels from the nearest snap point.
+        """
+        from PyQt6.QtCore import QEvent
+        if (
+            obj is self._view.viewport()
+            and event.type() == QEvent.Type.MouseButtonRelease
+            and self._peer_item is not None
+            and not self._locked
+        ):
+            self._snap_to_nearest()
+        return super().eventFilter(obj, event)
+
+    def _snap_to_nearest(self) -> None:
+        """Snap the peer group to the nearest snap position, if within threshold."""
+        if self._peer_item is None:
+            return
+        current_pos = self._peer_item.pos()
+        best_snap: str | None = None
+        best_dist: float = self._SNAP_THRESHOLD
+
+        for snap_pos, target_pos in self._snap_offsets.items():
+            dx = current_pos.x() - target_pos.x()
+            dy = current_pos.y() - target_pos.y()
+            dist = (dx * dx + dy * dy) ** 0.5
+            if dist < best_dist:
+                best_dist = dist
+                best_snap = snap_pos
+
+        if best_snap is not None:
+            self._apply_snap(best_snap)
+        else:
+            # Not near any snap -- return to previous snap or default.
+            fallback = self._current_snap or _SNAP_RIGHT
+            self._apply_snap(fallback)
+
+    # ------------------------------------------------------------------
+    # Private: commit logic
+    # ------------------------------------------------------------------
+
+    def _on_commit_clicked(self) -> None:
+        """Commit the current snap arrangement."""
+        if self._current_snap is None:
+            return
+        self._do_commit()
+
+    def _do_commit(self) -> None:
+        """Derive the arrangement from the current snap position and emit it."""
+        if self._current_snap is None:
+            return
+        arrangement = self._compute_arrangement(self._current_snap)
+        self._last_arrangement = arrangement
+        self._arrangement_committed = True
+        self._update_status_label(self._current_snap)
+        self.arrangement_changed.emit(arrangement)
+
+    def _compute_arrangement(self, snap_pos: str) -> dict[int, set[str]]:
+        """
+        Derive a per-monitor exit-edge arrangement from snap_pos.
+
+        For single-monitor local setups this maps directly from _SNAP_TO_EDGES.
+
+        For multi-monitor local setups: determine which local monitors are
+        adjacent to the peer group for each relevant edge direction, and assign
+        those exit edges to those monitor indices. Simple implementation: all
+        local monitors that are on the outer boundary in that direction get the
+        edge, regardless of whether peer rects overlap them specifically.
+        This is sufficient for the current use cases (one or two local monitors).
+        """
+        edges = _SNAP_TO_EDGES.get(snap_pos, set())
+        if not edges:
+            return {}
+
+        if len(self._local_monitors) <= 1:
+            return {0: set(edges)}
+
+        # Multi-monitor: assign exit edges to monitors on the relevant boundary.
+        result: dict[int, set[str]] = {}
+        for edge in edges:
+            # Find the extreme boundary value for this edge.
+            if edge == "right":
+                extreme = max(m.x + m.width for m in self._local_monitors)
+                for idx, mon in enumerate(self._local_monitors):
+                    if mon.x + mon.width == extreme:
+                        result.setdefault(idx, set()).add(edge)
+            elif edge == "left":
+                extreme = min(m.x for m in self._local_monitors)
+                for idx, mon in enumerate(self._local_monitors):
+                    if mon.x == extreme:
+                        result.setdefault(idx, set()).add(edge)
+            elif edge == "top":
+                extreme = min(m.y for m in self._local_monitors)
+                for idx, mon in enumerate(self._local_monitors):
+                    if mon.y == extreme:
+                        result.setdefault(idx, set()).add(edge)
+            elif edge == "bottom":
+                extreme = max(m.y + m.height for m in self._local_monitors)
+                for idx, mon in enumerate(self._local_monitors):
+                    if mon.y + mon.height == extreme:
+                        result.setdefault(idx, set()).add(edge)
+        return result
+
+    def _set_locked(self, locked: bool) -> None:
+        """Lock or unlock the panel (disable drag and commit during active mirroring)."""
+        self._locked = locked
+        self._commit_btn.setEnabled(not locked and self._peer_item is not None)
+        if self._peer_item is not None:
+            self._peer_item.setFlag(
+                QGraphicsItem.GraphicsItemFlag.ItemIsMovable, not locked
+            )
 
 
 class MainWindow(QMainWindow):
