@@ -808,6 +808,38 @@ class MainWindow(QMainWindow):
         # enumerate_local_monitors() requires a QGuiApplication to be running;
         # at this point in __init__ the QApplication is already up.
         self._local_monitors: list[MonitorInfo] = enumerate_local_monitors()
+
+        # Single-monitor unit reconciliation. On DPI-aware Windows, Qt reports
+        # logical pixels (e.g. 2560x1440) while pyautogui.position() returns
+        # physical pixels (e.g. 3840x2160). Normalizing pyautogui coordinates
+        # against a Qt-derived bbox produces nx/ny > 1.0 and edge bands at the
+        # wrong screen position. Reconcile by replacing the single monitor's
+        # dimensions with pyautogui's, so cursor positions and bbox share a
+        # unit space. Task #7 will do a per-monitor DPI-aware reconciliation
+        # for true multi-monitor support.
+        if (
+            len(self._local_monitors) == 1
+            and (
+                self._local_monitors[0].width != _pyautogui_w
+                or self._local_monitors[0].height != _pyautogui_h
+            )
+        ):
+            qt_mon = self._local_monitors[0]
+            self._local_monitors[0] = MonitorInfo(
+                x=0,
+                y=0,
+                width=_pyautogui_w,
+                height=_pyautogui_h,
+                dpi_scale=qt_mon.dpi_scale,
+                is_primary=True,
+            )
+            logger.info(
+                "Single-monitor unit reconciliation: Qt %dx%d at (%d,%d) -> "
+                "pyautogui %dx%d at (0,0) to match cursor coordinate space",
+                qt_mon.width, qt_mon.height, qt_mon.x, qt_mon.y,
+                _pyautogui_w, _pyautogui_h,
+            )
+
         self._local_vd_x: int
         self._local_vd_y: int
         self._local_vd_w: int
