@@ -835,7 +835,8 @@ class MainWindow(QMainWindow):
         # EdgeDetector: owns edge-band detection, dwell timer, and cooldown guard.
         # The UI feeds cursor positions to it on every poll tick.
         # The edge-dwell callback is registered here (was on DeltaCapture before).
-        self._edge_detector = EdgeDetector(self._screen_w, self._screen_h)
+        # Receives the local monitor list so it can check per-monitor edge bands.
+        self._edge_detector = EdgeDetector(self._local_monitors)
         self._edge_detector.set_peer_edge(self._mirror_panel_default_edge())
         self._edge_detector.register_callback(self._schedule_handoff_fire)
 
