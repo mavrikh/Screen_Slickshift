@@ -793,6 +793,90 @@ class _MirrorPanel(QGroupBox):
         return self._scroll_slider
 
 
+class _DraggablePeerItem(QGraphicsItem):
+    """
+    A single peer-monitor rectangle that can be dragged independently.
+
+    Used when "Unlock Same PC Monitors" is enabled. Each peer monitor gets its
+    own _DraggablePeerItem so the user can position them individually to form
+    L-shaped or other non-rectangular layouts.
+
+    Colors:
+        Peer rectangle: amber #f0c040
+        Snap-edge highlight: green #40ffc0
+    """
+
+    _PEER_COLOR = QColor("#f0c040")
+    _PEER_BORDER = QColor("#c09020")
+    _HIGHLIGHT_COLOR = QColor("#40ffc0")
+
+    def __init__(
+        self,
+        rect: QRectF,
+        monitor_index: int,
+        parent: QGraphicsItem | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._rect: QRectF = rect
+        self.monitor_index: int = monitor_index
+        self._highlights: list[tuple[QRectF, str]] = []
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsScenePositionChanges, True)
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+
+    def set_highlights(self, highlights: list[tuple[QRectF, str]]) -> None:
+        """Set edges to highlight. highlights is in item-local coordinates."""
+        self._highlights = highlights
+        self.update()
+
+    def scene_rect(self) -> QRectF:
+        """Return the item rectangle in scene coordinates."""
+        p = self.pos()
+        return QRectF(p.x() + self._rect.x(), p.y() + self._rect.y(),
+                      self._rect.width(), self._rect.height())
+
+    def boundingRect(self) -> QRectF:  # type: ignore[override]
+        pad = 6.0
+        return self._rect.adjusted(-pad, -pad, pad, pad)
+
+    def paint(self, painter: QPainter, option, widget=None) -> None:  # type: ignore[override]
+        painter.setBrush(self._PEER_COLOR)
+        pen = QPen(self._PEER_BORDER)
+        pen.setWidth(1)
+        painter.setPen(pen)
+        painter.drawRect(self._rect)
+
+        if self._highlights:
+            hpen = QPen(self._HIGHLIGHT_COLOR)
+            hpen.setWidth(3)
+            painter.setPen(hpen)
+            for local_rect, edge in self._highlights:
+                if edge == "right":
+                    x = local_rect.x() + local_rect.width()
+                    painter.drawLine(
+                        QPointF(x, local_rect.y()),
+                        QPointF(x, local_rect.y() + local_rect.height()),
+                    )
+                elif edge == "left":
+                    x = local_rect.x()
+                    painter.drawLine(
+                        QPointF(x, local_rect.y()),
+                        QPointF(x, local_rect.y() + local_rect.height()),
+                    )
+                elif edge == "top":
+                    y = local_rect.y()
+                    painter.drawLine(
+                        QPointF(local_rect.x(), y),
+                        QPointF(local_rect.x() + local_rect.width(), y),
+                    )
+                elif edge == "bottom":
+                    y = local_rect.y() + local_rect.height()
+                    painter.drawLine(
+                        QPointF(local_rect.x(), y),
+                        QPointF(local_rect.x() + local_rect.width(), y),
+                    )
+
+
 class _DraggablePeerGroup(QGraphicsItem):
     """
     A group of peer-monitor rectangles that move together as a single unit.
@@ -954,6 +1038,8 @@ class _ScreenArrangementPanel(QGroupBox):
     """
 
     arrangement_changed = pyqtSignal(object)  # emits dict[int, set[str]]
+    # Emitted when the "Unlock Same PC Monitors" toggle changes. Arg: new checked state.
+    monitors_unlock_changed = pyqtSignal(bool)
 
     # Scene layout constants (in scene pixels).
     _LOCAL_COLOR = QColor("#40a0ff")
@@ -999,6 +1085,25 @@ class _ScreenArrangementPanel(QGroupBox):
         self._view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._view.setRenderHint(QPainter.RenderHint.Antialiasing)
         outer.addWidget(self._view)
+
+        # Toggle row: "Unlock Same PC Monitors" checkbox.
+        toggle_row = QHBoxLayout()
+        toggle_row.setSpacing(8)
+
+        self._unlock_chk = QCheckBox("Unlock Same PC Monitors")
+        self._unlock_chk.setChecked(False)
+        self._unlock_chk.setToolTip(
+            "When checked, each peer monitor can be dragged independently to form "
+            "L-shaped or other non-rectangular layouts."
+        )
+        self._unlock_chk.setStyleSheet(
+            "QCheckBox { color: #b0b0b0; font-family: monospace; font-size: 12px; border: none; }"
+            "QCheckBox:disabled { color: #555555; }"
+        )
+        self._unlock_chk.stateChanged.connect(self._on_unlock_toggled)
+        toggle_row.addWidget(self._unlock_chk)
+        toggle_row.addStretch()
+        outer.addLayout(toggle_row)
 
         # Bottom row: status label + commit button.
         bottom_row = QHBoxLayout()
@@ -1061,8 +1166,14 @@ class _ScreenArrangementPanel(QGroupBox):
         # Last committed arrangement dict.
         self._last_arrangement: dict[int, set[str]] = {}
 
-        # Draggable peer group item.
+        # Draggable peer group item (locked mode: single group).
         self._peer_item: _DraggablePeerGroup | None = None
+
+        # Independent peer-monitor items (unlocked mode: one item per peer monitor).
+        self._peer_items_unlocked: list[_DraggablePeerItem] = []
+
+        # Whether "Unlock Same PC Monitors" is active.
+        self._monitors_unlocked: bool = False
 
         # Whether the panel is locked (CAPTURING/RECEIVING/TRANSITIONING).
         self._locked: bool = False
@@ -1078,6 +1189,23 @@ class _ScreenArrangementPanel(QGroupBox):
     def committed_arrangement(self) -> dict[int, set[str]]:
         """Return the last committed arrangement dict."""
         return self._last_arrangement
+
+    def monitors_unlocked(self) -> bool:
+        """Return True if the per-monitor unlock toggle is currently checked."""
+        return self._monitors_unlocked
+
+    def set_monitors_unlocked(self, unlocked: bool) -> None:
+        """
+        Programmatically set the unlock toggle state without triggering a rebuild.
+
+        Used at startup to restore persisted toggle preference before monitors are
+        populated. The rebuild happens later when set_monitors() is called, so
+        calling this before set_monitors() is safe.
+        """
+        self._monitors_unlocked = unlocked
+        self._unlock_chk.blockSignals(True)
+        self._unlock_chk.setChecked(unlocked)
+        self._unlock_chk.blockSignals(False)
 
     def set_monitors(
         self,
@@ -1116,10 +1244,17 @@ class _ScreenArrangementPanel(QGroupBox):
         """
         Synchronize the panel to a dropdown selection.
 
-        Snaps the peer group to the cardinal position matching edge and
-        auto-commits the arrangement. Called by MainWindow when the dropdown
-        changes (and also at startup/connect to seed the default).
+        In locked (group-drag) mode: snaps the peer group to the cardinal
+        position matching edge and auto-commits the arrangement. Called by
+        MainWindow when the dropdown changes (and also at startup/connect to
+        seed the default).
+
+        In unlocked (per-monitor) mode: the dropdown does not control placement
+        of individual monitors, so this call is a no-op. The user must manually
+        position each peer monitor and click Commit.
         """
+        if self._monitors_unlocked:
+            return
         cardinal_map: dict[str, str] = {
             "right": _SNAP_RIGHT,
             "left": _SNAP_LEFT,
@@ -1204,7 +1339,12 @@ class _ScreenArrangementPanel(QGroupBox):
 
         self._last_arrangement = arrangement
         self._arrangement_committed = True
-        if self._current_snap is not None:
+        if self._monitors_unlocked:
+            n = len(arrangement)
+            self._status_label.setText(
+                f"Arrangement: {n} monitor(s) set by peer (committed)"
+            )
+        elif self._current_snap is not None:
             self._update_status_label(self._current_snap)
 
         # Show the peer-set banner for 3 seconds.
@@ -1517,11 +1657,37 @@ class _ScreenArrangementPanel(QGroupBox):
     def _set_locked(self, locked: bool) -> None:
         """Lock or unlock the panel (disable drag and commit during active mirroring)."""
         self._locked = locked
-        self._commit_btn.setEnabled(not locked and self._peer_item is not None)
+        has_item = (
+            self._peer_item is not None
+            or bool(self._peer_items_unlocked)
+        )
+        self._commit_btn.setEnabled(not locked and has_item)
+        self._unlock_chk.setEnabled(not locked)
         if self._peer_item is not None:
             self._peer_item.setFlag(
                 QGraphicsItem.GraphicsItemFlag.ItemIsMovable, not locked
             )
+        for item in self._peer_items_unlocked:
+            item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, not locked)
+
+    def _on_unlock_toggled(self, state: int) -> None:
+        """
+        Called when the "Unlock Same PC Monitors" checkbox changes.
+
+        Switches between group-drag (locked) mode and per-monitor independent-drag
+        (unlocked) mode. Rebuilds the scene to reflect the new mode. Resets the
+        arrangement committed state so the user must re-commit after switching modes.
+        """
+        self._monitors_unlocked = state != 0
+        # Reset committed state -- the arrangement derivation path changes.
+        self._arrangement_committed = False
+        self._last_arrangement = {}
+        self._rebuild_scene()
+        self.monitors_unlock_changed.emit(self._monitors_unlocked)
+        logger.debug(
+            "_ScreenArrangementPanel: unlock toggle -> monitors_unlocked=%s",
+            self._monitors_unlocked,
+        )
 
 
 class MainWindow(QMainWindow):
@@ -1861,6 +2027,8 @@ class MainWindow(QMainWindow):
         # Wire arrangement panel. When the user commits, feed EdgeDetector and
         # refresh the Inject checkbox gate.
         self._arr_panel.arrangement_changed.connect(self._on_arrangement_committed)
+        # Wire unlock toggle. Persist preference to QSettings when it changes.
+        self._arr_panel.monitors_unlock_changed.connect(self._on_monitors_unlock_changed)
 
         self._mirror_panel.scroll_slider.valueChanged.connect(
             self._event_capture.set_scroll_multiplier
@@ -1953,6 +2121,16 @@ class MainWindow(QMainWindow):
         self._mirror_panel.scroll_slider.setValue(_scroll_mult_clamped)
         self._event_capture.set_scroll_multiplier(_scroll_mult_clamped)
         logger.info("Restored scroll multiplier: %dx", _scroll_mult_clamped)
+
+        # --- QSettings: restore unlock-same-pc-monitors toggle preference ---
+        _unlock_saved: bool = self._settings.value(
+            "monitors_unlocked",
+            False,
+            type=bool,
+        )
+        self._arr_panel.set_monitors_unlocked(_unlock_saved)
+        if _unlock_saved:
+            logger.info("Restored monitors_unlocked preference: True")
 
     # ------------------------------------------------------------------
     # Helper: default edge from the mirror panel dropdown at construction time
@@ -2205,6 +2383,14 @@ class MainWindow(QMainWindow):
         self._conn_panel.on_state_changed(SwitchState.CAPTURING, peer_info=self._peer_info)
         self._mirror_panel.on_state_changed(SwitchState.CAPTURING)
         self._append_log(f"Mirroring started -- this machine is now the Sender (peer to the {edge})")
+
+    def _on_monitors_unlock_changed(self, unlocked: bool) -> None:
+        """
+        Called when the "Unlock Same PC Monitors" toggle changes in the arrangement panel.
+        Persists the new preference to QSettings immediately.
+        """
+        self._settings.setValue("monitors_unlocked", unlocked)
+        logger.info("monitors_unlocked preference saved: %s", unlocked)
 
     def _on_peer_edge_changed(self, index: int) -> None:  # noqa: ARG002
         """
@@ -3106,6 +3292,7 @@ class MainWindow(QMainWindow):
         Also stop the keyboard listener and cancel any in-flight reconnect.
         """
         self._settings.setValue("scroll_multiplier", self._mirror_panel.scroll_slider.value())
+        self._settings.setValue("monitors_unlocked", self._arr_panel.monitors_unlocked())
         self._reconnect_timer.stop()
         self._idle_timer.stop()
         self._stop_kb_listener()
