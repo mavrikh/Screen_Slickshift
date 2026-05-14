@@ -104,24 +104,31 @@ class MouseInjector:
         self,
         ndx: float,
         ndy: float,
-        screen_w: int,
-        screen_h: int,
+        canvas_w: int,
+        canvas_h: int,
     ) -> None:
         """
         Inject a relative cursor movement.
 
-        ndx, ndy are normalized deltas (fractions of the sender's pyautogui
-        canvas). The receiver multiplies by its own pyautogui.size() to recover
-        a pixel count in its own native unit. pyautogui.moveRel then receives
-        a value consistent with the unit it expects on this platform.
+        ndx, ndy are normalized deltas (fractions of the sender's virtual-desktop
+        canvas -- its full multi-monitor bounding box width and height). The
+        receiver multiplies by the sender's canvas dimensions to recover the
+        original pixel delta and injects it as an OS-level relative move.
 
-        screen_w, screen_h must be from pyautogui.size() on this machine.
+        canvas_w, canvas_h: the sender's virtual-desktop bounding box dimensions
+            (peer_vd_w, peer_vd_h). On old peers that did not send monitor
+            topology these fall back to the peer's screen_w/screen_h scalars from
+            the hello payload.
+
+        Single-monitor invariant: when both peers have a single monitor at (0,0)
+        with matching dimensions, canvas_w == screen_w and canvas_h == screen_h,
+        so behavior is identical to the legacy implementation.
         """
-        dx_px = int(ndx * screen_w)
-        dy_px = int(ndy * screen_h)
+        dx_px = int(ndx * canvas_w)
+        dy_px = int(ndy * canvas_h)
         logger.debug(
-            "inject move_relative: ndx=%.4f ndy=%.4f -> dx=%d dy=%d",
-            ndx, ndy, dx_px, dy_px,
+            "inject move_relative: ndx=%.4f ndy=%.4f canvas=%dx%d -> dx=%d dy=%d",
+            ndx, ndy, canvas_w, canvas_h, dx_px, dy_px,
         )
         pyautogui.moveRel(dx_px, dy_px, duration=0)
 

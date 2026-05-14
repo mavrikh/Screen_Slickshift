@@ -1123,6 +1123,37 @@ class MainWindow(QMainWindow):
         return "right"
 
     # ------------------------------------------------------------------
+    # Helper: peer virtual-desktop canvas dimensions for injection math
+    # ------------------------------------------------------------------
+
+    def _peer_vd_dims(self) -> tuple[int, int]:
+        """
+        Return (peer_vd_w, peer_vd_h) -- the width and height of the peer's
+        virtual-desktop bounding box. Used to denormalize incoming deltas back
+        to pixel units so the injected movement matches what the sender measured.
+
+        When the peer sent a "monitors" list (Task #5 hello payload), the full
+        bounding box is computed from that list via compute_virtual_desktop_bbox().
+
+        When _peer_monitors is None (old peer or not yet connected), falls back
+        to the scalar screen_logical values from the hello payload, and then to
+        the local screen dimensions as a last resort. This preserves the
+        single-monitor behavior that existed before Task #6.
+        """
+        if self._peer_monitors is not None:
+            _, _, vd_w, vd_h = compute_virtual_desktop_bbox(self._peer_monitors)
+            return (vd_w, vd_h)
+
+        # Legacy fallback: read scalar fields from the hello payload.
+        if self._peer_info is not None:
+            lw, lh = self._peer_info.get("screen_logical", [0, 0])
+            if lw > 0 and lh > 0:
+                return (int(lw), int(lh))
+
+        # Last resort: local screen dimensions (single-machine testing).
+        return (self._screen_w, self._screen_h)
+
+    # ------------------------------------------------------------------
     # Cursor polling (local red square, status bar, and EdgeDetector tick)
     # ------------------------------------------------------------------
 
@@ -1557,9 +1588,10 @@ class MainWindow(QMainWindow):
         self._canvas.apply_remote_delta(ndx, ndy)
 
         if self._state_ctrl.state == SwitchState.RECEIVING and self._injection_enabled:
+            peer_vd_w, peer_vd_h = self._peer_vd_dims()
             self._injector.move_relative(
                 ndx, ndy,
-                self._screen_w, self._screen_h,
+                peer_vd_w, peer_vd_h,
             )
 
         now = time.monotonic()
