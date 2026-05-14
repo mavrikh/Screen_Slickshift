@@ -650,8 +650,18 @@ class _MirrorPanel(QGroupBox):
         )
         layout.addWidget(self._role_label)
 
-    def on_state_changed(self, state: SwitchState) -> None:
-        """Update button states, role label, and dropdown enable to match the new switch state."""
+    def on_state_changed(
+        self,
+        state: SwitchState,
+        arrangement_committed: bool = True,
+    ) -> None:
+        """
+        Update button states, role label, and dropdown enable to match the new switch state.
+
+        arrangement_committed: when False, the Inject checkbox is disabled even in
+        RECEIVING state. Set False until the user has committed a screen arrangement.
+        Defaults to True so all pre-Task-7 call sites continue to work unchanged.
+        """
         # Dropdown is editable only when nothing active is happening.
         dropdown_enabled = state in (SwitchState.CONNECTED, SwitchState.IDLE)
         self._peer_edge_combo.setEnabled(dropdown_enabled)
@@ -672,7 +682,10 @@ class _MirrorPanel(QGroupBox):
         elif state == SwitchState.RECEIVING:
             self._start_btn.setEnabled(False)
             self._stop_btn.setEnabled(False)
-            self._inject_chk.setEnabled(True)
+            # Gate Inject on arrangement_committed. The arrangement panel
+            # auto-commits from the dropdown default, so for normal single-monitor
+            # use this resolves to True before RECEIVING is reached.
+            self._inject_chk.setEnabled(arrangement_committed)
             self._kbd_fwd_chk.setEnabled(False)
             self._set_role("Receiver", self._COLOR_RECEIVER)
         elif state == SwitchState.TRANSITIONING:
@@ -694,6 +707,24 @@ class _MirrorPanel(QGroupBox):
             self._inject_chk.setEnabled(False)
             self._kbd_fwd_chk.setEnabled(False)
             self._set_role("Idle", self._COLOR_IDLE)
+
+    def set_dropdown_edge(self, edge: str) -> None:
+        """
+        Programmatically set the peer-edge dropdown to match the given edge string.
+
+        Blocks the dropdown's currentIndexChanged signal while updating so that
+        setting the dropdown from code does not re-trigger the handler and create
+        a feedback loop.
+
+        edge must be one of "right", "left", "top", "bottom". If the edge does not
+        match any option (e.g. a corner snap was committed), keeps the current value.
+        """
+        for idx, (_, key) in enumerate(self._EDGE_OPTIONS):
+            if key == edge:
+                self._peer_edge_combo.blockSignals(True)
+                self._peer_edge_combo.setCurrentIndex(idx)
+                self._peer_edge_combo.blockSignals(False)
+                return
 
     def set_role_injecting(self, injecting: bool) -> None:
         """
@@ -2009,30 +2040,58 @@ class MainWindow(QMainWindow):
 
     def _on_peer_edge_changed(self, index: int) -> None:  # noqa: ARG002
         """
-        Peer-edge dropdown selection changed. Update EdgeDetector immediately.
+        Peer-edge dropdown selection changed. Update EdgeDetector and sync the panel.
 
         The dropdown is disabled during CAPTURING/RECEIVING/TRANSITIONING so this
         handler only fires when the state is CONNECTED or IDLE.
+
+        Calls apply_dropdown_edge() which snaps the panel to the cardinal position
+        and auto-commits the arrangement, keeping the two controls synchronized.
         """
         edge = self._mirror_panel.selected_edge()
         self._edge_detector.set_peer_edge(edge)
+        # Sync the arrangement panel. The panel's apply_dropdown_edge() internally
+        # calls _do_commit() which emits arrangement_changed, which in turn calls
+        # _on_arrangement_committed() and calls set_exit_edges(). set_exit_edges()
+        # builds a {0: {edge}} arrangement matching set_peer_edge(), so the two
+        # methods stay consistent.
+        self._arr_panel.apply_dropdown_edge(edge)
         logger.info("Peer edge updated to: %s", edge)
 
     def _on_arrangement_committed(self, arrangement: dict) -> None:
         """
         Called when the arrangement panel emits a committed arrangement.
 
-        Feeds the arrangement to EdgeDetector.set_exit_edges() and re-evaluates
-        whether the Inject checkbox should be enabled (Inject requires a committed
-        arrangement).
+        Feeds the arrangement to EdgeDetector.set_exit_edges(). Syncs the
+        peer-edge dropdown to the dominant edge derived from the arrangement.
+        Re-evaluates whether the Inject checkbox should be enabled (Inject
+        requires a committed arrangement).
         """
         logger.info("Arrangement committed: %s", arrangement)
         self._edge_detector.set_exit_edges(arrangement)
         self._append_log(f"Screen arrangement committed: {arrangement}")
+
+        # Sync the dropdown to the dominant edge. Collect all edge strings from
+        # the arrangement and pick the first one matching a dropdown option.
+        # Priority: right > left > top > bottom (arbitrary but consistent).
+        all_edges: set[str] = set()
+        for edge_set in arrangement.values():
+            all_edges.update(edge_set)
+        _dropdown_priority = ["right", "left", "top", "bottom"]
+        dominant_edge = next(
+            (e for e in _dropdown_priority if e in all_edges),
+            None,
+        )
+        if dominant_edge is not None:
+            self._mirror_panel.set_dropdown_edge(dominant_edge)
+
         # Re-evaluate Inject gate: if we are in RECEIVING and the arrangement
         # is now committed, enable Inject.
         if self._state_ctrl.state == SwitchState.RECEIVING:
-            self._mirror_panel.on_state_changed(SwitchState.RECEIVING)
+            self._mirror_panel.on_state_changed(
+                SwitchState.RECEIVING,
+                arrangement_committed=self._arr_panel.arrangement_committed(),
+            )
 
     def _on_stop_mirroring_clicked(self) -> None:
         """Stop capturing and notify peer to exit RECEIVING."""
@@ -2290,7 +2349,10 @@ class MainWindow(QMainWindow):
         self._last_delta_received_time = time.monotonic()
         self._canvas.reset_remote_position()
         self._conn_panel.on_state_changed(SwitchState.RECEIVING, peer_info=self._peer_info)
-        self._mirror_panel.on_state_changed(SwitchState.RECEIVING)
+        self._mirror_panel.on_state_changed(
+            SwitchState.RECEIVING,
+            arrangement_committed=self._arr_panel.arrangement_committed(),
+        )
         self._idle_timer.start()
         self._append_log("Peer started mirroring -- this machine is now the Receiver")
 
@@ -2528,7 +2590,10 @@ class MainWindow(QMainWindow):
         self._canvas.reset_remote_position()
 
         self._conn_panel.on_state_changed(SwitchState.RECEIVING, peer_info=self._peer_info)
-        self._mirror_panel.on_state_changed(SwitchState.RECEIVING)
+        self._mirror_panel.on_state_changed(
+            SwitchState.RECEIVING,
+            arrangement_committed=self._arr_panel.arrangement_committed(),
+        )
         self._idle_timer.start()
         self._append_log("Handoff complete -- this machine is now the Receiver")
         logger.info("Handoff complete -- transitioned to RECEIVING")
