@@ -1673,9 +1673,13 @@ class MainWindow(QMainWindow):
         # --- Widgets ---
         self._conn_panel = _ConnectionPanel()
         self._mirror_panel = _MirrorPanel()
+        self._arr_panel = _ScreenArrangementPanel()
         self._status_bar = _StatusBar()
         self._canvas = _Canvas()
         self._log_panel = _LogPanel()
+
+        # _arr_panel starts hidden; becomes visible on CONNECTED.
+        self._arr_panel.hide()
 
         # --- DPI diagnostic label (read-only, set once at startup) ---
         _diag_text: str = (
@@ -1718,6 +1722,10 @@ class MainWindow(QMainWindow):
             self._on_peer_edge_changed
         )
 
+        # Wire arrangement panel. When the user commits, feed EdgeDetector and
+        # refresh the Inject checkbox gate.
+        self._arr_panel.arrangement_changed.connect(self._on_arrangement_committed)
+
         self._mirror_panel.scroll_slider.valueChanged.connect(
             self._event_capture.set_scroll_multiplier
         )
@@ -1741,6 +1749,7 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(self._conn_panel)
         root_layout.addWidget(self._dpi_diag_label)
         root_layout.addWidget(self._mirror_panel)
+        root_layout.addWidget(self._arr_panel)
         root_layout.addWidget(self._status_bar)
         root_layout.addWidget(splitter)
         self.setCentralWidget(central)
@@ -2009,6 +2018,22 @@ class MainWindow(QMainWindow):
         self._edge_detector.set_peer_edge(edge)
         logger.info("Peer edge updated to: %s", edge)
 
+    def _on_arrangement_committed(self, arrangement: dict) -> None:
+        """
+        Called when the arrangement panel emits a committed arrangement.
+
+        Feeds the arrangement to EdgeDetector.set_exit_edges() and re-evaluates
+        whether the Inject checkbox should be enabled (Inject requires a committed
+        arrangement).
+        """
+        logger.info("Arrangement committed: %s", arrangement)
+        self._edge_detector.set_exit_edges(arrangement)
+        self._append_log(f"Screen arrangement committed: {arrangement}")
+        # Re-evaluate Inject gate: if we are in RECEIVING and the arrangement
+        # is now committed, enable Inject.
+        if self._state_ctrl.state == SwitchState.RECEIVING:
+            self._mirror_panel.on_state_changed(SwitchState.RECEIVING)
+
     def _on_stop_mirroring_clicked(self) -> None:
         """Stop capturing and notify peer to exit RECEIVING."""
         self._event_capture.set_active(False)
@@ -2212,6 +2237,20 @@ class MainWindow(QMainWindow):
         if self._peer_monitors is not None:
             self._append_log(
                 f"Peer monitor count: {len(self._peer_monitors)}"
+            )
+
+        # Feed monitor topology into the arrangement panel.
+        # On reconnect we do not reset the panel -- the prior arrangement stays
+        # committed so the user does not have to re-configure after a drop.
+        if not restoring:
+            self._arr_panel.set_monitors(self._local_monitors, self._peer_monitors)
+            # Seed the panel from the current dropdown value so the default
+            # single-monitor path works without the user touching the panel.
+            self._arr_panel.apply_dropdown_edge(self._mirror_panel.selected_edge())
+            logger.info(
+                "Arrangement panel populated: %d local, %d peer monitor(s)",
+                len(self._local_monitors),
+                len(self._peer_monitors) if self._peer_monitors else 0,
             )
 
         if restoring:
@@ -2754,6 +2793,7 @@ class MainWindow(QMainWindow):
             kbd_active=self._keyboard_forwarding_active,
         )
         self._canvas.set_local_dimmed(transitioning)
+        self._arr_panel.on_state_changed(state)
 
     # ------------------------------------------------------------------
     # Dead-man monitor (Qt main thread, 500 ms tick)
