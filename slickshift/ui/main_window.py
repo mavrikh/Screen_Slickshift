@@ -575,9 +575,13 @@ class _MirrorPanel(QGroupBox):
         # Inject checkbox. Defaults to checked so injection starts immediately
         # when the machine first enters RECEIVING (assuming the macOS Accessibility
         # probe passes). Disabled in all states except RECEIVING.
+        # Also gated on arrangement_committed -- tooltip explains when blocked.
         self._inject_chk = QCheckBox("Inject")
         self._inject_chk.setChecked(True)
         self._inject_chk.setEnabled(False)
+        self._inject_chk.setToolTip(
+            "Configure and commit a screen arrangement before enabling injection."
+        )
         self._inject_chk.setStyleSheet(
             "QCheckBox { color: #b0b0b0; font-family: monospace; font-size: 12px; }"
             "QCheckBox:disabled { color: #555555; }"
@@ -695,6 +699,12 @@ class _MirrorPanel(QGroupBox):
             # auto-commits from the dropdown default, so for normal single-monitor
             # use this resolves to True before RECEIVING is reached.
             self._inject_chk.setEnabled(arrangement_committed)
+            if arrangement_committed:
+                self._inject_chk.setToolTip("")
+            else:
+                self._inject_chk.setToolTip(
+                    "Configure and commit a screen arrangement before enabling injection."
+                )
             self._kbd_fwd_chk.setEnabled(False)
             self._set_role("Receiver", self._COLOR_RECEIVER)
         elif state == SwitchState.TRANSITIONING:
@@ -1662,6 +1672,12 @@ class MainWindow(QMainWindow):
         # peer did not send a monitors field (old peer or not yet connected).
         self._peer_monitors: list[MonitorInfo] | None = None
 
+        # Peer identity string used as the QSettings key base for per-peer
+        # arrangement persistence.  Set in _handle_hello() from machine_name,
+        # falling back to the address text the user typed.  Reset to "" on
+        # disconnect.  Empty string means no identity known yet (no save/load).
+        self._peer_identity: str = ""
+
         # Signal bridge: capture-thread -> Qt main thread.
         # Must be created on the main thread (here in __init__) so Qt assigns it
         # to the main thread's event loop.
@@ -1983,6 +1999,68 @@ class MainWindow(QMainWindow):
         return (self._screen_w, self._screen_h)
 
     # ------------------------------------------------------------------
+    # Per-peer arrangement persistence helpers
+    # ------------------------------------------------------------------
+
+    def _arrangement_settings_key(self) -> str | None:
+        """
+        Return the QSettings key for the current peer's arrangement, or None
+        if no peer identity is known yet.
+
+        Format: "arrangement/<peer-identity>" where peer-identity is the peer's
+        machine_name (from hello payload), falling back to the address text.
+        The key is sanitized to avoid path separators in the settings key.
+        """
+        if not self._peer_identity:
+            return None
+        safe_id = self._peer_identity.replace("/", "_").replace("\\", "_")
+        return f"arrangement/{safe_id}"
+
+    def _save_arrangement_for_peer(self, arrangement: dict[int, set[str]]) -> None:
+        """
+        Persist the given arrangement to QSettings keyed by the current peer identity.
+
+        Skips silently when no peer identity is available (e.g. not yet
+        connected or hello not yet received).
+        """
+        key = self._arrangement_settings_key()
+        if key is None:
+            return
+        import json as _json
+        wire = arrangement_to_wire(arrangement)
+        self._settings.setValue(key, _json.dumps(wire))
+        logger.debug("Saved arrangement for peer %r: %s", self._peer_identity, wire)
+
+    def _load_arrangement_for_peer(self) -> dict[int, set[str]] | None:
+        """
+        Load a previously saved arrangement for the current peer from QSettings.
+
+        Returns the arrangement dict if a saved value exists, or None if no
+        saved arrangement is found for this peer identity.
+        """
+        key = self._arrangement_settings_key()
+        if key is None:
+            return None
+        raw: str = self._settings.value(key, "", type=str)
+        if not raw:
+            return None
+        import json as _json
+        try:
+            wire = _json.loads(raw)
+            arrangement = wire_to_arrangement(wire)
+            logger.debug(
+                "Loaded arrangement for peer %r: %s", self._peer_identity, arrangement
+            )
+            return arrangement
+        except Exception as exc:
+            logger.warning(
+                "Failed to load saved arrangement for peer %r: %s -- ignoring",
+                self._peer_identity,
+                exc,
+            )
+            return None
+
+    # ------------------------------------------------------------------
     # Cursor polling (local red square, status bar, and EdgeDetector tick)
     # ------------------------------------------------------------------
 
@@ -2103,6 +2181,7 @@ class MainWindow(QMainWindow):
             self._state_ctrl.force_release()
         self._peer_info = None
         self._peer_monitors = None
+        self._peer_identity = ""
         self._conn_panel.on_state_changed(SwitchState.IDLE)
         self._mirror_panel.on_state_changed(SwitchState.IDLE)
         self._append_log("Disconnected by user")
@@ -2163,6 +2242,7 @@ class MainWindow(QMainWindow):
         """
         logger.info("Arrangement committed: %s", arrangement)
         self._edge_detector.set_exit_edges(arrangement)
+        self._save_arrangement_for_peer(arrangement)
         self._append_log(f"Screen arrangement committed: {arrangement}")
 
         # Sync the dropdown to the dominant edge. Collect all edge strings from
@@ -2317,6 +2397,7 @@ class MainWindow(QMainWindow):
             self._state_ctrl.connection_lost(reason)
             self._peer_info = None
             self._peer_monitors = None
+            self._peer_identity = ""
             self._conn_panel.on_state_changed(SwitchState.IDLE, peer_info=None)
             self._mirror_panel.on_state_changed(SwitchState.IDLE)
             self._append_log(f"Connection lost: {reason}")
@@ -2381,6 +2462,12 @@ class MainWindow(QMainWindow):
         pw, ph = payload.get("screen_physical", [0, 0])
         dpi = payload.get("dpi_scale", 1.0)
 
+        # Establish peer identity for QSettings persistence.
+        # Prefer machine_name (stable hostname) from the hello payload.
+        # Fall back to whatever the user typed in the address field.
+        machine_name: str = payload.get("machine_name", "")
+        self._peer_identity = machine_name if machine_name else self._conn_panel.address_text()
+
         # Parse multi-monitor topology if present (Task #5).
         raw_monitors: list[dict] | None = payload.get("monitors")
         if raw_monitors is not None:
@@ -2429,6 +2516,44 @@ class MainWindow(QMainWindow):
                 len(self._local_monitors),
                 len(self._peer_monitors) if self._peer_monitors else 0,
             )
+
+            # Restore a persisted arrangement for this peer if one exists.
+            # A restored arrangement counts as committed (no re-commit required).
+            # We apply it WITHOUT sending an arrangement_update -- it is our local
+            # view, not a new commit pushed to the peer.
+            saved_arrangement = self._load_arrangement_for_peer()
+            if saved_arrangement:
+                self._edge_detector.set_exit_edges(saved_arrangement)
+                self._arr_panel.apply_remote_arrangement(saved_arrangement)
+                # Sync dropdown.
+                all_saved_edges: set[str] = set()
+                for edge_set in saved_arrangement.values():
+                    all_saved_edges.update(edge_set)
+                _dropdown_priority = ["right", "left", "top", "bottom"]
+                dominant_saved = next(
+                    (e for e in _dropdown_priority if e in all_saved_edges),
+                    None,
+                )
+                if dominant_saved is not None:
+                    self._mirror_panel.set_dropdown_edge(dominant_saved)
+                # Hide the peer banner immediately -- this is a local restore,
+                # not a remote push.
+                self._arr_panel._peer_banner.hide()
+                self._arr_panel._peer_banner_timer.stop()
+                self._append_log(
+                    f"Restored saved arrangement for peer {self._peer_identity!r}: "
+                    f"{saved_arrangement}"
+                )
+                logger.info(
+                    "Restored saved arrangement for peer %r: %s",
+                    self._peer_identity,
+                    saved_arrangement,
+                )
+            else:
+                logger.debug(
+                    "No saved arrangement for peer %r -- using dropdown default",
+                    self._peer_identity,
+                )
 
         if restoring:
             self._append_log(
@@ -2509,6 +2634,7 @@ class MainWindow(QMainWindow):
 
         self._edge_detector.set_exit_edges(local_arrangement)
         self._arr_panel.apply_remote_arrangement(local_arrangement)
+        self._save_arrangement_for_peer(local_arrangement)
 
         # Sync the dropdown to the dominant edge of the inverted arrangement.
         all_edges: set[str] = set()
@@ -3220,6 +3346,7 @@ class MainWindow(QMainWindow):
 
         self._peer_info = None
         self._peer_monitors = None
+        self._peer_identity = ""
         self._conn_panel.on_state_changed(SwitchState.IDLE, peer_info=None)
         self._mirror_panel.on_state_changed(SwitchState.IDLE)
 
@@ -3308,6 +3435,7 @@ class MainWindow(QMainWindow):
             self._state_ctrl.reconnect_failed_finally()
             self._peer_info = None
             self._peer_monitors = None
+            self._peer_identity = ""
             self._conn_panel.on_state_changed(SwitchState.IDLE, peer_info=None)
             self._mirror_panel.on_state_changed(SwitchState.IDLE)
             return
