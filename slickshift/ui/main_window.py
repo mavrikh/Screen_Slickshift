@@ -64,7 +64,8 @@ from slickshift.edge_detection.edge_detector import EdgeDetector
 from slickshift.injection.mouse_inject import MouseInjector
 from slickshift.state_machine.controller import StateController, SwitchState
 from slickshift.transport.socket_io import TcpTransport
-from slickshift.transport.topology import MonitorInfo
+from slickshift.capture.mouse_capture import compute_virtual_desktop_bbox
+from slickshift.transport.topology import MonitorInfo, enumerate_local_monitors
 
 logger = logging.getLogger(__name__)
 
@@ -803,11 +804,33 @@ class MainWindow(QMainWindow):
         self._screen_w: int = _pyautogui_w
         self._screen_h: int = _pyautogui_h
 
-        # MouseCapture: produces delta callbacks only. No edge logic inside.
-        self._capture = MouseCapture(
-            self._screen_w,
-            self._screen_h,
+        # Enumerate local monitors for multi-monitor coordinate math.
+        # enumerate_local_monitors() requires a QGuiApplication to be running;
+        # at this point in __init__ the QApplication is already up.
+        self._local_monitors: list[MonitorInfo] = enumerate_local_monitors()
+        self._local_vd_x: int
+        self._local_vd_y: int
+        self._local_vd_w: int
+        self._local_vd_h: int
+        (
+            self._local_vd_x,
+            self._local_vd_y,
+            self._local_vd_w,
+            self._local_vd_h,
+        ) = compute_virtual_desktop_bbox(self._local_monitors)
+        logger.info(
+            "Local virtual desktop bbox: origin=(%d,%d) size=%dx%d (%d monitor(s))",
+            self._local_vd_x,
+            self._local_vd_y,
+            self._local_vd_w,
+            self._local_vd_h,
+            len(self._local_monitors),
         )
+
+        # MouseCapture: produces delta callbacks only. No edge logic inside.
+        # Receives the local monitor list so it can normalize against the full
+        # virtual-desktop bounding box rather than the primary monitor alone.
+        self._capture = MouseCapture(self._local_monitors)
 
         # EdgeDetector: owns edge-band detection, dwell timer, and cooldown guard.
         # The UI feeds cursor positions to it on every poll tick.
@@ -1105,11 +1128,12 @@ class MainWindow(QMainWindow):
 
     def _poll_cursor(self) -> None:
         x, y = pyautogui.position()
-        # Normalize against pyautogui.size() -- position() and size() are in the
-        # same unit on each platform, so nx/ny correctly represent 0.0-1.0 across
-        # the full screen range without any dpi_scale correction.
-        nx = x / self._screen_w
-        ny = y / self._screen_h
+        # Normalize against the virtual-desktop bounding box so the red square
+        # spans the full multi-monitor canvas (0.0-1.0 across all monitors).
+        # On a single-monitor setup vd_x==0, vd_y==0, vd_w==screen_w, vd_h==screen_h,
+        # so this is identical to the previous screen_w/screen_h normalization.
+        nx = (x - self._local_vd_x) / self._local_vd_w
+        ny = (y - self._local_vd_y) / self._local_vd_h
         self._canvas.set_local_position(nx, ny)
 
         state = self._state_ctrl.state
