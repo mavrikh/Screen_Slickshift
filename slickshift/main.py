@@ -83,6 +83,7 @@ _install_exception_hooks()
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
 from slickshift import config  # noqa: E402
+from slickshift.browser_agent.server import BrowserAgentServer  # noqa: E402
 from slickshift.ui.main_window import MainWindow  # noqa: E402
 
 
@@ -102,7 +103,12 @@ def main() -> None:
     app = QApplication(sys.argv)
     app.setApplicationName("Slickshift")
 
-    window = MainWindow()
+    # Start the browser extension WebSocket server before the window opens.
+    # The server runs in a daemon thread and lives for the process lifetime.
+    browser_agent = BrowserAgentServer()
+    browser_agent.start()
+
+    window = MainWindow(browser_agent=browser_agent)
     window.show()
 
     sys.exit(app.exec())

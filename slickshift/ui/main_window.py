@@ -2003,10 +2003,87 @@ class _ScreenArrangementPanel(QGroupBox):
         )
 
 
+class _BrowserPanel(QGroupBox):
+    """
+    Browser extension control panel.
+
+    Provides a "List Tabs" button that sends a list_tabs command to the
+    connected Chrome extension and displays the result in the main log panel.
+
+    The panel is always visible. Buttons are enabled only when at least one
+    extension instance is connected. Connection status is updated each time
+    the button is pressed (lazy check rather than a polling timer).
+    """
+
+    # Signal emitted with a human-readable result string for the log panel.
+    # Declared at class level so Qt registers it correctly.
+    result_ready = pyqtSignal(str)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__("Browser Extension", parent)
+        self.setStyleSheet(
+            "QGroupBox { color: #e0e0e0; font-family: monospace; font-size: 12px; "
+            "border: 1px solid #2a2a4e; margin-top: 6px; padding-top: 4px; } "
+            "QGroupBox::title { subcontrol-origin: margin; left: 8px; }"
+        )
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 12, 8, 8)
+        layout.setSpacing(8)
+
+        btn_style = (
+            "QPushButton { background-color: #16213e; color: #e0e0e0; "
+            "font-family: monospace; font-size: 12px; border: 1px solid #3a3a6e; "
+            "padding: 4px 12px; } "
+            "QPushButton:hover { background-color: #1e2f5e; } "
+            "QPushButton:disabled { color: #555555; border-color: #2a2a4e; }"
+        )
+
+        self._list_tabs_btn = QPushButton("List Tabs")
+        self._list_tabs_btn.setToolTip(
+            "Send list_tabs to the connected Chrome extension and print results to the log."
+        )
+        self._list_tabs_btn.setStyleSheet(btn_style)
+        layout.addWidget(self._list_tabs_btn)
+
+        self._status_label = QLabel("No extension connected")
+        self._status_label.setStyleSheet(
+            "color: #888888; font-family: monospace; font-size: 12px;"
+        )
+        layout.addWidget(self._status_label)
+        layout.addStretch()
+
+    def set_connected(self, count: int) -> None:
+        """Update the status label to reflect the current connection count."""
+        if count == 0:
+            self._status_label.setText("No extension connected")
+            self._status_label.setStyleSheet(
+                "color: #888888; font-family: monospace; font-size: 12px;"
+            )
+        elif count == 1:
+            self._status_label.setText("Extension connected")
+            self._status_label.setStyleSheet(
+                "color: #40e040; font-family: monospace; font-size: 12px;"
+            )
+        else:
+            self._status_label.setText(f"{count} extensions connected")
+            self._status_label.setStyleSheet(
+                "color: #40e040; font-family: monospace; font-size: 12px;"
+            )
+
+    @property
+    def list_tabs_btn(self) -> QPushButton:
+        return self._list_tabs_btn
+
+
 class MainWindow(QMainWindow):
     """Root application window. Owns all panels, state, transport, capture, and edge detection."""
 
-    def __init__(self) -> None:
+    # Signal used by the browser-agent background thread to push log lines to
+    # the main thread safely (never call Qt widgets from a non-Qt thread).
+    _browser_log = pyqtSignal(str)
+
+    def __init__(self, browser_agent=None) -> None:
         super().__init__()
         self.setWindowTitle("Slickshift")
         self.setMinimumSize(QSize(700, 620))
@@ -2285,10 +2362,14 @@ class MainWindow(QMainWindow):
         self._last_seq: int = 0
         self._last_sample_log_time: float = 0.0
 
+        # --- Browser agent reference (may be None if not started) ---
+        self._browser_agent = browser_agent
+
         # --- Widgets ---
         self._conn_panel = _ConnectionPanel()
         self._mirror_panel = _MirrorPanel()
         self._arr_panel = _ScreenArrangementPanel()
+        self._browser_panel = _BrowserPanel()
         self._status_bar = _StatusBar()
         self._canvas = _Canvas()
         self._log_panel = _LogPanel()
@@ -2352,6 +2433,11 @@ class MainWindow(QMainWindow):
         # Now: self._edge_detector.register_callback(self._schedule_handoff_fire)
         # is called at construction time above.
 
+        # Wire browser panel. The signal crosses from the worker thread to the
+        # Qt main thread so the log panel widget is only touched from the main thread.
+        self._browser_log.connect(self._log_panel.append_line)
+        self._browser_panel.list_tabs_btn.clicked.connect(self._on_list_tabs_clicked)
+
         # Splitter lets the user resize the log panel vertically.
         splitter = QSplitter(Qt.Orientation.Vertical)
         splitter.addWidget(self._canvas)
@@ -2367,6 +2453,7 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(self._dpi_diag_label)
         root_layout.addWidget(self._mirror_panel)
         root_layout.addWidget(self._arr_panel)
+        root_layout.addWidget(self._browser_panel)
         root_layout.addWidget(self._status_bar)
         root_layout.addWidget(splitter)
         self.setCentralWidget(central)
@@ -3594,6 +3681,46 @@ class MainWindow(QMainWindow):
         )
         logger.info("Injection force-released via Esc")
 
+    # ------------------------------------------------------------------
+    # Browser extension commands
+    # ------------------------------------------------------------------
+
+    def _on_list_tabs_clicked(self) -> None:
+        """
+        Send list_tabs to the connected Chrome extension.
+
+        Runs in a background thread so the Qt main thread is not blocked while
+        waiting for the extension to reply. Results are delivered to the log
+        panel via the _browser_log signal.
+        """
+        if self._browser_agent is None:
+            self._append_log("[browser] Browser agent is not running.")
+            return
+
+        count = self._browser_agent.connection_count()
+        self._browser_panel.set_connected(count)
+        if count == 0:
+            self._append_log("[browser] No extension connected. Load the extension in Chrome first.")
+            return
+
+        def _run() -> None:
+            try:
+                tabs = self._browser_agent.send_command("list_tabs")
+                if not tabs:
+                    self._browser_log.emit("[browser] list_tabs: no open tabs.")
+                    return
+                lines = [f"[browser] list_tabs: {len(tabs)} tab(s) found."]
+                for t in tabs:
+                    lines.append(
+                        f"  [{t.get('tabId', '?')}] {t.get('title', '(no title)')}"
+                        f" -- {t.get('url', '')}"
+                    )
+                self._browser_log.emit("\n".join(lines))
+            except Exception as exc:
+                self._browser_log.emit(f"[browser] list_tabs error: {exc}")
+
+        threading.Thread(target=_run, name="browser-list-tabs", daemon=True).start()
+
     def closeEvent(self, event) -> None:  # type: ignore[override]
         """
         Stop pynput listener threads cleanly before the window closes.
@@ -3605,6 +3732,8 @@ class MainWindow(QMainWindow):
         self._idle_timer.stop()
         self._stop_kb_listener()
         self._event_capture.stop()
+        if self._browser_agent is not None:
+            self._browser_agent.stop()
         super().closeEvent(event)
 
     def keyPressEvent(self, event) -> None:  # type: ignore[override]
