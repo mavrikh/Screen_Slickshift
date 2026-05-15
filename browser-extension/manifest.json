@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "Slickshift Browser Agent",
+  "version": "0.1.0",
+  "description": "Local agent that lets the Slickshift desktop host control the browser over a loopback WebSocket.",
+
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+
+  "permissions": [
+    "tabs",
+    "activeTab"
+  ],
+
+  "host_permissions": []
+}
