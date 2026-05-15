@@ -145,8 +145,11 @@ class BrowserAgentServer:
                 self._pending.pop(msg_id, None)
             raise RuntimeError("Browser agent event loop is not running.")
 
+        # call_soon_threadsafe schedules a callback on the asyncio loop from a
+        # non-asyncio thread. create_task() is called inside the callback so it
+        # runs on the loop's thread and does not require the deprecated loop= arg.
         self._loop.call_soon_threadsafe(
-            lambda: asyncio.ensure_future(self._broadcast(payload), loop=self._loop)
+            lambda: self._loop.create_task(self._broadcast(payload))
         )
 
         arrived = slot["event"].wait(timeout=COMMAND_TIMEOUT_S)
