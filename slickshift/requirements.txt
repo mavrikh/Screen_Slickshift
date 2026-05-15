@@ -16,3 +16,14 @@ pyautogui>=0.9.54
 # Runs a listener in a background thread. On macOS requires Accessibility permission
 # (same grant as pyautogui). On Windows no extra permission is needed.
 pynput>=1.7
+
+# pyobjc-framework-Quartz drives the macOS exclusive-mode capture path
+# (slickshift/capture/mac_event_tap.py). Installs a CGEventTap at
+# kCGHIDEventTap so mouse events can be suppressed before the OS cursor
+# moves. Not imported on Windows/Linux.
+pyobjc-framework-Quartz>=10.0; sys_platform == "darwin"
+
+# websockets is used by slickshift.browser_agent.server to run the local
+# WebSocket server that the Chrome extension connects to over loopback.
+# The modern asyncio API (websockets.asyncio.server) requires version >= 14.
+websockets>=14.0

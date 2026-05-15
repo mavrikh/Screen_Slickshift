@@ -35,6 +35,11 @@ Request/response flow:
     For a prototype with infrequent requests (e.g. user presses a button) this
     is fine. A future version could use asyncio Futures piped back through Qt
     signals for non-blocking use.
+
+Implementation note:
+    Uses websockets.asyncio.server (websockets 14.x modern API) to avoid the
+    legacy serve() deprecation warning. The handler receives a ServerConnection
+    object; the request path is at websocket.request.path.
 """
 
 from __future__ import annotations
@@ -173,18 +178,15 @@ class BrowserAgentServer:
     async def _serve(self) -> None:
         """Start the WebSocket server and run until the loop is stopped."""
         try:
-            import websockets  # type: ignore[import-untyped]
+            from websockets.asyncio.server import serve  # type: ignore[import-untyped]
         except ImportError as exc:
             logger.error(
                 "websockets library not found. "
-                "Run: pip install websockets>=14 -- %s", exc
+                "Run: pip install 'websockets>=14' -- %s", exc
             )
             return
 
-        # websockets 14.x uses websockets.serve() which accepts a path filter
-        # via the process_request hook or by checking the path inside the handler.
-        # We check the path inside the handler to avoid API version complexity.
-        async with websockets.serve(
+        async with serve(
             self._handle_connection,
             "127.0.0.1",
             BROWSER_AGENT_PORT,
@@ -198,11 +200,16 @@ class BrowserAgentServer:
             await asyncio.get_event_loop().create_future()  # run forever
 
     async def _handle_connection(self, websocket) -> None:
-        """Handle one connected WebSocket client (one browser extension instance)."""
-        # Check the requested path. Reject anything that is not our agent path.
-        path = getattr(websocket, "path", None) or getattr(
-            getattr(websocket, "request", None), "path", "/"
-        )
+        """Handle one connected WebSocket client (one browser extension instance).
+
+        websocket is a websockets.asyncio.server.ServerConnection. The request
+        path is available at websocket.request.path after the handshake.
+        """
+        # Path filtering: only accept the designated agent path.
+        # websocket.request is available immediately after the handler is called
+        # because the handshake has already completed.
+        request = getattr(websocket, "request", None)
+        path = request.path if request is not None else "/"
         if path != BROWSER_AGENT_PATH:
             logger.warning(
                 "BrowserAgentServer: rejected connection on path %r "
@@ -213,9 +220,9 @@ class BrowserAgentServer:
 
         with self._connections_lock:
             self._connections.add(websocket)
-        count = self.connection_count()
         logger.info(
-            "Browser extension connected. Active connections: %d", count
+            "Browser extension connected. Active connections: %d",
+            self.connection_count(),
         )
 
         try:
