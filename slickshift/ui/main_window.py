@@ -143,6 +143,10 @@ class _MainSignals(QObject):
     # Args: action (str).
     browser_hotkey_pressed = pyqtSignal(str)
 
+    # Emitted by the pynput keyboard listener thread when the B3 clipboard-push
+    # hotkey (Ctrl+Alt+Shift+V) is detected.
+    clipboard_push_pressed = pyqtSignal()
+
 
 class _Canvas(QFrame):
     """
@@ -2047,6 +2051,10 @@ class _BrowserPanel(QGroupBox):
         switch_to_tab   params: {"tabId": <int>}
         get_cookies     params: {"domain": "<string>"}
         wait_for_selector  params: {"tabId": <int>, "selector": "<css>", "timeoutMs": <int>}
+
+    B3 commands added to the composer:
+        open_url        params: {"url": "<string>"} -- opens URL in a new tab
+        paste_text      params: {"text": "<string>"} -- inserts text into the active input
     """
 
     # Signal emitted with a human-readable result string for the log panel.
@@ -2058,6 +2066,8 @@ class _BrowserPanel(QGroupBox):
         ("switch_to_tab",      '{"tabId": 0}'),
         ("get_cookies",        '{"domain": "example.com"}'),
         ("wait_for_selector",  '{"tabId": 0, "selector": "#main", "timeoutMs": 5000}'),
+        ("open_url",           '{"url": "https://example.com"}'),
+        ("paste_text",         '{"text": "hello from Slickshift"}'),
     ]
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -2587,6 +2597,9 @@ class MainWindow(QMainWindow):
 
         # Wire browser hotkey signal (B1).
         self._main_signals.browser_hotkey_pressed.connect(self._on_browser_hotkey)
+
+        # Wire clipboard-push hotkey signal (B3).
+        self._main_signals.clipboard_push_pressed.connect(self._on_clipboard_push)
 
         # Start the pynput mouse listener. Runs for the full window lifetime.
         self._event_capture.start()
@@ -3955,6 +3968,50 @@ class MainWindow(QMainWindow):
         # Unrecognised action -- should not happen, but log it rather than silently swallow.
         self._append_log(f"[browser] Unknown browser hotkey action: {action!r}")
 
+    def _on_clipboard_push(self) -> None:
+        """
+        Qt main thread: Ctrl+Alt+Shift+V was pressed (B3 clipboard-push hotkey).
+
+        Reads the host OS clipboard via slickshift.browser_agent.clipboard and
+        dispatches open_url (for URLs) or paste_text (for everything else) to
+        the connected browser extension. Runs the blocking send_command call in
+        a background thread so the Qt main thread is never stalled.
+        """
+        if self._browser_agent is None:
+            self._append_log("[browser] Browser agent is not running.")
+            return
+
+        count = self._browser_agent.connection_count()
+        self._browser_panel.set_connected(count)
+        if count == 0:
+            self._append_log("[browser] No extension connected -- clipboard push ignored.")
+            return
+
+        self._append_log("[browser] Clipboard push hotkey (Ctrl+Alt+Shift+V) detected.")
+
+        def _run() -> None:
+            from slickshift.browser_agent.clipboard import push_clipboard_to_browser
+            try:
+                result = push_clipboard_to_browser(self._browser_agent)
+                # open_url returns {"tabId": N}; paste_text returns {"pasted": bool, ...}
+                if isinstance(result, dict) and "tabId" in result:
+                    self._browser_log.emit(
+                        f"[browser] clipboard push: opened URL in new tab (tabId={result['tabId']})"
+                    )
+                elif isinstance(result, dict) and result.get("pasted") is False:
+                    reason = result.get("reason", "unknown")
+                    self._browser_log.emit(
+                        f"[browser] clipboard push: text not pasted -- {reason}"
+                    )
+                else:
+                    self._browser_log.emit(
+                        f"[browser] clipboard push: text pasted into {result.get('elementType', '?')}"
+                    )
+            except Exception as exc:
+                self._browser_log.emit(f"[browser] clipboard push error: {exc}")
+
+        threading.Thread(target=_run, name="browser-clipboard-push", daemon=True).start()
+
     def closeEvent(self, event) -> None:  # type: ignore[override]
         """
         Stop pynput listener threads cleanly before the window closes.
@@ -4176,6 +4233,8 @@ class MainWindow(QMainWindow):
             return "tab_next"
         if char in ("[", "{") or lower in ("[", "{"):
             return "tab_prev"
+        if lower == "v":
+            return "clipboard_push"
         return None
 
     def _kb_on_press(
@@ -4199,12 +4258,18 @@ class MainWindow(QMainWindow):
             logger.info("Force-release combo detected on keyboard listener thread")
             self._main_signals.force_release_pressed.emit()
             return
-        # Browser hotkeys (B1): Ctrl+Alt+Shift+{L, ], [}. Checked after force-release
-        # so the modifier chord never leaks into browser commands when Esc is also held.
+        # Browser hotkeys (B1/B3): Ctrl+Alt+Shift+{L, ], [, V}. Checked after
+        # force-release so the modifier chord never leaks into browser commands
+        # when Esc is also held.
         browser_action = self._kb_browser_hotkey_action(key)
         if browser_action is not None:
             logger.info("Browser hotkey detected: %s", browser_action)
-            self._main_signals.browser_hotkey_pressed.emit(browser_action)
+            # B3 clipboard-push gets its own signal so its handler can be kept
+            # separate from the B1 tab-management handler.
+            if browser_action == "clipboard_push":
+                self._main_signals.clipboard_push_pressed.emit()
+            else:
+                self._main_signals.browser_hotkey_pressed.emit(browser_action)
             return
         if self._keyboard_forwarding_active:
             key_name = self._translate_pynput_key(key)
