@@ -22,9 +22,12 @@ const SLICKSHIFT_HOST = "127.0.0.1";
 const SLICKSHIFT_PORT = 8765;
 const SLICKSHIFT_WS_URL = `ws://${SLICKSHIFT_HOST}:${SLICKSHIFT_PORT}/browser-agent`;
 
-// Backoff config: starts at 1 s, doubles each attempt, caps at 30 s.
+// Backoff config: starts at 1 s, doubles each attempt, caps at 5 s.
+// Low cap because the host is on loopback -- there is no network cost to
+// retrying quickly, and a short cap means restarting the host does not
+// require a manual extension reload.
 const RECONNECT_INITIAL_MS = 1000;
-const RECONNECT_MAX_MS = 30000;
+const RECONNECT_MAX_MS = 5000;
 const RECONNECT_FACTOR = 2;
 
 let _socket = null;

@@ -31,9 +31,10 @@ extension if you do not want your open tabs hitting a local log file.
 ## Reconnect behavior
 
 The background service worker attempts to reconnect with exponential
-backoff: starts at 1 second, doubles each attempt, caps at 30 seconds.
+backoff: starts at 1 second, doubles each attempt, caps at 5 seconds.
 This means it is safe to start the host before or after the browser --
-the connection will establish within one backoff cycle either way.
+the connection will establish within one backoff cycle either way, and
+restarting the host does not require a manual extension reload.
 
 ## Supported commands (prototype)
 
