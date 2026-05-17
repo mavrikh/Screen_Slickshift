@@ -129,6 +129,9 @@ async function dispatch(command, msg) {
     case "get_cookies":
       return await handleGetCookies(msg.domain);
 
+    case "wait_for_selector":
+      return await handleWaitForSelector(msg.tabId, msg.selector, msg.timeoutMs);
+
     default:
       throw new Error(`Unknown command: ${command}`);
   }
@@ -173,6 +176,88 @@ async function handleSwitchToTab(tabId) {
   await chrome.windows.update(updatedTab.windowId, { focused: true });
 
   return { tabId: updatedTab.id, windowId: updatedTab.windowId, focused: true };
+}
+
+/**
+ * wait_for_selector -- watch a tab's DOM for a CSS selector to appear.
+ *
+ * Injects an async function into the target tab via chrome.scripting.executeScript.
+ * The injected function uses a MutationObserver to detect when the selector
+ * matches anything in the document, then resolves. It also sets a timeout
+ * fallback so it always returns rather than hanging.
+ *
+ * The background handler wraps that with its own outer timeout so a hung tab
+ * (e.g. navigated away, frozen) does not block the command indefinitely.
+ *
+ * Requires: "scripting" permission in manifest.json.
+ *
+ * Result (matched):   { matched: true,  timeMs: <elapsed ms> }
+ * Result (timed out): { matched: false, timedOut: true }
+ *
+ * @param {number} tabId      - Tab to observe.
+ * @param {string} selector   - CSS selector to wait for.
+ * @param {number} timeoutMs  - Maximum wait time in milliseconds.
+ */
+async function handleWaitForSelector(tabId, selector, timeoutMs) {
+  if (typeof tabId !== "number") {
+    throw new Error(`wait_for_selector: tabId must be a number, got ${typeof tabId}`);
+  }
+  if (typeof selector !== "string" || selector.trim() === "") {
+    throw new Error("wait_for_selector: selector must be a non-empty string");
+  }
+  if (typeof timeoutMs !== "number" || timeoutMs <= 0) {
+    throw new Error("wait_for_selector: timeoutMs must be a positive number");
+  }
+
+  // We pass timeoutMs and selector to the injected function via args[].
+  // The injected function is serialized, so it cannot close over outer variables --
+  // everything it needs must come through the args array.
+  const results = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    args: [selector, timeoutMs],
+    func: (sel, timeout) => {
+      // Runs inside the page. Returns a Promise -- Chrome awaits it before
+      // returning the result to executeScript.
+      return new Promise((resolve) => {
+        const start = Date.now();
+
+        // If the element is already present, resolve immediately.
+        if (document.querySelector(sel)) {
+          resolve({ matched: true, timeMs: 0 });
+          return;
+        }
+
+        const timer = setTimeout(() => {
+          observer.disconnect();
+          resolve({ matched: false, timedOut: true });
+        }, timeout);
+
+        const observer = new MutationObserver(() => {
+          if (document.querySelector(sel)) {
+            clearTimeout(timer);
+            observer.disconnect();
+            resolve({ matched: true, timeMs: Date.now() - start });
+          }
+        });
+
+        // subtree + childList catches most dynamic content additions.
+        // attributes catches cases where a hidden element becomes visible.
+        observer.observe(document.documentElement, {
+          subtree: true,
+          childList: true,
+          attributes: true,
+        });
+      });
+    },
+  });
+
+  // executeScript returns an array of per-frame results. We only injected into
+  // the main frame, so take the first result's value.
+  if (!results || results.length === 0) {
+    throw new Error("wait_for_selector: executeScript returned no results");
+  }
+  return results[0].result;
 }
 
 /**
