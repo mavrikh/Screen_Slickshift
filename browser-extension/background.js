@@ -287,6 +287,26 @@ async function handleGetCookies(domain) {
 }
 
 // ---------------------------------------------------------------------------
+// Service worker keep-alive
+// ---------------------------------------------------------------------------
+
+// MV3 kills idle service workers after ~30 s, which would silently drop the
+// WebSocket and prevent reconnect (the onclose timer dies with the worker).
+// chrome.alarms can wake a sleeping worker; we schedule one every 24 s and use
+// the handler to call connect(), which is idempotent -- it no-ops when the
+// socket is already open and reconnects when it is not.
+const KEEPALIVE_ALARM = "slickshift-keepalive";
+const KEEPALIVE_PERIOD_MIN = 0.4; // 24 seconds, comfortably under the ~30 s idle cap.
+
+chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: KEEPALIVE_PERIOD_MIN });
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === KEEPALIVE_ALARM) {
+    connect();
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Startup
 // ---------------------------------------------------------------------------
 

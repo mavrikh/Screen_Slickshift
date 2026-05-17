@@ -40,6 +40,14 @@ This means it is safe to start the host before or after the browser --
 the connection will establish within one backoff cycle either way, and
 restarting the host does not require a manual extension reload.
 
+Manifest V3 service workers are killed after about 30 seconds of
+inactivity, which would otherwise silently drop the WebSocket and
+prevent reconnect (the onclose reconnect timer dies with the worker).
+The extension uses a `chrome.alarms` keep-alive that fires every 24
+seconds and calls `connect()` (idempotent: no-ops when the socket is
+already open, reconnects when it is not). This keeps the worker alive
+and self-heals the connection.
+
 ## Supported commands (prototype)
 
 | Command | Params | Description |
