@@ -135,6 +135,12 @@ async function dispatch(command, msg) {
     case "wait_for_selector":
       return await handleWaitForSelector(msg.tabId, msg.selector, msg.timeoutMs);
 
+    case "open_url":
+      return await handleOpenUrl(msg.url);
+
+    case "paste_text":
+      return await handlePasteText(msg.text);
+
     default:
       throw new Error(`Unknown command: ${command}`);
   }
@@ -307,6 +313,108 @@ async function handleWaitForSelector(tabId, selector, timeoutMs) {
   // the main frame, so take the first result's value.
   if (!results || results.length === 0) {
     throw new Error("wait_for_selector: executeScript returned no results");
+  }
+  return results[0].result;
+}
+
+/**
+ * open_url -- open a URL in a new tab.
+ *
+ * Validates that the URL starts with a safe scheme before creating the tab so
+ * a malformed payload from the host cannot trigger a javascript: navigation.
+ *
+ * Result: { tabId: <number> }
+ *
+ * @param {string} url - The URL to open.
+ */
+async function handleOpenUrl(url) {
+  if (typeof url !== "string" || url.trim() === "") {
+    throw new Error("open_url: url must be a non-empty string");
+  }
+  const trimmed = url.trim();
+  // Only allow http, https, and ftp -- block javascript: and data: schemes.
+  if (!/^(https?|ftp):\/\//i.test(trimmed)) {
+    throw new Error(`open_url: blocked unsafe URL scheme in: ${trimmed}`);
+  }
+  const tab = await chrome.tabs.create({ url: trimmed });
+  return { tabId: tab.id };
+}
+
+/**
+ * paste_text -- insert text into the focused input element of the active tab.
+ *
+ * Handles three element types in priority order:
+ *   1. <input> and <textarea>: set .value and dispatch an "input" event so
+ *      framework listeners (React, Vue, etc.) register the change.
+ *   2. contenteditable elements: use document.execCommand("insertText") which
+ *      preserves undo history and is the most broadly compatible path.
+ *   3. No focused input: returns { pasted: false, reason: "no focused input" }
+ *      rather than throwing, so the host can decide whether to warn.
+ *
+ * Requires the "scripting" permission and "<all_urls>" host_permission.
+ *
+ * Result (success):   { pasted: true,  elementType: "<tag>" }
+ * Result (no target): { pasted: false, reason: "no focused input" }
+ *
+ * @param {string} text - Text to insert.
+ */
+async function handlePasteText(text) {
+  if (typeof text !== "string") {
+    throw new Error("paste_text: text must be a string");
+  }
+
+  // We need the active tab in the focused window to inject into.
+  const [activeTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  if (!activeTab || !activeTab.id) {
+    throw new Error("paste_text: could not identify the active tab");
+  }
+
+  const results = await chrome.scripting.executeScript({
+    target: { tabId: activeTab.id },
+    world: "MAIN",
+    args: [text],
+    func: (insertText) => {
+      // Runs inside the page.
+      const el = document.activeElement;
+      if (!el) {
+        return { pasted: false, reason: "no focused input" };
+      }
+
+      const tag = el.tagName.toLowerCase();
+
+      // Native input/textarea: set value directly and fire the synthetic input
+      // event so framework change-detection hooks (React synthetic events, Vue
+      // watchers) treat the change as user-initiated.
+      if (tag === "input" || tag === "textarea") {
+        const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+          window.HTMLInputElement.prototype, "value"
+        ) || Object.getOwnPropertyDescriptor(
+          window.HTMLTextAreaElement.prototype, "value"
+        );
+        if (nativeInputValueSetter && nativeInputValueSetter.set) {
+          nativeInputValueSetter.set.call(el, el.value + insertText);
+        } else {
+          el.value += insertText;
+        }
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+        return { pasted: true, elementType: tag };
+      }
+
+      // contenteditable: execCommand is deprecated but still the most compatible
+      // approach for rich-text editors. It preserves undo history, which direct
+      // DOM manipulation does not.
+      if (el.isContentEditable) {
+        document.execCommand("insertText", false, insertText);
+        return { pasted: true, elementType: "contenteditable" };
+      }
+
+      return { pasted: false, reason: "no focused input" };
+    },
+  });
+
+  if (!results || results.length === 0) {
+    throw new Error("paste_text: executeScript returned no results");
   }
   return results[0].result;
 }
