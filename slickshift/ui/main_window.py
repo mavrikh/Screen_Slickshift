@@ -135,6 +135,14 @@ class _MainSignals(QObject):
     # Args: key_name (str -- pyautogui name), pressed (bool).
     key_event_fired = pyqtSignal(str, bool)
 
+    # Emitted by the pynput keyboard listener thread when a browser hotkey is
+    # detected (B1 feature). The action string is one of:
+    #   "list_tabs"  -- Ctrl+Alt+Shift+L
+    #   "tab_next"   -- Ctrl+Alt+Shift+]
+    #   "tab_prev"   -- Ctrl+Alt+Shift+[
+    # Args: action (str).
+    browser_hotkey_pressed = pyqtSignal(str)
+
 
 class _Canvas(QFrame):
     """
@@ -2577,6 +2585,9 @@ class MainWindow(QMainWindow):
         # Wire keyboard forwarding signal.
         self._main_signals.key_event_fired.connect(self._on_key_event_fired)
 
+        # Wire browser hotkey signal (B1).
+        self._main_signals.browser_hotkey_pressed.connect(self._on_browser_hotkey)
+
         # Start the pynput mouse listener. Runs for the full window lifetime.
         self._event_capture.start()
 
@@ -3897,6 +3908,53 @@ class MainWindow(QMainWindow):
             target=_run, name=f"browser-{command}", daemon=True
         ).start()
 
+    def _on_browser_hotkey(self, action: str) -> None:
+        """
+        Qt main thread: a browser hotkey was pressed (B1).
+
+        Dispatches the appropriate browser command in a background thread so the
+        Qt main thread is never blocked waiting for the extension reply.
+
+        action is one of: "list_tabs", "tab_next", "tab_prev".
+        """
+        if self._browser_agent is None:
+            self._append_log("[browser] Browser agent is not running.")
+            return
+
+        count = self._browser_agent.connection_count()
+        self._browser_panel.set_connected(count)
+        if count == 0:
+            self._append_log("[browser] No extension connected -- hotkey ignored.")
+            return
+
+        if action == "list_tabs":
+            # Reuse the existing list-tabs runner directly.
+            self._on_list_tabs_clicked()
+            return
+
+        if action in ("tab_next", "tab_prev"):
+            direction = "next" if action == "tab_next" else "prev"
+            self._append_log(f"[browser] tab_cycle {direction} (hotkey)")
+
+            def _run() -> None:
+                try:
+                    result = self._browser_agent.send_command("tab_cycle", direction=direction)
+                    from_i = result.get("fromIndex", "?")
+                    to_i = result.get("toIndex", "?")
+                    tab_id = result.get("tabId", "?")
+                    self._browser_log.emit(
+                        f"[browser] tab_cycle {direction}: "
+                        f"tab {from_i} -> {to_i} (tabId={tab_id})"
+                    )
+                except Exception as exc:
+                    self._browser_log.emit(f"[browser] tab_cycle {direction} error: {exc}")
+
+            threading.Thread(target=_run, name=f"browser-tab-{direction}", daemon=True).start()
+            return
+
+        # Unrecognised action -- should not happen, but log it rather than silently swallow.
+        self._append_log(f"[browser] Unknown browser hotkey action: {action!r}")
+
     def closeEvent(self, event) -> None:  # type: ignore[override]
         """
         Stop pynput listener threads cleanly before the window closes.
@@ -4062,6 +4120,64 @@ class MainWindow(QMainWindow):
             has_esc = _pynput_keyboard.Key.esc in pressed
         return has_ctrl and has_alt and has_shift and has_esc
 
+    def _kb_browser_hotkey_action(
+        self,
+        key: _pynput_keyboard.Key | _pynput_keyboard.KeyCode | None,
+    ) -> str | None:
+        """
+        Return the browser action string if the current key + modifier state
+        matches a B1 browser hotkey, otherwise None.
+
+        The three bindings share the Ctrl+Alt+Shift chord and differ only in the
+        trigger key -- 'l' for list_tabs, ']' for next tab, '[' for prev tab.
+        Called on the pynput listener thread after the force-release check, so it
+        only fires when the combo is NOT the force-release combo.
+        """
+        if not isinstance(key, _pynput_keyboard.KeyCode):
+            # All three trigger keys are printable characters, not special keys.
+            return None
+        char = key.char
+        if char is None:
+            return None
+
+        ctrl_variants = {
+            _pynput_keyboard.Key.ctrl,
+            _pynput_keyboard.Key.ctrl_l,
+            _pynput_keyboard.Key.ctrl_r,
+        }
+        alt_variants = {
+            _pynput_keyboard.Key.alt,
+            _pynput_keyboard.Key.alt_l,
+            _pynput_keyboard.Key.alt_r,
+        }
+        shift_variants = {
+            _pynput_keyboard.Key.shift,
+            _pynput_keyboard.Key.shift_l,
+            _pynput_keyboard.Key.shift_r,
+        }
+        # Read the pressed-keys snapshot once under the lock.
+        with self._kb_pressed_keys_lock:
+            pressed = self._kb_pressed_keys
+            has_ctrl = bool(pressed & ctrl_variants)
+            has_alt = bool(pressed & alt_variants)
+            has_shift = bool(pressed & shift_variants)
+
+        if not (has_ctrl and has_alt and has_shift):
+            return None
+
+        # char.lower() normalises away the shift-modified character so the user
+        # can press either case.  On most OSes Shift+[ sends '{'; on macOS it may
+        # send the literal '[' depending on keyboard layout.  Checking both the raw
+        # char and its lower form handles the common layouts without a keymap lookup.
+        lower = char.lower()
+        if lower == "l":
+            return "list_tabs"
+        if char in ("]", "}") or lower in ("]", "}"):
+            return "tab_next"
+        if char in ("[", "{") or lower in ("[", "{"):
+            return "tab_prev"
+        return None
+
     def _kb_on_press(
         self,
         key: _pynput_keyboard.Key | _pynput_keyboard.KeyCode | None,
@@ -4082,6 +4198,13 @@ class MainWindow(QMainWindow):
         if self._kb_combo_active():
             logger.info("Force-release combo detected on keyboard listener thread")
             self._main_signals.force_release_pressed.emit()
+            return
+        # Browser hotkeys (B1): Ctrl+Alt+Shift+{L, ], [}. Checked after force-release
+        # so the modifier chord never leaks into browser commands when Esc is also held.
+        browser_action = self._kb_browser_hotkey_action(key)
+        if browser_action is not None:
+            logger.info("Browser hotkey detected: %s", browser_action)
+            self._main_signals.browser_hotkey_pressed.emit(browser_action)
             return
         if self._keyboard_forwarding_active:
             key_name = self._translate_pynput_key(key)
