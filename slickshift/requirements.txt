@@ -27,3 +27,8 @@ pyobjc-framework-Quartz>=10.0; sys_platform == "darwin"
 # WebSocket server that the Chrome extension connects to over loopback.
 # The modern asyncio API (websockets.asyncio.server) requires version >= 14.
 websockets>=14.0
+
+# pyperclip provides cross-platform clipboard read/write. Used by
+# slickshift.browser_agent.clipboard to read the host clipboard before
+# dispatching open_url or paste_text to the connected browser extension.
+pyperclip>=1.8
