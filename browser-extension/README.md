@@ -15,8 +15,12 @@ to match.
 ## Privacy note
 
 The host logs every command it receives and every response the extension
-sends back. Tab titles and URLs appear in that log. Do not run this
-extension if you do not want your open tabs hitting a local log file.
+sends back. Tab titles, URLs, and cookie values appear in that log. Do not
+run this extension if you do not want that data hitting a local log file.
+
+The `get_cookies` command reads cookies from the user's own browser and sends
+them over loopback (127.0.0.1) to the Slickshift desktop app running on the
+same machine. No data is transmitted to any remote server.
 
 ## How to load (unpacked, developer mode)
 
@@ -38,20 +42,27 @@ restarting the host does not require a manual extension reload.
 
 ## Supported commands (prototype)
 
-| Command | Description |
-|---|---|
-| `list_tabs` | Returns `[{tabId, title, url}, ...]` for all open tabs. |
+| Command | Params | Description |
+|---|---|---|
+| `list_tabs` | (none) | Returns `[{tabId, title, url}, ...]` for all open tabs across all windows. |
+| `switch_to_tab` | `tabId: number` | Activates the given tab and focuses its window. Returns `{tabId, windowId, focused: true}`. |
+| `get_cookies` | `domain: string` | Returns all cookies for the given domain (and subdomains). Requires `cookies` permission and `<all_urls>` host permission. |
+| `wait_for_selector` | `tabId: number`, `selector: string`, `timeoutMs: number` | Waits for a CSS selector to appear in the tab's DOM. Returns `{matched: true, timeMs: N}` or `{matched: false, timedOut: true}`. Requires `scripting` permission. |
 
 ## Message format
 
-Host to extension:
+Host to extension (examples):
+
 ```json
-{ "id": "<opaque string>", "command": "list_tabs" }
+{ "id": "abc123", "command": "list_tabs" }
+{ "id": "abc124", "command": "switch_to_tab", "tabId": 42 }
+{ "id": "abc125", "command": "get_cookies", "domain": "example.com" }
+{ "id": "abc126", "command": "wait_for_selector", "tabId": 42, "selector": "#submit-btn", "timeoutMs": 5000 }
 ```
 
 Extension to host (success):
 ```json
-{ "id": "<opaque string>", "result": [ ... ] }
+{ "id": "<opaque string>", "result": <command-specific value> }
 ```
 
 Extension to host (error):
@@ -61,6 +72,16 @@ Extension to host (error):
 
 The `id` field is set by the host and echoed back by the extension.
 The host uses it to correlate responses to requests.
+
+## Permissions
+
+| Permission | Reason |
+|---|---|
+| `tabs` | Enumerate tabs and query tab metadata for `list_tabs` and `switch_to_tab`. |
+| `activeTab` | Reserved for future commands that need short-lived access to the currently active tab. |
+| `cookies` | Read cookie store for `get_cookies`. |
+| `scripting` | Inject content functions for `wait_for_selector`. |
+| `<all_urls>` (host) | Required by the `cookies` API when the target domain is not known at install time. |
 
 ## Files
 
