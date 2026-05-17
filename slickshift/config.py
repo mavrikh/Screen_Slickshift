@@ -80,3 +80,18 @@ KEYBOARD_FORWARDING_DEFAULT: bool = False
 SCROLL_MULTIPLIER_DEFAULT: int = 4 if sys.platform == "darwin" else 1
 SCROLL_MULTIPLIER_MIN: int = 1
 SCROLL_MULTIPLIER_MAX: int = 10
+
+# ---------------------------------------------------------------------------
+# Browser hotkeys (B1 -- hotkey-driven browser commands)
+# ---------------------------------------------------------------------------
+# All three use Ctrl+Alt+Shift as the modifier chord (same as force-release)
+# so they are always global but unlikely to conflict with normal app shortcuts.
+#
+# Ctrl+Alt+Shift+L  -> list_tabs  (print open tabs to the log panel)
+# Ctrl+Alt+Shift+]  -> tab_cycle direction=next
+# Ctrl+Alt+Shift+[  -> tab_cycle direction=prev
+#
+# These strings are display-only; the actual detection uses pynput key objects.
+BROWSER_HOTKEY_LIST_TABS: str = "ctrl+alt+shift+l"
+BROWSER_HOTKEY_TAB_NEXT: str = "ctrl+alt+shift+]"
+BROWSER_HOTKEY_TAB_PREV: str = "ctrl+alt+shift+["
