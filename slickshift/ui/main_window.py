@@ -72,7 +72,7 @@ from PyQt6.QtWidgets import (
 
 from slickshift import config
 from slickshift.capture.event_capture import EventCapture
-from slickshift.capture.mouse_capture import MouseCapture, make_mouse_capture
+from slickshift.capture.mouse_capture import MouseCapture
 from slickshift.edge_detection.arrangement import (
     arrangement_to_wire,
     invert_arrangement,
@@ -2996,7 +2996,7 @@ class MainWindow(QMainWindow):
         """
         if paused:
             if self._debug_capture is None:
-                self._debug_capture = make_mouse_capture(self._local_monitors)
+                self._debug_capture = MouseCapture(self._local_monitors)
                 self._debug_capture.start(lambda _delta: True)
             self._debug_capture.set_paused(True)
             self._append_log("DEBUG: cursor frozen and hidden (toggle off to restore)")
