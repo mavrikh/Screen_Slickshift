@@ -126,6 +126,9 @@ async function dispatch(command, msg) {
     case "switch_to_tab":
       return await handleSwitchToTab(msg.tabId);
 
+    case "get_cookies":
+      return await handleGetCookies(msg.domain);
+
     default:
       throw new Error(`Unknown command: ${command}`);
   }
@@ -170,6 +173,32 @@ async function handleSwitchToTab(tabId) {
   await chrome.windows.update(updatedTab.windowId, { focused: true });
 
   return { tabId: updatedTab.id, windowId: updatedTab.windowId, focused: true };
+}
+
+/**
+ * get_cookies -- return all cookies the browser holds for a given domain.
+ *
+ * Uses chrome.cookies.getAll({ domain }) which matches the domain and all
+ * subdomains. The result is the raw cookie array from the browser -- name,
+ * value, domain, path, secure, httpOnly, etc. -- suitable for inspection or
+ * export to the Slickshift host.
+ *
+ * Privacy note: this reads the user's own cookies on their own machine and
+ * sends them over loopback to the Slickshift desktop app. No data leaves the
+ * machine. The cookies permission + <all_urls> host permission are required
+ * because the domain is not known at extension-install time.
+ *
+ * Requires: "cookies" permission + "<all_urls>" host_permission in manifest.json.
+ * Result: [ { name, value, domain, path, secure, httpOnly, ... }, ... ]
+ */
+async function handleGetCookies(domain) {
+  if (typeof domain !== "string" || domain.trim() === "") {
+    throw new Error("get_cookies: domain must be a non-empty string");
+  }
+
+  const cookies = await chrome.cookies.getAll({ domain: domain.trim() });
+  // Return the full cookie objects -- the host decides how much of each to use.
+  return cookies;
 }
 
 // ---------------------------------------------------------------------------

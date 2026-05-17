@@ -11,8 +11,11 @@
 
   "permissions": [
     "tabs",
-    "activeTab"
+    "activeTab",
+    "cookies"
   ],
 
-  "host_permissions": []
+  "host_permissions": [
+    "<all_urls>"
+  ]
 }
