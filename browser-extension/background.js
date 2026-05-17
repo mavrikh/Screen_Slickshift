@@ -126,6 +126,9 @@ async function dispatch(command, msg) {
     case "switch_to_tab":
       return await handleSwitchToTab(msg.tabId);
 
+    case "tab_cycle":
+      return await handleTabCycle(msg.direction);
+
     case "get_cookies":
       return await handleGetCookies(msg.domain);
 
@@ -176,6 +179,54 @@ async function handleSwitchToTab(tabId) {
   await chrome.windows.update(updatedTab.windowId, { focused: true });
 
   return { tabId: updatedTab.id, windowId: updatedTab.windowId, focused: true };
+}
+
+/**
+ * tab_cycle -- activate the next or previous tab relative to the current active tab.
+ *
+ * Queries all tabs in the currently focused window. Finds the active tab's index,
+ * wraps around when at either end, then calls switch_to_tab on the target tab.
+ *
+ * @param {string} direction - "next" or "prev"
+ * Result: { tabId, windowId, focused: true, direction, fromIndex, toIndex }
+ */
+async function handleTabCycle(direction) {
+  if (direction !== "next" && direction !== "prev") {
+    throw new Error(`tab_cycle: direction must be "next" or "prev", got ${JSON.stringify(direction)}`);
+  }
+
+  // Get the currently focused window so we only cycle within it.
+  const currentWindow = await chrome.windows.getCurrent({ populate: false });
+  const windowId = currentWindow.id;
+
+  // All tabs in this window, ordered by their position.
+  const tabs = await chrome.tabs.query({ windowId });
+  if (tabs.length === 0) {
+    throw new Error("tab_cycle: no tabs found in the current window");
+  }
+
+  // Locate the active tab.
+  const activeIndex = tabs.findIndex((t) => t.active);
+  if (activeIndex === -1) {
+    throw new Error("tab_cycle: could not find an active tab in the current window");
+  }
+
+  // Wrap-around arithmetic: next wraps 0..n-1, prev wraps n-1..0.
+  const count = tabs.length;
+  const targetIndex =
+    direction === "next"
+      ? (activeIndex + 1) % count
+      : (activeIndex - 1 + count) % count;
+
+  const targetTab = tabs[targetIndex];
+  const result = await handleSwitchToTab(targetTab.id);
+
+  return {
+    ...result,
+    direction,
+    fromIndex: activeIndex,
+    toIndex: targetIndex,
+  };
 }
 
 /**
