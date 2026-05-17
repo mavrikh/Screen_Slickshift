@@ -123,6 +123,9 @@ async function dispatch(command, msg) {
     case "list_tabs":
       return await handleListTabs();
 
+    case "switch_to_tab":
+      return await handleSwitchToTab(msg.tabId);
+
     default:
       throw new Error(`Unknown command: ${command}`);
   }
@@ -143,6 +146,30 @@ async function handleListTabs() {
     title: tab.title ?? "",
     url: tab.url ?? "",
   }));
+}
+
+/**
+ * switch_to_tab -- activate a specific tab and focus its window.
+ *
+ * Two-step because chrome.tabs.update only makes the tab active within its
+ * window; if that window is behind another window it stays invisible until
+ * we also call chrome.windows.update to focus it. The tab query gives us
+ * the windowId without a second round-trip.
+ *
+ * Result: { tabId, windowId, focused: true } on success.
+ */
+async function handleSwitchToTab(tabId) {
+  if (typeof tabId !== "number") {
+    throw new Error(`switch_to_tab: tabId must be a number, got ${typeof tabId}`);
+  }
+
+  // Activate the tab within its window.
+  const updatedTab = await chrome.tabs.update(tabId, { active: true });
+
+  // Focus the window that owns the tab so it comes to the foreground.
+  await chrome.windows.update(updatedTab.windowId, { focused: true });
+
+  return { tabId: updatedTab.id, windowId: updatedTab.windowId, focused: true };
 }
 
 // ---------------------------------------------------------------------------

@@ -72,7 +72,7 @@ from PyQt6.QtWidgets import (
 
 from slickshift import config
 from slickshift.capture.event_capture import EventCapture
-from slickshift.capture.mouse_capture import MouseCapture
+from slickshift.capture.mouse_capture import MouseCapture, make_mouse_capture
 from slickshift.edge_detection.arrangement import (
     arrangement_to_wire,
     invert_arrangement,
@@ -572,6 +572,21 @@ class _MirrorPanel(QGroupBox):
         self._stop_btn.setEnabled(False)
         layout.addWidget(self._stop_btn)
 
+        # DEBUG: Phase 2 Step A cursor-freeze validation toggle.
+        # Spins up a self-contained MacMouseCapture (independent of the
+        # state machine, no peer required) and pauses it so the warp-on-move
+        # suppression + cursor hide can be observed on a single machine.
+        # REMOVE this button (and its handler in MainWindow) once Step 5
+        # full handoff validation is complete.
+        self._debug_pause_btn = QPushButton("DEBUG: Freeze Cursor")
+        self._debug_pause_btn.setStyleSheet(btn_style)
+        self._debug_pause_btn.setCheckable(True)
+        self._debug_pause_btn.setToolTip(
+            "Self-contained Phase 2 freeze test. Toggle on to hide and freeze "
+            "the cursor; toggle off to restore. No peer connection needed."
+        )
+        layout.addWidget(self._debug_pause_btn)
+
         # Inject checkbox. Defaults to checked so injection starts immediately
         # when the machine first enters RECEIVING (assuming the macOS Accessibility
         # probe passes). Disabled in all states except RECEIVING.
@@ -775,6 +790,11 @@ class _MirrorPanel(QGroupBox):
     @property
     def stop_btn(self) -> QPushButton:
         return self._stop_btn
+
+    @property
+    def debug_pause_btn(self) -> QPushButton:
+        """DEBUG: Phase 2 cursor-freeze validation toggle. Remove with the button."""
+        return self._debug_pause_btn
 
     @property
     def inject_chk(self) -> QCheckBox:
@@ -2007,17 +2027,30 @@ class _BrowserPanel(QGroupBox):
     """
     Browser extension control panel.
 
-    Provides a "List Tabs" button that sends a list_tabs command to the
-    connected Chrome extension and displays the result in the main log panel.
+    Row 1: "List Tabs" button (quick action, existing) + connection status label.
+    Row 2: Browser command composer -- a dropdown of command names, a params
+           field (JSON object or simple key=value pairs), and a Send button.
+           Results land in the same main log panel via the _browser_log signal.
 
-    The panel is always visible. Buttons are enabled only when at least one
-    extension instance is connected. Connection status is updated each time
-    the button is pressed (lazy check rather than a polling timer).
+    The panel is always visible. The lazy connection-count check on each button
+    press is intentional -- no polling timer needed for a prototype.
+
+    Phase A commands available in the composer:
+        switch_to_tab   params: {"tabId": <int>}
+        get_cookies     params: {"domain": "<string>"}
+        wait_for_selector  params: {"tabId": <int>, "selector": "<css>", "timeoutMs": <int>}
     """
 
     # Signal emitted with a human-readable result string for the log panel.
     # Declared at class level so Qt registers it correctly.
     result_ready = pyqtSignal(str)
+
+    # Commands available in the composer dropdown, with placeholder param hints.
+    _COMPOSER_COMMANDS: list[tuple[str, str]] = [
+        ("switch_to_tab",      '{"tabId": 0}'),
+        ("get_cookies",        '{"domain": "example.com"}'),
+        ("wait_for_selector",  '{"tabId": 0, "selector": "#main", "timeoutMs": 5000}'),
+    ]
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("Browser Extension", parent)
@@ -2027,9 +2060,9 @@ class _BrowserPanel(QGroupBox):
             "QGroupBox::title { subcontrol-origin: margin; left: 8px; }"
         )
 
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 12, 8, 8)
-        layout.setSpacing(8)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(8, 12, 8, 8)
+        outer.setSpacing(4)
 
         btn_style = (
             "QPushButton { background-color: #16213e; color: #e0e0e0; "
@@ -2039,19 +2072,66 @@ class _BrowserPanel(QGroupBox):
             "QPushButton:disabled { color: #555555; border-color: #2a2a4e; }"
         )
 
+        # --- Row 1: quick-action button + status ---
+        row1 = QHBoxLayout()
+        row1.setSpacing(8)
+
         self._list_tabs_btn = QPushButton("List Tabs")
         self._list_tabs_btn.setToolTip(
             "Send list_tabs to the connected Chrome extension and print results to the log."
         )
         self._list_tabs_btn.setStyleSheet(btn_style)
-        layout.addWidget(self._list_tabs_btn)
+        row1.addWidget(self._list_tabs_btn)
 
         self._status_label = QLabel("No extension connected")
         self._status_label.setStyleSheet(
             "color: #888888; font-family: monospace; font-size: 12px;"
         )
-        layout.addWidget(self._status_label)
-        layout.addStretch()
+        row1.addWidget(self._status_label)
+        row1.addStretch()
+        outer.addLayout(row1)
+
+        # --- Row 2: browser command composer ---
+        row2 = QHBoxLayout()
+        row2.setSpacing(6)
+
+        self._cmd_combo = QComboBox()
+        self._cmd_combo.setStyleSheet(
+            "QComboBox { background-color: #16213e; color: #e0e0e0; "
+            "font-family: monospace; font-size: 12px; border: 1px solid #3a3a6e; "
+            "padding: 2px 6px; } "
+            "QComboBox::drop-down { border: none; } "
+            "QComboBox QAbstractItemView { background-color: #16213e; color: #e0e0e0; "
+            "selection-background-color: #1e2f5e; }"
+        )
+        for cmd_name, _ in self._COMPOSER_COMMANDS:
+            self._cmd_combo.addItem(cmd_name)
+        # Populate params hint when the selection changes.
+        self._cmd_combo.currentIndexChanged.connect(self._on_cmd_selected)
+        row2.addWidget(self._cmd_combo)
+
+        self._params_field = QLineEdit()
+        self._params_field.setPlaceholderText("params (JSON)")
+        self._params_field.setStyleSheet(
+            "QLineEdit { background-color: #16213e; color: #e0e0e0; "
+            "font-family: monospace; font-size: 12px; border: 1px solid #3a3a6e; "
+            "padding: 2px 6px; }"
+        )
+        # Pre-fill with the hint for the first item.
+        if self._COMPOSER_COMMANDS:
+            self._params_field.setText(self._COMPOSER_COMMANDS[0][1])
+        row2.addWidget(self._params_field, stretch=1)
+
+        self._send_btn = QPushButton("Send")
+        self._send_btn.setStyleSheet(btn_style)
+        self._send_btn.setToolTip("Send the selected browser command with the given params.")
+        row2.addWidget(self._send_btn)
+        outer.addLayout(row2)
+
+    def _on_cmd_selected(self, index: int) -> None:
+        """Fill the params field with the placeholder for the newly selected command."""
+        if 0 <= index < len(self._COMPOSER_COMMANDS):
+            self._params_field.setText(self._COMPOSER_COMMANDS[index][1])
 
     def set_connected(self, count: int) -> None:
         """Update the status label to reflect the current connection count."""
@@ -2074,6 +2154,18 @@ class _BrowserPanel(QGroupBox):
     @property
     def list_tabs_btn(self) -> QPushButton:
         return self._list_tabs_btn
+
+    @property
+    def send_btn(self) -> QPushButton:
+        return self._send_btn
+
+    def current_command(self) -> str:
+        """Return the command name currently selected in the composer dropdown."""
+        return self._cmd_combo.currentText()
+
+    def current_params_text(self) -> str:
+        """Return the raw text from the params field."""
+        return self._params_field.text().strip()
 
 
 class MainWindow(QMainWindow):
@@ -2406,6 +2498,10 @@ class MainWindow(QMainWindow):
         self._mirror_panel.start_btn.clicked.connect(self._on_start_mirroring_clicked)
         self._mirror_panel.stop_btn.clicked.connect(self._on_stop_mirroring_clicked)
 
+        # DEBUG: Phase 2 Step A cursor-freeze toggle. Remove with the button.
+        self._debug_capture: MouseCapture | None = None
+        self._mirror_panel.debug_pause_btn.toggled.connect(self._on_debug_pause_toggled)
+
         # Wire Inject checkbox.
         self._mirror_panel.inject_chk.stateChanged.connect(self._on_inject_toggled)
 
@@ -2437,6 +2533,7 @@ class MainWindow(QMainWindow):
         # Qt main thread so the log panel widget is only touched from the main thread.
         self._browser_log.connect(self._log_panel.append_line)
         self._browser_panel.list_tabs_btn.clicked.connect(self._on_list_tabs_clicked)
+        self._browser_panel.send_btn.clicked.connect(self._on_browser_send_clicked)
 
         # Splitter lets the user resize the log panel vertically.
         splitter = QSplitter(Qt.Orientation.Vertical)
@@ -2877,6 +2974,40 @@ class MainWindow(QMainWindow):
         self._conn_panel.on_state_changed(SwitchState.CONNECTED, peer_info=self._peer_info)
         self._mirror_panel.on_state_changed(SwitchState.CONNECTED)
         self._append_log("Mirroring stopped")
+
+    def _on_debug_pause_toggled(self, paused: bool) -> None:
+        """
+        DEBUG: Phase 2 Step A cursor-freeze validation.
+
+        Toggle on: spin up a self-contained MacMouseCapture (independent of
+        the state machine, no peer needed), start it, then pause it. The
+        cursor should disappear and freeze in place even as the physical
+        mouse keeps moving.
+
+        Toggle off: unpause, stop, and tear down the debug capture. Cursor
+        reappears and tracks normally again.
+
+        Runs entirely on the GUI thread because Qt button signals are
+        delivered on that thread. PyQt6 sets up NSApplication on import, so
+        CGDisplayHideCursor takes effect (unlike from a bare CLI script).
+
+        REMOVE this method, the button in _MirrorPanel, and the toggled
+        signal wiring once Phase 2 Step 5 (full handoff validation) lands.
+        """
+        if paused:
+            if self._debug_capture is None:
+                self._debug_capture = make_mouse_capture(self._local_monitors)
+                self._debug_capture.start(lambda _delta: True)
+            self._debug_capture.set_paused(True)
+            self._append_log("DEBUG: cursor frozen and hidden (toggle off to restore)")
+            logger.info("DEBUG cursor-freeze ENGAGED")
+        else:
+            if self._debug_capture is not None:
+                self._debug_capture.set_paused(False)
+                self._debug_capture.stop()
+                self._debug_capture = None
+            self._append_log("DEBUG: cursor restored")
+            logger.info("DEBUG cursor-freeze RELEASED")
 
     def _stop_capture_if_running(self) -> None:
         """
@@ -3700,7 +3831,7 @@ class MainWindow(QMainWindow):
         count = self._browser_agent.connection_count()
         self._browser_panel.set_connected(count)
         if count == 0:
-            self._append_log("[browser] No extension connected. Load the extension in Chrome first.")
+            self._append_log("[browser] No extension connected. Load the extension in Chrome or Brave first.")
             return
 
         def _run() -> None:
@@ -3720,6 +3851,51 @@ class MainWindow(QMainWindow):
                 self._browser_log.emit(f"[browser] list_tabs error: {exc}")
 
         threading.Thread(target=_run, name="browser-list-tabs", daemon=True).start()
+
+    def _on_browser_send_clicked(self) -> None:
+        """
+        Send an arbitrary browser command from the composer UI to the extension.
+
+        Parses the params field as JSON, unpacks the resulting dict as kwargs
+        to send_command, and logs the raw result. Runs in a background thread
+        so the Qt main thread is never blocked waiting for the extension.
+        """
+        import json as _json
+
+        if self._browser_agent is None:
+            self._append_log("[browser] Browser agent is not running.")
+            return
+
+        count = self._browser_agent.connection_count()
+        self._browser_panel.set_connected(count)
+        if count == 0:
+            self._append_log("[browser] No extension connected.")
+            return
+
+        command = self._browser_panel.current_command()
+        raw_params = self._browser_panel.current_params_text()
+
+        # Parse params. Accept an empty string as {}.
+        try:
+            params: dict = _json.loads(raw_params) if raw_params else {}
+        except _json.JSONDecodeError as exc:
+            self._append_log(f"[browser] Bad params JSON: {exc}")
+            return
+
+        if not isinstance(params, dict):
+            self._append_log("[browser] Params must be a JSON object, not an array or scalar.")
+            return
+
+        def _run() -> None:
+            try:
+                result = self._browser_agent.send_command(command, **params)
+                self._browser_log.emit(f"[browser] {command} result: {_json.dumps(result, indent=2)}")
+            except Exception as exc:
+                self._browser_log.emit(f"[browser] {command} error: {exc}")
+
+        threading.Thread(
+            target=_run, name=f"browser-{command}", daemon=True
+        ).start()
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         """
