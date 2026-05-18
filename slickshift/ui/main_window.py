@@ -2068,6 +2068,7 @@ class _BrowserPanel(QGroupBox):
         ("wait_for_selector",  '{"tabId": 0, "selector": "#main", "timeoutMs": 5000}'),
         ("open_url",           '{"url": "https://example.com"}'),
         ("paste_text",         '{"text": "hello from Slickshift"}'),
+        ("click_selector",     '{"tabId": 0, "selector": "a#video-title"}'),
     ]
 
     def __init__(self, parent: QWidget | None = None) -> None:

@@ -141,6 +141,9 @@ async function dispatch(command, msg) {
     case "paste_text":
       return await handlePasteText(msg.text);
 
+    case "click_selector":
+      return await handleClickSelector(msg.tabId, msg.selector);
+
     default:
       throw new Error(`Unknown command: ${command}`);
   }
@@ -443,6 +446,47 @@ async function handleGetCookies(domain) {
   const cookies = await chrome.cookies.getAll({ domain: domain.trim() });
   // Return the full cookie objects -- the host decides how much of each to use.
   return cookies;
+}
+
+/**
+ * click_selector -- find the first element matching a CSS selector and
+ * call element.click() on it.
+ *
+ * Experimental. Synthetic clicks fire with isTrusted=false. For <a href>
+ * anchors the browser's default navigation action still runs, so this
+ * should be enough to pick links and thumbnails on most pages (the
+ * YouTube thumbnail case being the motivating example). Sites that
+ * intercept clicks via JS handlers that check isTrusted will refuse.
+ *
+ * Returns { clicked: true, tagName, href? } on success, or
+ *         { clicked: false, reason: "..." } when the selector matched
+ *         nothing (no throw -- the caller decides whether that is an error).
+ */
+async function handleClickSelector(tabId, selector) {
+  if (typeof tabId !== "number") {
+    throw new Error(`click_selector: tabId must be a number, got ${typeof tabId}`);
+  }
+  if (typeof selector !== "string" || selector.trim() === "") {
+    throw new Error("click_selector: selector must be a non-empty string");
+  }
+
+  const results = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    args: [selector],
+    func: (sel) => {
+      const el = document.querySelector(sel);
+      if (!el) {
+        return { clicked: false, reason: "no element matched selector" };
+      }
+      const tagName = el.tagName.toLowerCase();
+      const href = el.getAttribute ? el.getAttribute("href") : null;
+      el.click();
+      return href ? { clicked: true, tagName, href } : { clicked: true, tagName };
+    },
+  });
+
+  return results[0]?.result ?? { clicked: false, reason: "executeScript returned no result" };
 }
 
 // ---------------------------------------------------------------------------

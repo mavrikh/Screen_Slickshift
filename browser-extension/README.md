@@ -56,6 +56,10 @@ and self-heals the connection.
 | `switch_to_tab` | `tabId: number` | Activates the given tab and focuses its window. Returns `{tabId, windowId, focused: true}`. |
 | `get_cookies` | `domain: string` | Returns all cookies for the given domain (and subdomains). Requires `cookies` permission and `<all_urls>` host permission. |
 | `wait_for_selector` | `tabId: number`, `selector: string`, `timeoutMs: number` | Waits for a CSS selector to appear in the tab's DOM. Returns `{matched: true, timeMs: N}` or `{matched: false, timedOut: true}`. Requires `scripting` permission. |
+| `tab_cycle` | `direction: "next" \| "prev"` | Activates the next or previous tab in the focused window, wrapping at either end. Returns `{tabId, windowId, focused, direction, fromIndex, toIndex}`. |
+| `open_url` | `url: string` | Opens the URL in a new tab. Validates scheme is http/https/ftp. Returns `{tabId}`. |
+| `paste_text` | `text: string` | Inserts text into the active tab's currently focused input (input, textarea, or contenteditable). Returns `{pasted: true, elementType}` or `{pasted: false, reason}`. Requires `scripting` permission. |
+| `click_selector` | `tabId: number`, `selector: string` | Experimental: finds the first element matching the selector and calls `element.click()`. Synthetic click (`isTrusted: false`); works for `<a href>` navigation and most simple click handlers, fails on widgets that check `isTrusted`. Returns `{clicked: true, tagName, href?}` or `{clicked: false, reason}`. Requires `scripting` permission. |
 
 ## Message format
 
