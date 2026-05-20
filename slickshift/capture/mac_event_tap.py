@@ -15,12 +15,21 @@ Phase 2 build order:
 - Step A: install the tap, run a CFRunLoop in a daemon thread, honor
   set_paused() by returning None when paused. No delta delivery yet.
 - Step B: emit normalized deltas through delta_callback to the send path.
-- Step C (this commit): exclusive capture. When paused, the callback now
-  returns None instead of returning the event unchanged, so the OS drops
-  the motion event entirely and the local cursor never moves. The earlier
+- Step C: exclusive capture for motion. When paused, the callback returns
+  None instead of returning the event unchanged, so the OS drops the
+  motion event entirely and the local cursor never moves. The earlier
   warp-on-move attempt triggered macOS's shake-to-locate cursor and never
   actually froze anything; the None-return approach prevents motion from
   reaching the cursor in the first place.
+- Step D (this commit): extend exclusive capture to click and scroll
+  events. The same tap now intercepts kCGEventLeftMouseDown/Up,
+  kCGEventRightMouseDown/Up, kCGEventOtherMouseDown/Up, and
+  kCGEventScrollWheel. Click and scroll messages are forwarded to the
+  send path via delta_callback (same wire format as the existing pynput
+  path: {"type":"click","button","pressed"} and {"type":"scroll","dx","dy"}).
+  When paused, the callback returns None for these too, so they no longer
+  leak through to local apps at the physical HID device position. pynput's
+  mouse listener becomes redundant on macOS and is no-op'd in EventCapture.
 
 Permissions:
 - Accessibility (System Settings > Privacy and Security > Accessibility)
@@ -218,6 +227,13 @@ class MacMouseCapture(MouseCapture):
             | Quartz.CGEventMaskBit(Quartz.kCGEventLeftMouseDragged)
             | Quartz.CGEventMaskBit(Quartz.kCGEventRightMouseDragged)
             | Quartz.CGEventMaskBit(Quartz.kCGEventOtherMouseDragged)
+            | Quartz.CGEventMaskBit(Quartz.kCGEventLeftMouseDown)
+            | Quartz.CGEventMaskBit(Quartz.kCGEventLeftMouseUp)
+            | Quartz.CGEventMaskBit(Quartz.kCGEventRightMouseDown)
+            | Quartz.CGEventMaskBit(Quartz.kCGEventRightMouseUp)
+            | Quartz.CGEventMaskBit(Quartz.kCGEventOtherMouseDown)
+            | Quartz.CGEventMaskBit(Quartz.kCGEventOtherMouseUp)
+            | Quartz.CGEventMaskBit(Quartz.kCGEventScrollWheel)
         )
 
         # Retain the callback on self before passing to pyobjc so the GC can't
@@ -288,14 +304,24 @@ class MacMouseCapture(MouseCapture):
 
         Returning the original event passes it through to the OS. Returning
         None drops the event before delivery -- the local cursor does not
-        move. That is the suppression mechanism the polling loop cannot do.
+        move and no application sees it.
 
-        Suppression: while paused, the callback returns None so the OS
-        drops the motion event entirely. The cursor never moves, so the
-        shake-to-locate heuristic (which broke the prior warp-on-move
-        approach) cannot fire. When not paused, the callback emits a
-        normalized delta and returns the event so the OS handles cursor
-        motion normally.
+        Event handling by branch:
+        - Motion (kCGEventMouseMoved + the three drag variants): when paused,
+          drop. When not paused, extract pixel deltas, normalize to vd
+          fractions, and forward as {"type":"delta", ...}.
+        - Click (left/right/middle Down/Up): when paused, drop. When not
+          paused, map the event type to a button name + pressed state and
+          forward as {"type":"click", "button", "pressed"}.
+        - Scroll (kCGEventScrollWheel): when paused, drop. When not paused,
+          read kCGScrollWheelEventDeltaAxis1/2 and forward as
+          {"type":"scroll", "dx", "dy"}.
+
+        The suppression-when-paused semantics is what makes exclusive mode
+        work: clicks and scrolls no longer leak to local apps at the HID
+        device position, and the cursor cannot reappear from interactive
+        feedback. Returns None for everything captured when paused so the
+        OS drops the entire event upstream of any other tap.
 
         Disabled-event handling: macOS may disable the tap if the callback
         runs too long. The tap delivers special event types
@@ -306,6 +332,27 @@ class MacMouseCapture(MouseCapture):
         paused_lock = self._paused_lock
         tap_disabled_by_timeout = Quartz.kCGEventTapDisabledByTimeout
         tap_disabled_by_user_input = Quartz.kCGEventTapDisabledByUserInput
+
+        # Pre-compute event-type lookup tables and constants so the hot path
+        # avoids repeated attribute access on the Quartz module.
+        motion_types = (
+            Quartz.kCGEventMouseMoved,
+            Quartz.kCGEventLeftMouseDragged,
+            Quartz.kCGEventRightMouseDragged,
+            Quartz.kCGEventOtherMouseDragged,
+        )
+        # Left and right buttons map directly. "Other" buttons (middle, thumb)
+        # are dispatched in a separate branch that reads the button-number
+        # field to disambiguate.
+        click_map = {
+            Quartz.kCGEventLeftMouseDown: ("left", True),
+            Quartz.kCGEventLeftMouseUp: ("left", False),
+            Quartz.kCGEventRightMouseDown: ("right", True),
+            Quartz.kCGEventRightMouseUp: ("right", False),
+        }
+        other_down = Quartz.kCGEventOtherMouseDown
+        other_up = Quartz.kCGEventOtherMouseUp
+        scroll_wheel = Quartz.kCGEventScrollWheel
 
         def _callback(proxy: Any, event_type: Any, event: Any, refcon: Any) -> Any:
             capture._callback_invocation_count += 1
@@ -326,51 +373,87 @@ class MacMouseCapture(MouseCapture):
             with paused_lock:
                 currently_paused = capture._paused
 
-            # Exclusive-mode suppression: while paused (cursor logically "on
-            # peer"), return None so the OS drops the motion event entirely.
-            # The cursor never moves, so shake-to-locate cannot fire and no
-            # downstream application sees ghost motion.
+            # Exclusive-mode suppression: while paused, drop every captured
+            # event locally and skip the forward path. The cursor never moves,
+            # clicks never reach local apps, and shake-to-locate cannot fire.
             if currently_paused:
                 return None
 
-            # Delta delivery (Step B).
-            # Only emit when NOT paused. Quartz delivers hardware-reported pixel
-            # deltas via kCGMouseEventDeltaX / kCGMouseEventDeltaY. These are
-            # integer-valued doubles but represent raw device counts before any
-            # OS acceleration curve is applied, which is exactly what we want
-            # for a KVM: the physical distance the mouse moved, not where macOS
-            # decided to move the cursor.
-            #
-            # Normalization follows the same formula as the polling loop:
-            #   ndx = dx_px / vd_w,  ndy = dy_px / vd_h
-            # so the receiver can scale back up using its own virtual-desktop
-            # dimensions without knowing the sender's screen resolution.
-            dx_px = Quartz.CGEventGetDoubleValueField(
-                event, Quartz.kCGMouseEventDeltaX
-            )
-            dy_px = Quartz.CGEventGetDoubleValueField(
-                event, Quartz.kCGMouseEventDeltaY
-            )
-            if dx_px != 0.0 or dy_px != 0.0:
-                ndx: float = dx_px / capture._vd_w
-                ndy: float = dy_px / capture._vd_h
-                logger.debug(
-                    "Tap delta: raw=(%.1f,%.1f) vd=(%dx%d) n=(%.4f,%.4f)",
-                    dx_px, dy_px, capture._vd_w, capture._vd_h, ndx, ndy,
+            # MOTION events. Quartz delivers hardware-reported pixel deltas
+            # via kCGMouseEventDeltaX / kCGMouseEventDeltaY -- raw device
+            # counts before the OS acceleration curve. Normalize to
+            # virtual-desktop fractions so the receiver can rescale.
+            if event_type in motion_types:
+                dx_px = Quartz.CGEventGetDoubleValueField(
+                    event, Quartz.kCGMouseEventDeltaX
                 )
-                capture._seq += 1
-                delta: dict = {
-                    "type": "delta",
-                    "ndx": ndx,
-                    "ndy": ndy,
-                    "seq": capture._seq,
-                }
-                accepted = delta_callback(delta)
-                if not accepted:
+                dy_px = Quartz.CGEventGetDoubleValueField(
+                    event, Quartz.kCGMouseEventDeltaY
+                )
+                if dx_px != 0.0 or dy_px != 0.0:
+                    ndx: float = dx_px / capture._vd_w
+                    ndy: float = dy_px / capture._vd_h
                     logger.debug(
-                        "Tap delta seq=%d dropped (send queue full)", capture._seq
+                        "Tap delta: raw=(%.1f,%.1f) vd=(%dx%d) n=(%.4f,%.4f)",
+                        dx_px, dy_px, capture._vd_w, capture._vd_h, ndx, ndy,
                     )
+                    capture._seq += 1
+                    delta: dict = {
+                        "type": "delta",
+                        "ndx": ndx,
+                        "ndy": ndy,
+                        "seq": capture._seq,
+                    }
+                    accepted = delta_callback(delta)
+                    if not accepted:
+                        logger.debug(
+                            "Tap delta seq=%d dropped (send queue full)", capture._seq
+                        )
+                return event
 
+            # CLICK events for left and right buttons.
+            click_info = click_map.get(event_type)
+            if click_info is not None:
+                button, pressed = click_info
+                logger.debug("Tap click: button=%s pressed=%s", button, pressed)
+                delta_callback({"type": "click", "button": button, "pressed": pressed})
+                return event
+
+            # CLICK events for "other" buttons. Read the button number to
+            # disambiguate -- 2 is the middle button by convention. Higher
+            # numbers (thumb buttons etc.) are not forwarded.
+            if event_type == other_down or event_type == other_up:
+                button_num = Quartz.CGEventGetIntegerValueField(
+                    event, Quartz.kCGMouseEventButtonNumber
+                )
+                if button_num == 2:
+                    pressed = event_type == other_down
+                    logger.debug("Tap click: button=middle pressed=%s", pressed)
+                    delta_callback(
+                        {"type": "click", "button": "middle", "pressed": pressed}
+                    )
+                return event
+
+            # SCROLL events. Axis1 is vertical (positive = up), Axis2 is
+            # horizontal (positive = right) per Apple's Quartz docs. The wire
+            # format uses dx/dy with the same sign convention as pyautogui's
+            # scroll() so the receiver-side injector does not need to know
+            # which capture path produced the event.
+            if event_type == scroll_wheel:
+                dy_scroll = Quartz.CGEventGetIntegerValueField(
+                    event, Quartz.kCGScrollWheelEventDeltaAxis1
+                )
+                dx_scroll = Quartz.CGEventGetIntegerValueField(
+                    event, Quartz.kCGScrollWheelEventDeltaAxis2
+                )
+                if dx_scroll != 0 or dy_scroll != 0:
+                    logger.debug("Tap scroll: dx=%d dy=%d", dx_scroll, dy_scroll)
+                    delta_callback(
+                        {"type": "scroll", "dx": int(dx_scroll), "dy": int(dy_scroll)}
+                    )
+                return event
+
+            # Unknown event type slipped through the mask -- pass through unchanged.
             return event
 
         return _callback

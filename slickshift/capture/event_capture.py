@@ -24,11 +24,20 @@ to the receiver will also fire on the sender machine's own apps.
 from __future__ import annotations
 
 import logging
+import platform
 from collections.abc import Callable
 
 from pynput import mouse as _pynput_mouse
 
 logger = logging.getLogger(__name__)
+
+# On macOS, click and scroll capture has moved into MacMouseCapture's
+# CGEventTap (so it can also suppress events locally during exclusive mode).
+# pynput's mouse Listener becomes redundant -- EventCapture.start() returns
+# early on Darwin to avoid installing a second tap. The class still exists
+# for the cross-platform import surface and for Windows / Linux where pynput
+# remains the only sender-side click capture path.
+_IS_MACOS = platform.system() == "Darwin"
 
 # Type aliases for the callbacks.
 # ClickCallback(button_name: str, pressed: bool) -- called on button down/up.
@@ -88,7 +97,19 @@ class EventCapture:
         Events are delivered to _pynput_on_click and _pynput_on_scroll, which
         check the _active gate before calling the user callbacks. The listener
         starts gated off (inactive) -- call set_active(True) to open the gate.
+
+        On macOS this is a no-op: click and scroll capture are owned by
+        MacMouseCapture's CGEventTap so the events can be suppressed locally
+        during exclusive mode. Installing a second pynput tap here would
+        double-deliver clicks to the peer.
         """
+        if _IS_MACOS:
+            logger.info(
+                "EventCapture.start() no-op on macOS -- click/scroll handled "
+                "by MacMouseCapture's CGEventTap"
+            )
+            return
+
         if self._listener is not None:
             logger.warning("EventCapture.start() called while listener already running -- ignored")
             return
