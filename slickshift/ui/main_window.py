@@ -72,7 +72,7 @@ from PyQt6.QtWidgets import (
 
 from slickshift import config
 from slickshift.capture.event_capture import EventCapture
-from slickshift.capture.mouse_capture import MouseCapture
+from slickshift.capture.mouse_capture import MouseCapture, make_mouse_capture
 from slickshift.edge_detection.arrangement import (
     arrangement_to_wire,
     invert_arrangement,
@@ -2323,7 +2323,9 @@ class MainWindow(QMainWindow):
         # MouseCapture: produces delta callbacks only. No edge logic inside.
         # Receives the local monitor list so it can normalize against the full
         # virtual-desktop bounding box rather than the primary monitor alone.
-        self._capture = MouseCapture(self._local_monitors)
+        # make_mouse_capture() returns MacMouseCapture (CGEventTap) on macOS
+        # and the polling MouseCapture on Windows/Linux -- same interface either way.
+        self._capture = make_mouse_capture(self._local_monitors)
 
         # EdgeDetector: owns edge-band detection, dwell timer, and cooldown guard.
         # The UI feeds cursor positions to it on every poll tick.

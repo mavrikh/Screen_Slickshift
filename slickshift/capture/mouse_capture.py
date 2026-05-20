@@ -28,6 +28,7 @@ Multi-monitor normalization:
 from __future__ import annotations
 
 import logging
+import platform
 import threading
 import time
 from collections.abc import Callable
@@ -37,6 +38,8 @@ import pyautogui
 
 from slickshift import config
 from slickshift.transport.topology import MonitorInfo
+
+_IS_MACOS: bool = platform.system() == "Darwin"
 
 # Architecture invariant: pyautogui.FAILSAFE must always be False in Slickshift.
 # The cursor legitimately reaches corners in a KVM. The dead-man switch (heartbeat)
@@ -253,3 +256,21 @@ class MouseCapture:
                     accepted = delta_callback(delta)
                     if not accepted:
                         logger.debug("Delta seq=%d dropped (send queue full)", self._seq)
+
+
+def make_mouse_capture(monitors: list[MonitorInfo]) -> MouseCapture:
+    """
+    Build the platform-appropriate MouseCapture for this OS.
+
+    Returns MacMouseCapture (CGEventTap-based, supports cursor suppression)
+    on macOS. Returns the polling MouseCapture on every other platform.
+
+    Callers should always go through this factory rather than instantiating
+    MouseCapture directly. That keeps the OS choice in one place; future
+    Windows (RawInput) and Linux (libinput) implementations slot in here
+    without touching any caller.
+    """
+    if _IS_MACOS:
+        from slickshift.capture.mac_event_tap import MacMouseCapture
+        return MacMouseCapture(monitors)
+    return MouseCapture(monitors)
