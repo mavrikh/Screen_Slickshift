@@ -79,7 +79,7 @@ from slickshift.edge_detection.arrangement import (
     wire_to_arrangement,
 )
 from slickshift.edge_detection.edge_detector import EdgeDetector
-from slickshift.injection.mouse_inject import MouseInjector
+from slickshift.injection.mouse_inject import make_mouse_injector
 from slickshift.state_machine.controller import StateController, SwitchState
 from slickshift.transport.socket_io import TcpTransport
 from slickshift.capture.mouse_capture import compute_virtual_desktop_bbox
@@ -2335,7 +2335,7 @@ class MainWindow(QMainWindow):
         self._edge_detector.set_peer_edge(self._mirror_panel_default_edge())
         self._edge_detector.register_callback(self._schedule_handoff_fire)
 
-        self._injector = MouseInjector()
+        self._injector = make_mouse_injector()
         self._peer_info: dict | None = None  # last received hello payload from peer
         # Parsed monitor list from the peer's most recent hello. None means the
         # peer did not send a monitors field (old peer or not yet connected).

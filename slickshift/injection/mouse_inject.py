@@ -202,3 +202,24 @@ class MouseInjector:
             pyautogui.keyDown(key_name)
         else:
             pyautogui.keyUp(key_name)
+
+
+def make_mouse_injector() -> MouseInjector:
+    """
+    Build the platform-appropriate mouse injector for this OS.
+
+    Returns WindowsMouseInjector (ctypes SendInput-based) on Windows.
+    Returns MouseInjector (pyautogui-based) on every other platform.
+
+    Callers should always go through this factory rather than instantiating
+    MouseInjector directly. That keeps the OS choice in one place; future
+    Linux (uinput) implementations slot in here without touching any caller.
+
+    The Windows import is deferred inside the platform check so that
+    win_inject.py (which raises ImportError on non-Windows at module level)
+    is never loaded on macOS or Linux.
+    """
+    if platform.system() == "Windows":
+        from slickshift.injection.win_inject import WindowsMouseInjector  # noqa: PLC0415
+        return WindowsMouseInjector()
+    return MouseInjector()
