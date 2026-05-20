@@ -4344,6 +4344,16 @@ class MainWindow(QMainWindow):
             "Force-released via system-wide hotkey (Ctrl+Alt+Shift+Esc)"
         )
 
+        # If DEBUG freeze is engaged, release it first. Setting the toggle
+        # button unchecked fires _on_debug_pause_toggled(False) which stops
+        # the diagnostic timer, unpauses, stops, and tears down _debug_capture
+        # -- and the cursor reappears immediately. Without this, the emergency
+        # hotkey only released the main _capture and left the user stuck in
+        # an invisible-cursor state with no escape but killing the process.
+        if self._debug_capture is not None:
+            logger.info("Force-release also clearing DEBUG cursor-freeze")
+            self._mirror_panel.debug_pause_btn.setChecked(False)
+
         self._user_initiated_disconnect = True
         self._reconnect_timer.stop()
         self._idle_timer.stop()
