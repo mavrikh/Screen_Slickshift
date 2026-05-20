@@ -2519,8 +2519,15 @@ class MainWindow(QMainWindow):
         self._mirror_panel.start_btn.clicked.connect(self._on_start_mirroring_clicked)
         self._mirror_panel.stop_btn.clicked.connect(self._on_stop_mirroring_clicked)
 
-        # DEBUG: Phase 2 Step A cursor-freeze toggle. Remove with the button.
+        # DEBUG: cursor-freeze toggle + diagnostic position poller. Remove
+        # with the button. The poller logs to the UI panel only when the
+        # cursor moves, so Master can see at a glance whether the freeze
+        # is actually holding without scrolling through EdgeDetector ticks.
         self._debug_capture: MouseCapture | None = None
+        self._debug_freeze_last_pos: tuple[int, int] | None = None
+        self._debug_freeze_check_timer = QTimer(self)
+        self._debug_freeze_check_timer.setInterval(500)  # 2 Hz
+        self._debug_freeze_check_timer.timeout.connect(self._debug_freeze_tick)
         self._mirror_panel.debug_pause_btn.toggled.connect(self._on_debug_pause_toggled)
 
         # Wire Inject checkbox.
@@ -3026,15 +3033,40 @@ class MainWindow(QMainWindow):
                 self._debug_capture = make_mouse_capture(self._local_monitors)
                 self._debug_capture.start(lambda _delta: True)
             self._debug_capture.set_paused(True)
+            self._debug_freeze_last_pos = None
+            self._debug_freeze_check_timer.start()
             self._append_log("DEBUG: cursor frozen and hidden (toggle off to restore)")
             logger.info("DEBUG cursor-freeze ENGAGED")
         else:
+            self._debug_freeze_check_timer.stop()
             if self._debug_capture is not None:
                 self._debug_capture.set_paused(False)
                 self._debug_capture.stop()
                 self._debug_capture = None
-            self._append_log("DEBUG: cursor restored")
+            final_x, final_y = pyautogui.position()
+            self._append_log(f"DEBUG: cursor restored (final pos=({final_x},{final_y}))")
             logger.info("DEBUG cursor-freeze RELEASED")
+
+    def _debug_freeze_tick(self) -> None:
+        """
+        DEBUG: 2 Hz poll of the cursor position while freeze is engaged.
+
+        Logs to the UI panel only on the first tick (to confirm the poller
+        is running) and again whenever the cursor position changes from the
+        previous tick. If the cursor stays still, the panel stays quiet
+        after the initial line -- that's the freeze working. If lines like
+        "MOTION DETECTED" start appearing while you move the mouse, the
+        freeze actually broke.
+        """
+        x, y = pyautogui.position()
+        if self._debug_freeze_last_pos is None:
+            self._append_log(f"DEBUG freeze polling: initial pos=({x},{y})")
+        elif (x, y) != self._debug_freeze_last_pos:
+            prev_x, prev_y = self._debug_freeze_last_pos
+            self._append_log(
+                f"DEBUG freeze MOTION DETECTED: ({prev_x},{prev_y}) -> ({x},{y})"
+            )
+        self._debug_freeze_last_pos = (x, y)
 
     def _stop_capture_if_running(self) -> None:
         """
