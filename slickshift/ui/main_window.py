@@ -2897,7 +2897,7 @@ class MainWindow(QMainWindow):
         self._edge_detector.set_peer_edge(edge)
         self._state_ctrl.start_mirroring()
         self._transport.send({"type": "mirror_start"})
-        self._capture.start(self._transport.enqueue_delta)
+        self._capture.start(self._transport.enqueue_message)
         self._event_capture.set_active(True)
         self._conn_panel.on_state_changed(SwitchState.CAPTURING, peer_info=self._peer_info)
         self._mirror_panel.on_state_changed(SwitchState.CAPTURING)
@@ -3307,7 +3307,7 @@ class MainWindow(QMainWindow):
                 edge = self._mirror_panel.selected_edge()
                 self._edge_detector.set_peer_edge(edge)
                 self._state_ctrl.start_mirroring()
-                self._capture.start(self._transport.enqueue_delta)
+                self._capture.start(self._transport.enqueue_message)
                 self._event_capture.set_active(True)
                 self._conn_panel.on_state_changed(SwitchState.CAPTURING, peer_info=self._peer_info)
                 self._mirror_panel.on_state_changed(SwitchState.CAPTURING)
@@ -3589,7 +3589,7 @@ class MainWindow(QMainWindow):
         self._edge_detector.set_peer_edge(edge)
         self._capture.set_paused(False)
         self._capture_paused = False
-        self._capture.start(self._transport.enqueue_delta)
+        self._capture.start(self._transport.enqueue_message)
         self._event_capture.set_active(True)
 
         self._canvas.hide_remote()
@@ -3666,7 +3666,7 @@ class MainWindow(QMainWindow):
         if self._state_ctrl.state != SwitchState.CAPTURING:
             return
         logger.debug("Sending click: button=%s pressed=%s", button, pressed)
-        self._transport.send({"type": "click", "button": button, "pressed": pressed})
+        self._transport.enqueue_message({"type": "click", "button": button, "pressed": pressed})
 
     def _on_scroll_fired(self, dx: int, dy: int) -> None:
         """
@@ -3676,7 +3676,7 @@ class MainWindow(QMainWindow):
         if self._state_ctrl.state != SwitchState.CAPTURING:
             return
         logger.debug("Sending scroll: dx=%d dy=%d", dx, dy)
-        self._transport.send({"type": "scroll", "dx": dx, "dy": dy})
+        self._transport.enqueue_message({"type": "scroll", "dx": dx, "dy": dy})
 
     # ------------------------------------------------------------------
     # Click and scroll receiver handlers (Qt main thread)
@@ -3778,7 +3778,7 @@ class MainWindow(QMainWindow):
         if self._state_ctrl.state != SwitchState.CAPTURING:
             return
         logger.debug("Sending key: key=%r pressed=%s", key_name, pressed)
-        self._transport.send({"type": "key", "key": key_name, "pressed": pressed})
+        self._transport.enqueue_message({"type": "key", "key": key_name, "pressed": pressed})
 
     # ------------------------------------------------------------------
     # Inject toggle and force-release

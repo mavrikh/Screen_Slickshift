@@ -10,13 +10,15 @@ receive thread.
 
 Outbound queue design:
 - A bounded outbound queue (size DELTA_QUEUE_MAX) serializes all sends through
-  a dedicated sender thread. This decouples the 60 Hz polling thread from the
-  TCP write path. When the queue is full, the oldest item is dropped and
-  _deltas_dropped is incremented.
-- enqueue_delta() is the fast path for the capture loop. It never blocks.
-- send() is kept for low-volume messages (hello, ping, pong, mirror_start/stop).
-  It writes directly to the socket from the calling thread -- only call it from
-  the sender thread or from threads where blocking is acceptable.
+  a dedicated sender thread. This decouples the Qt main thread and the capture
+  polling thread from the TCP write path. When the queue is full, the oldest
+  item is dropped and _deltas_dropped is incremented.
+- enqueue_message() is the fast path for all per-event traffic: mouse deltas,
+  clicks, scrolls, and keyboard events. It never blocks.
+- send() is kept for low-volume control messages (hello, ping, pong,
+  mirror_start/stop). It writes directly to the socket from the calling thread
+  -- only call it from the sender thread or from threads where blocking is
+  acceptable.
 
 PLAINTEXT WARNING: This transport sends data unencrypted over the LAN. It is
 suitable for a two-machine dev test on a trusted private network only. TLS
@@ -247,11 +249,12 @@ class TcpTransport:
         # heartbeat thread. Initialized to now so the first interval is fair.
         self._last_pong_time: float = 0.0
 
-        # Bounded outbound queue for delta messages.
-        # The sentinel value None signals the sender thread to exit.
+        # Bounded outbound queue for all per-event messages (mouse deltas,
+        # clicks, scrolls, keys). The sentinel value None signals the sender
+        # thread to exit.
         self._send_queue: queue.Queue[dict | None] = queue.Queue(maxsize=config.DELTA_QUEUE_MAX)
 
-        # Monotonic counter: number of delta messages dropped because the queue was full.
+        # Monotonic counter: number of queued messages dropped because the queue was full.
         self._deltas_dropped: int = 0
 
     # ------------------------------------------------------------------
@@ -298,19 +301,21 @@ class TcpTransport:
 
     @property
     def deltas_dropped(self) -> int:
-        """Number of outbound delta messages dropped due to send-queue backpressure."""
+        """Number of outbound queued messages dropped due to send-queue backpressure."""
         return self._deltas_dropped
 
-    def enqueue_delta(self, message: dict[str, Any]) -> bool:
+    def enqueue_message(self, message: dict[str, Any]) -> bool:
         """
-        Non-blocking enqueue of a delta message into the bounded send queue.
+        Non-blocking enqueue of a per-event message into the bounded send queue.
 
-        Called from the capture polling thread at ~60 Hz. If the queue is full,
-        the oldest item is dropped to make room and _deltas_dropped is incremented.
+        Handles all high-frequency traffic: mouse deltas (from the capture loop),
+        clicks, scrolls, and keyboard events. If the queue is full, the oldest
+        item is dropped to make room and _deltas_dropped is incremented.
         Returns True if the message was accepted, False if a drop occurred.
 
-        This method is the only correct path for high-frequency delta traffic.
-        Do NOT call send() for deltas -- it blocks the calling thread on TCP I/O.
+        This is the only correct path for per-event traffic on the Qt main
+        thread or the capture thread. Do NOT call send() for these -- it
+        blocks the calling thread on TCP I/O.
         """
         if not self._connected:
             return False
@@ -336,7 +341,7 @@ class TcpTransport:
         directly on the calling thread.
 
         For low-volume control messages (hello, ping, pong, mirror_start/stop).
-        Do NOT use this for delta messages -- use enqueue_delta() instead.
+        Do NOT use this for per-event messages -- use enqueue_message() instead.
         Must only be called after connected fires. Logs and surfaces errors
         if the send fails -- does not swallow them silently.
         """
