@@ -12,10 +12,15 @@ Why this exists:
   not move. Returning the event passes it through unchanged.
 
 Phase 2 build order:
-- Step A (this commit): install the tap, run a CFRunLoop in a daemon thread,
-  honor set_paused() by returning None when paused. No delta delivery yet.
+- Step A: install the tap, run a CFRunLoop in a daemon thread, honor
+  set_paused() by returning None when paused. No delta delivery yet.
 - Step B: emit normalized deltas through delta_callback to the send path.
-- Step C: drive EdgeDetector via apply_delta() from the tap callback.
+- Step C (this commit): exclusive capture. When paused, the callback now
+  returns None instead of returning the event unchanged, so the OS drops
+  the motion event entirely and the local cursor never moves. The earlier
+  warp-on-move attempt triggered macOS's shake-to-locate cursor and never
+  actually froze anything; the None-return approach prevents motion from
+  reaching the cursor in the first place.
 
 Permissions:
 - Accessibility (System Settings > Privacy and Security > Accessibility)
@@ -82,13 +87,6 @@ class MacMouseCapture(MouseCapture):
         # Will be removed or downgraded to DEBUG once delta delivery lands.
         self._callback_invocation_count: int = 0
 
-        # Anchor point used by the warp-on-move suppression path. When paused,
-        # the tap callback warps the cursor back to this CGPoint on every
-        # mouse-motion event, which makes the cursor visually frozen even
-        # though the physical mouse keeps moving and we keep getting deltas.
-        # Captured at set_paused(True) under _paused_lock.
-        self._anchor_point: Any = None
-
         # Tracks whether CGDisplayHideCursor has been called without a
         # paired CGDisplayShowCursor. The hide/show calls are ref-counted by
         # the OS, so this flag prevents leaving the system cursor permanently
@@ -145,8 +143,8 @@ class MacMouseCapture(MouseCapture):
     def stop(self) -> None:
         """Stop the tap thread and release the CFRunLoop. Idempotent.
 
-        Always restores cursor visibility and clears the warp anchor so a
-        crash mid-pause cannot leave the system cursor hidden.
+        Always restores cursor visibility so a crash mid-pause cannot leave
+        the system cursor hidden.
         """
         self._stop_event.set()
 
@@ -156,8 +154,6 @@ class MacMouseCapture(MouseCapture):
         if self._cursor_hidden:
             Quartz.CGDisplayShowCursor(0)
             self._cursor_hidden = False
-        with self._paused_lock:
-            self._anchor_point = None
 
         if self._tap_ref is not None:
             Quartz.CGEventTapEnable(self._tap_ref, False)
@@ -178,28 +174,14 @@ class MacMouseCapture(MouseCapture):
         """
         Pause or resume capture.
 
-        Suppression mechanism: warp-on-move. While paused, the tap callback
-        warps the cursor back to the anchor position on every mouse-motion
-        event. The cursor visually freezes; the physical mouse keeps moving
-        and we keep getting deltas. The cursor is also hidden during pause
-        so the user does not see it teleporting on each warp event.
-
-        Why not CGAssociateMouseAndMouseCursorPosition: that API only works
-        when called from the Cocoa main thread (NSApplication.run). A plain
-        Python script does not have one. Warp-on-move is the FPS-game
-        pattern and works from any thread because CGWarpMouseCursorPosition
-        and CGDisplayHideCursor are thread-agnostic.
+        Suppression mechanism: while paused, the tap callback returns None
+        for motion events, which causes the OS to drop them before they
+        reach the cursor compositor or any application. The on-screen
+        cursor never moves regardless of physical mouse motion. The cursor
+        is also hidden during pause so its parked position is not visible.
         """
         with self._paused_lock:
             self._paused = paused
-            if paused:
-                # Capture current cursor position via a synthetic empty event.
-                # Avoids depending on pyautogui's coordinate translation in
-                # the suppression hot path.
-                probe = Quartz.CGEventCreate(None)
-                self._anchor_point = Quartz.CGEventGetLocation(probe)
-            else:
-                self._anchor_point = None
 
         if paused and not self._cursor_hidden:
             Quartz.CGDisplayHideCursor(0)
@@ -209,10 +191,7 @@ class MacMouseCapture(MouseCapture):
             self._cursor_hidden = False
 
         logger.info(
-            "set_paused(%s) -- anchor=%s, cursor_hidden=%s",
-            paused,
-            self._anchor_point,
-            self._cursor_hidden,
+            "set_paused(%s) -- cursor_hidden=%s", paused, self._cursor_hidden
         )
 
     # ------------------------------------------------------------------
@@ -231,12 +210,6 @@ class MacMouseCapture(MouseCapture):
           5. Signal _tap_ready and run CFRunLoopRun() until stop() breaks it.
           6. On exit: log + clean up are handled by stop() in the caller thread.
         """
-        # Disable the default 250ms post-warp event suppression. Without this,
-        # CGWarpMouseCursorPosition (used by the warp-on-move freeze in the
-        # callback) would silence delta events for a quarter second after each
-        # warp, which would make the captured motion stutter horribly.
-        Quartz.CGSetLocalEventsSuppressionInterval(0.0)
-
         # Use Quartz.CGEventMaskBit() rather than manual (1 << X) shifts. The
         # event-type constants are not always in the low bits of the mask word
         # in some pyobjc bridge versions; CGEventMaskBit is the canonical helper.
@@ -317,10 +290,12 @@ class MacMouseCapture(MouseCapture):
         None drops the event before delivery -- the local cursor does not
         move. That is the suppression mechanism the polling loop cannot do.
 
-        Step A: cursor suppression via warp-on-move. While paused, the
-        callback warps the cursor back to the anchor point on every motion
-        event so the cursor visually freezes. Step B will add delta delivery
-        to delta_callback gated by self._paused.
+        Suppression: while paused, the callback returns None so the OS
+        drops the motion event entirely. The cursor never moves, so the
+        shake-to-locate heuristic (which broke the prior warp-on-move
+        approach) cannot fire. When not paused, the callback emits a
+        normalized delta and returns the event so the OS handles cursor
+        motion normally.
 
         Disabled-event handling: macOS may disable the tap if the callback
         runs too long. The tap delivers special event types
@@ -348,21 +323,17 @@ class MacMouseCapture(MouseCapture):
                     Quartz.CGEventTapEnable(capture._tap_ref, True)
                 return event
 
-            # Read pause state and anchor once under the lock so a transition
-            # between paused and active cannot leave us with an inconsistent pair
-            # (e.g. paused=True but anchor=None).
             with paused_lock:
                 currently_paused = capture._paused
-                anchor = capture._anchor_point
 
-            # Warp-on-move suppression: while paused (cursor logically "on peer"),
-            # slam the cursor back to the anchor on every motion event so it
-            # stays visually frozen on the sender's display. The event is still
-            # returned so the run loop stays healthy.
-            if currently_paused and anchor is not None:
-                Quartz.CGWarpMouseCursorPosition(anchor)
+            # Exclusive-mode suppression: while paused (cursor logically "on
+            # peer"), return None so the OS drops the motion event entirely.
+            # The cursor never moves, so shake-to-locate cannot fire and no
+            # downstream application sees ghost motion.
+            if currently_paused:
+                return None
 
-            # Step B -- delta delivery.
+            # Delta delivery (Step B).
             # Only emit when NOT paused. Quartz delivers hardware-reported pixel
             # deltas via kCGMouseEventDeltaX / kCGMouseEventDeltaY. These are
             # integer-valued doubles but represent raw device counts before any
@@ -374,32 +345,31 @@ class MacMouseCapture(MouseCapture):
             #   ndx = dx_px / vd_w,  ndy = dy_px / vd_h
             # so the receiver can scale back up using its own virtual-desktop
             # dimensions without knowing the sender's screen resolution.
-            if not currently_paused:
-                dx_px = Quartz.CGEventGetDoubleValueField(
-                    event, Quartz.kCGMouseEventDeltaX
+            dx_px = Quartz.CGEventGetDoubleValueField(
+                event, Quartz.kCGMouseEventDeltaX
+            )
+            dy_px = Quartz.CGEventGetDoubleValueField(
+                event, Quartz.kCGMouseEventDeltaY
+            )
+            if dx_px != 0.0 or dy_px != 0.0:
+                ndx: float = dx_px / capture._vd_w
+                ndy: float = dy_px / capture._vd_h
+                logger.debug(
+                    "Tap delta: raw=(%.1f,%.1f) vd=(%dx%d) n=(%.4f,%.4f)",
+                    dx_px, dy_px, capture._vd_w, capture._vd_h, ndx, ndy,
                 )
-                dy_px = Quartz.CGEventGetDoubleValueField(
-                    event, Quartz.kCGMouseEventDeltaY
-                )
-                if dx_px != 0.0 or dy_px != 0.0:
-                    ndx: float = dx_px / capture._vd_w
-                    ndy: float = dy_px / capture._vd_h
+                capture._seq += 1
+                delta: dict = {
+                    "type": "delta",
+                    "ndx": ndx,
+                    "ndy": ndy,
+                    "seq": capture._seq,
+                }
+                accepted = delta_callback(delta)
+                if not accepted:
                     logger.debug(
-                        "Tap delta: raw=(%.1f,%.1f) vd=(%dx%d) n=(%.4f,%.4f)",
-                        dx_px, dy_px, capture._vd_w, capture._vd_h, ndx, ndy,
+                        "Tap delta seq=%d dropped (send queue full)", capture._seq
                     )
-                    capture._seq += 1
-                    delta: dict = {
-                        "type": "delta",
-                        "ndx": ndx,
-                        "ndy": ndy,
-                        "seq": capture._seq,
-                    }
-                    accepted = delta_callback(delta)
-                    if not accepted:
-                        logger.debug(
-                            "Tap delta seq=%d dropped (send queue full)", capture._seq
-                        )
 
             return event
 
