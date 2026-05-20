@@ -584,12 +584,12 @@ class _MirrorPanel(QGroupBox):
         self._stop_btn.setEnabled(False)
         layout.addWidget(self._stop_btn)
 
-        # DEBUG: Phase 2 Step A cursor-freeze validation toggle.
+        # DEBUG: cursor-freeze validation toggle.
         # Spins up a self-contained MacMouseCapture (independent of the
-        # state machine, no peer required) and pauses it so the warp-on-move
+        # state machine, no peer required) and pauses it so the None-return
         # suppression + cursor hide can be observed on a single machine.
-        # REMOVE this button (and its handler in MainWindow) once Step 5
-        # full handoff validation is complete.
+        # REMOVE this button (and its handler in MainWindow) once full
+        # handoff validation is complete.
         self._debug_pause_btn = QPushButton("DEBUG: Freeze Cursor")
         self._debug_pause_btn.setStyleSheet(btn_style)
         self._debug_pause_btn.setCheckable(True)
@@ -3023,7 +3023,7 @@ class MainWindow(QMainWindow):
         """
         if paused:
             if self._debug_capture is None:
-                self._debug_capture = MouseCapture(self._local_monitors)
+                self._debug_capture = make_mouse_capture(self._local_monitors)
                 self._debug_capture.start(lambda _delta: True)
             self._debug_capture.set_paused(True)
             self._append_log("DEBUG: cursor frozen and hidden (toggle off to restore)")
