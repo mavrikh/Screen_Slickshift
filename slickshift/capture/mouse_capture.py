@@ -148,6 +148,15 @@ class MouseCapture:
         self._paused: bool = False
         self._paused_lock = threading.Lock()
 
+        # Exclusive flag: when True, captured input is dropped locally instead
+        # of being passed through to the sender's own apps. Forwarding to the
+        # peer continues independently. On the base polling implementation
+        # this is a marker only -- the polling path has no suppression
+        # capability. MacMouseCapture overrides set_exclusive to act on it
+        # via the CGEventTap callback. A Windows WH_MOUSE_LL implementation
+        # would override similarly in a future commit.
+        self._exclusive: bool = False
+
         logger.info(
             "MouseCapture initialized. virtual desktop: origin=(%d,%d) size=%dx%d",
             self._vd_x,
@@ -204,6 +213,25 @@ class MouseCapture:
         with self._paused_lock:
             self._paused = paused
         logger.debug("MouseCapture paused=%s", paused)
+
+    def set_exclusive(self, exclusive: bool) -> None:
+        """
+        Engage or release exclusive mode (suppress captured input locally).
+
+        Exclusive mode means: captured events still flow to the peer via
+        delta_callback, but they are NOT passed through to the sender's own
+        local apps. The on-screen cursor on the sender stays hidden and
+        frozen for the duration. This is what a real KVM does during
+        "controlling the other machine."
+
+        Base implementation is a marker only -- polling capture has no
+        suppression capability. MacMouseCapture overrides this to act on
+        the flag via its CGEventTap callback. A future Windows WH_MOUSE_LL
+        path would override similarly.
+        """
+        with self._paused_lock:
+            self._exclusive = exclusive
+        logger.debug("MouseCapture exclusive=%s", exclusive)
 
     # ------------------------------------------------------------------
     # Background poll loop

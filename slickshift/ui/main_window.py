@@ -2929,6 +2929,7 @@ class MainWindow(QMainWindow):
         self._state_ctrl.start_mirroring()
         self._transport.send({"type": "mirror_start"})
         self._capture.start(self._transport.enqueue_message)
+        self._capture.set_exclusive(True)
         self._event_capture.set_active(True)
         self._conn_panel.on_state_changed(SwitchState.CAPTURING, peer_info=self._peer_info)
         self._mirror_panel.on_state_changed(SwitchState.CAPTURING)
@@ -3056,7 +3057,7 @@ class MainWindow(QMainWindow):
             if self._debug_capture is None:
                 self._debug_capture = make_mouse_capture(self._local_monitors)
                 self._debug_capture.start(lambda _delta: True)
-            self._debug_capture.set_paused(True)
+            self._debug_capture.set_exclusive(True)
             self._debug_freeze_last_pos = None
             self._debug_freeze_check_timer.start()
             self._append_log("DEBUG: cursor frozen and hidden (toggle off to restore)")
@@ -3064,7 +3065,7 @@ class MainWindow(QMainWindow):
         else:
             self._debug_freeze_check_timer.stop()
             if self._debug_capture is not None:
-                self._debug_capture.set_paused(False)
+                self._debug_capture.set_exclusive(False)
                 self._debug_capture.stop()
                 self._debug_capture = None
             final_x, final_y = pyautogui.position()
@@ -3125,6 +3126,7 @@ class MainWindow(QMainWindow):
         """
         state = self._state_ctrl.state
         if state in (SwitchState.CAPTURING, SwitchState.TRANSITIONING):
+            self._capture.set_exclusive(False)  # release exclusive so cursor returns
             self._capture.set_paused(False)  # unpause before stop so the thread exits cleanly
             self._capture_paused = False
             self._capture.stop()
@@ -3387,6 +3389,7 @@ class MainWindow(QMainWindow):
                 self._edge_detector.set_peer_edge(edge)
                 self._state_ctrl.start_mirroring()
                 self._capture.start(self._transport.enqueue_message)
+                self._capture.set_exclusive(True)
                 self._event_capture.set_active(True)
                 self._conn_panel.on_state_changed(SwitchState.CAPTURING, peer_info=self._peer_info)
                 self._mirror_panel.on_state_changed(SwitchState.CAPTURING)
@@ -3669,6 +3672,7 @@ class MainWindow(QMainWindow):
         self._capture.set_paused(False)
         self._capture_paused = False
         self._capture.start(self._transport.enqueue_message)
+        self._capture.set_exclusive(True)
         self._event_capture.set_active(True)
 
         self._canvas.hide_remote()

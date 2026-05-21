@@ -181,27 +181,58 @@ class MacMouseCapture(MouseCapture):
 
     def set_paused(self, paused: bool) -> None:
         """
-        Pause or resume capture.
+        Pause or resume capture. Used during the brief TRANSITIONING state
+        around an edge-dwell handoff -- not the primary exclusive-mode gate.
 
-        Suppression mechanism: while paused, the tap callback returns None
-        for motion events, which causes the OS to drop them before they
-        reach the cursor compositor or any application. The on-screen
-        cursor never moves regardless of physical mouse motion. The cursor
-        is also hidden during pause so its parked position is not visible.
+        Effect on tap callback: while paused, motion deltas are NOT emitted
+        to the peer, and motion events are dropped locally. Click and scroll
+        events are likewise dropped while paused. This is the brief silence
+        during the handoff handshake.
+
+        For "controlling the peer while the sender's cursor stays hidden,"
+        see set_exclusive() -- that's the actual exclusive-mode flag.
         """
         with self._paused_lock:
             self._paused = paused
-
-        if paused and not self._cursor_hidden:
-            Quartz.CGDisplayHideCursor(0)
-            self._cursor_hidden = True
-        elif not paused and self._cursor_hidden:
-            Quartz.CGDisplayShowCursor(0)
-            self._cursor_hidden = False
-
+        self._update_cursor_visibility()
         logger.info(
             "set_paused(%s) -- cursor_hidden=%s", paused, self._cursor_hidden
         )
+
+    def set_exclusive(self, exclusive: bool) -> None:
+        """
+        Engage or release exclusive mode on macOS.
+
+        While exclusive: the tap callback continues to emit motion, click,
+        and scroll messages to the peer (so the peer cursor moves and the
+        peer machine sees the clicks), but returns None to drop the same
+        events locally so the sender's apps never see them. The on-screen
+        sender cursor is hidden. This is what is needed for "control the
+        other machine without anything happening on the controller."
+        """
+        with self._paused_lock:
+            self._exclusive = exclusive
+        self._update_cursor_visibility()
+        logger.info(
+            "set_exclusive(%s) -- cursor_hidden=%s", exclusive, self._cursor_hidden
+        )
+
+    def _update_cursor_visibility(self) -> None:
+        """
+        Hide the cursor when either _paused or _exclusive is true; show it
+        otherwise. Called by both set_paused and set_exclusive so changes
+        to either flag stay consistent with what the user sees.
+
+        CGDisplayHideCursor/ShowCursor are ref-counted by the OS; the
+        _cursor_hidden flag guards against over-decrementing the count.
+        """
+        should_hide = self._paused or self._exclusive
+        if should_hide and not self._cursor_hidden:
+            Quartz.CGDisplayHideCursor(0)
+            self._cursor_hidden = True
+        elif not should_hide and self._cursor_hidden:
+            Quartz.CGDisplayShowCursor(0)
+            self._cursor_hidden = False
 
     # ------------------------------------------------------------------
     # Background tap loop
@@ -372,85 +403,100 @@ class MacMouseCapture(MouseCapture):
 
             with paused_lock:
                 currently_paused = capture._paused
+                currently_exclusive = capture._exclusive
 
-            # Exclusive-mode suppression: while paused, drop every captured
-            # event locally and skip the forward path. The cursor never moves,
-            # clicks never reach local apps, and shake-to-locate cannot fire.
-            if currently_paused:
-                return None
+            # Two independent gates:
+            # - emit_to_peer: forward via delta_callback. Gated by NOT paused.
+            #   Exclusive mode keeps forwarding enabled (that's the point --
+            #   the peer still needs the events). Paused suppresses emit so
+            #   handoff transitions don't dribble stale deltas.
+            # - drop_locally: return None to drop the event before any local
+            #   app sees it. Either flag triggers the drop.
+            emit_to_peer = not currently_paused
+            drop_locally = currently_paused or currently_exclusive
 
             # MOTION events. Quartz delivers hardware-reported pixel deltas
             # via kCGMouseEventDeltaX / kCGMouseEventDeltaY -- raw device
-            # counts before the OS acceleration curve. Normalize to
-            # virtual-desktop fractions so the receiver can rescale.
+            # counts before the OS acceleration curve.
             if event_type in motion_types:
-                dx_px = Quartz.CGEventGetDoubleValueField(
-                    event, Quartz.kCGMouseEventDeltaX
-                )
-                dy_px = Quartz.CGEventGetDoubleValueField(
-                    event, Quartz.kCGMouseEventDeltaY
-                )
-                if dx_px != 0.0 or dy_px != 0.0:
-                    ndx: float = dx_px / capture._vd_w
-                    ndy: float = dy_px / capture._vd_h
-                    logger.debug(
-                        "Tap delta: raw=(%.1f,%.1f) vd=(%dx%d) n=(%.4f,%.4f)",
-                        dx_px, dy_px, capture._vd_w, capture._vd_h, ndx, ndy,
+                if emit_to_peer:
+                    dx_px = Quartz.CGEventGetDoubleValueField(
+                        event, Quartz.kCGMouseEventDeltaX
                     )
-                    capture._seq += 1
-                    delta: dict = {
-                        "type": "delta",
-                        "ndx": ndx,
-                        "ndy": ndy,
-                        "seq": capture._seq,
-                    }
-                    accepted = delta_callback(delta)
-                    if not accepted:
+                    dy_px = Quartz.CGEventGetDoubleValueField(
+                        event, Quartz.kCGMouseEventDeltaY
+                    )
+                    if dx_px != 0.0 or dy_px != 0.0:
+                        ndx: float = dx_px / capture._vd_w
+                        ndy: float = dy_px / capture._vd_h
                         logger.debug(
-                            "Tap delta seq=%d dropped (send queue full)", capture._seq
+                            "Tap delta: raw=(%.1f,%.1f) vd=(%dx%d) n=(%.4f,%.4f)",
+                            dx_px, dy_px, capture._vd_w, capture._vd_h, ndx, ndy,
                         )
+                        capture._seq += 1
+                        delta: dict = {
+                            "type": "delta",
+                            "ndx": ndx,
+                            "ndy": ndy,
+                            "seq": capture._seq,
+                        }
+                        accepted = delta_callback(delta)
+                        if not accepted:
+                            logger.debug(
+                                "Tap delta seq=%d dropped (send queue full)", capture._seq
+                            )
+                if drop_locally:
+                    return None
                 return event
 
             # CLICK events for left and right buttons.
             click_info = click_map.get(event_type)
             if click_info is not None:
-                button, pressed = click_info
-                logger.debug("Tap click: button=%s pressed=%s", button, pressed)
-                delta_callback({"type": "click", "button": button, "pressed": pressed})
+                if emit_to_peer:
+                    button, pressed = click_info
+                    logger.debug("Tap click: button=%s pressed=%s", button, pressed)
+                    delta_callback(
+                        {"type": "click", "button": button, "pressed": pressed}
+                    )
+                if drop_locally:
+                    return None
                 return event
 
             # CLICK events for "other" buttons. Read the button number to
             # disambiguate -- 2 is the middle button by convention. Higher
             # numbers (thumb buttons etc.) are not forwarded.
             if event_type == other_down or event_type == other_up:
-                button_num = Quartz.CGEventGetIntegerValueField(
-                    event, Quartz.kCGMouseEventButtonNumber
-                )
-                if button_num == 2:
-                    pressed = event_type == other_down
-                    logger.debug("Tap click: button=middle pressed=%s", pressed)
-                    delta_callback(
-                        {"type": "click", "button": "middle", "pressed": pressed}
+                if emit_to_peer:
+                    button_num = Quartz.CGEventGetIntegerValueField(
+                        event, Quartz.kCGMouseEventButtonNumber
                     )
+                    if button_num == 2:
+                        pressed = event_type == other_down
+                        logger.debug("Tap click: button=middle pressed=%s", pressed)
+                        delta_callback(
+                            {"type": "click", "button": "middle", "pressed": pressed}
+                        )
+                if drop_locally:
+                    return None
                 return event
 
             # SCROLL events. Axis1 is vertical (positive = up), Axis2 is
-            # horizontal (positive = right) per Apple's Quartz docs. The wire
-            # format uses dx/dy with the same sign convention as pyautogui's
-            # scroll() so the receiver-side injector does not need to know
-            # which capture path produced the event.
+            # horizontal (positive = right) per Apple's Quartz docs.
             if event_type == scroll_wheel:
-                dy_scroll = Quartz.CGEventGetIntegerValueField(
-                    event, Quartz.kCGScrollWheelEventDeltaAxis1
-                )
-                dx_scroll = Quartz.CGEventGetIntegerValueField(
-                    event, Quartz.kCGScrollWheelEventDeltaAxis2
-                )
-                if dx_scroll != 0 or dy_scroll != 0:
-                    logger.debug("Tap scroll: dx=%d dy=%d", dx_scroll, dy_scroll)
-                    delta_callback(
-                        {"type": "scroll", "dx": int(dx_scroll), "dy": int(dy_scroll)}
+                if emit_to_peer:
+                    dy_scroll = Quartz.CGEventGetIntegerValueField(
+                        event, Quartz.kCGScrollWheelEventDeltaAxis1
                     )
+                    dx_scroll = Quartz.CGEventGetIntegerValueField(
+                        event, Quartz.kCGScrollWheelEventDeltaAxis2
+                    )
+                    if dx_scroll != 0 or dy_scroll != 0:
+                        logger.debug("Tap scroll: dx=%d dy=%d", dx_scroll, dy_scroll)
+                        delta_callback(
+                            {"type": "scroll", "dx": int(dx_scroll), "dy": int(dy_scroll)}
+                        )
+                if drop_locally:
+                    return None
                 return event
 
             # Unknown event type slipped through the mask -- pass through unchanged.
