@@ -2530,6 +2530,17 @@ class MainWindow(QMainWindow):
         self._debug_freeze_check_timer.timeout.connect(self._debug_freeze_tick)
         self._mirror_panel.debug_pause_btn.toggled.connect(self._on_debug_pause_toggled)
 
+        # Safety: auto-release DEBUG cursor-freeze if Slickshift loses
+        # foreground focus. Without this, alt-tabbing away leaves the
+        # CGEventTap still dropping events globally, so the cursor reappears
+        # in the new app but motion remains suppressed -- effectively
+        # locking the whole machine until the user finds Slickshift again
+        # to un-toggle. Releasing on focus loss gives alt-tab as a natural
+        # escape route.
+        QApplication.instance().applicationStateChanged.connect(
+            self._on_application_state_changed
+        )
+
         # Wire Inject checkbox.
         self._mirror_panel.inject_chk.stateChanged.connect(self._on_inject_toggled)
 
@@ -3067,6 +3078,29 @@ class MainWindow(QMainWindow):
                 f"DEBUG freeze MOTION DETECTED: ({prev_x},{prev_y}) -> ({x},{y})"
             )
         self._debug_freeze_last_pos = (x, y)
+
+    def _on_application_state_changed(self, state: Qt.ApplicationState) -> None:
+        """
+        Auto-release DEBUG cursor-freeze when the app loses foreground.
+
+        Triggered by QApplication.applicationStateChanged. If the user alt-tabs
+        away while frozen, the CGEventTap would otherwise keep dropping motion
+        events globally even though the cursor reappears in the new app -- the
+        whole machine would feel locked. Auto-releasing on focus loss gives
+        alt-tab as a natural escape route.
+
+        Only the DEBUG freeze is released here. Real CAPTURING is not affected
+        because losing focus during a live mirror session is a normal user
+        action that should not tear down the connection.
+        """
+        if state == Qt.ApplicationState.ApplicationActive:
+            return
+        if self._debug_capture is not None:
+            logger.info(
+                "App lost foreground (state=%s) -- auto-releasing DEBUG cursor-freeze",
+                state,
+            )
+            self._mirror_panel.debug_pause_btn.setChecked(False)
 
     def _stop_capture_if_running(self) -> None:
         """
