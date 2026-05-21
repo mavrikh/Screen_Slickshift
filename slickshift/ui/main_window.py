@@ -46,7 +46,7 @@ from PyQt6.QtCore import (
     QSize,
     pyqtSignal,
 )
-from PyQt6.QtGui import QColor, QFont, QPainter, QPen
+from PyQt6.QtGui import QColor, QFont, QKeySequence, QPainter, QPen, QShortcut
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -2539,6 +2539,19 @@ class MainWindow(QMainWindow):
         # escape route.
         QApplication.instance().applicationStateChanged.connect(
             self._on_application_state_changed
+        )
+
+        # In-window toggle hotkey: Shift+Esc toggles the debug freeze
+        # regardless of which control currently has Qt focus. This is the
+        # safe alternative to the pynput Ctrl+Alt+Shift+Esc combo (which
+        # collides with a destructive macOS session shortcut on at least
+        # one MacBook configuration) and to Tab+Space (which relies on Qt
+        # focus landing on the button -- not always reliable on macOS).
+        # Works only while the Slickshift window has focus, so it can never
+        # interfere with system-level shortcuts.
+        self._debug_toggle_shortcut = QShortcut(QKeySequence("Shift+Esc"), self)
+        self._debug_toggle_shortcut.activated.connect(
+            self._mirror_panel.debug_pause_btn.toggle
         )
 
         # Wire Inject checkbox.
