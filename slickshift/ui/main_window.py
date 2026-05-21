@@ -2370,8 +2370,22 @@ class MainWindow(QMainWindow):
         # Tracks whether MouseCapture is currently paused. Maintained by the UI
         # whenever set_paused() is called on _capture, so _poll_cursor can pass
         # the correct paused flag to EdgeDetector.tick() without reaching into
-        # MouseCapture internals.
+        # MouseCapture internals. Also gates the edge detector when the logical
+        # cursor is on the peer's side (no need to advance dwell on a parked
+        # or locked local cursor).
         self._capture_paused: bool = False
+
+        # Session-master flag. True on the machine that clicked Start Mirroring,
+        # False on the peer (set when mirror_start arrives), None when not
+        # mirroring. The master sources all input for the session; the slave
+        # never sources. Roles do not swap on edge crossings.
+        self._is_master: bool | None = None
+
+        # Logical cursor side. True when the cursor logically lives on this
+        # machine's screen, False when it is on the peer. Flipped by handoff
+        # request/ack exchanges. Master toggles exclusive mode on this flag;
+        # slave toggles its edge detector on this flag.
+        self._cursor_on_local: bool = True
 
         # QTimer that fires after HANDOFF_ACK_TIMEOUT_S if no handoff_ack arrives.
         # Single-shot; started when we enter TRANSITIONING, cancelled on ack or rollback.
@@ -2822,16 +2836,18 @@ class MainWindow(QMainWindow):
     def _role_label_for_state(self, state: SwitchState) -> str:
         dpi_str = f"{self._dpi_scale:.2f}"
         if state == SwitchState.CAPTURING:
-            return f"Sender | DPI: {dpi_str}"
+            cursor_side = "local" if self._cursor_on_local else "peer"
+            return f"Controller (cursor on {cursor_side}) | DPI: {dpi_str}"
         if state == SwitchState.TRANSITIONING:
-            return "Handing off..."
+            return "Crossing edge..."
         if state == SwitchState.RECONNECTING:
             attempt = self._reconnect_attempt
             return f"Reconnecting ({attempt}/{config.RECONNECT_MAX_ATTEMPTS})..."
         if state == SwitchState.RECEIVING and self._injection_enabled:
-            return f"Receiver (injecting) | DPI: {dpi_str}"
+            cursor_side = "local" if self._cursor_on_local else "controller"
+            return f"Controlled (cursor on {cursor_side}) | DPI: {dpi_str}"
         if state == SwitchState.RECEIVING:
-            return "Receiver"
+            return "Controlled"
         return "Idle"
 
     def _extra_status_for_state(self, state: SwitchState) -> str:
@@ -2907,6 +2923,7 @@ class MainWindow(QMainWindow):
             self._state_ctrl.reconnect_canceled()
         else:
             self._state_ctrl.force_release()
+        self._reset_session_role_flags()
         self._peer_info = None
         self._peer_monitors = None
         self._peer_identity = ""
@@ -2920,20 +2937,36 @@ class MainWindow(QMainWindow):
 
     def _on_start_mirroring_clicked(self) -> None:
         """
-        This machine becomes the sender. Transition to CAPTURING and notify peer.
+        This machine becomes the session master. The cursor starts on the master's
+        own screen; the user crosses it to the slave by walking into the peer
+        edge. The slave only sees injected motion once the cursor has crossed.
 
-        Configure EdgeDetector with the selected peer edge before starting.
+        Master always runs MouseCapture for the full session. While the cursor
+        is on the master (cursor_on_local=True) MouseCapture is paused so no
+        deltas leave the box and the local cursor remains visible. When the
+        cursor crosses to the slave the handoff handlers flip the paused and
+        exclusive flags so deltas start flowing and the local cursor hides.
         """
         edge = self._mirror_panel.selected_edge()
         self._edge_detector.set_peer_edge(edge)
         self._state_ctrl.start_mirroring()
+        self._is_master = True
+        self._cursor_on_local = True
         self._transport.send({"type": "mirror_start"})
         self._capture.start(self._transport.enqueue_message)
-        self._capture.set_exclusive(True)
+        # Cursor starts on master: visible, no forwarding. set_paused stops
+        # delta emission; set_exclusive(False) keeps the cursor visible and
+        # lets motion through to the OS so the user can drive their local box.
+        self._capture.set_paused(True)
+        self._capture.set_exclusive(False)
+        self._capture_paused = False  # edge detector active on master's cursor
         self._event_capture.set_active(True)
         self._conn_panel.on_state_changed(SwitchState.CAPTURING, peer_info=self._peer_info)
         self._mirror_panel.on_state_changed(SwitchState.CAPTURING)
-        self._append_log(f"Mirroring started -- this machine is now the Sender (peer to the {edge})")
+        self._append_log(
+            f"Mirroring started -- this machine is the controller (peer to the {edge}). "
+            "Move the cursor to that edge to cross to the peer screen."
+        )
 
     def _on_monitors_unlock_changed(self, unlocked: bool) -> None:
         """
@@ -3029,6 +3062,7 @@ class MainWindow(QMainWindow):
         self._event_capture.set_active(False)
         self._stop_capture_if_running()
         self._state_ctrl.stop_mirroring()
+        self._reset_session_role_flags()
         self._transport.send({"type": "mirror_stop"})
         self._conn_panel.on_state_changed(SwitchState.CONNECTED, peer_info=self._peer_info)
         self._mirror_panel.on_state_changed(SwitchState.CONNECTED)
@@ -3120,9 +3154,13 @@ class MainWindow(QMainWindow):
         """
         Stop MouseCapture if it is currently polling.
 
-        Also covers TRANSITIONING: the capture thread is still alive (paused)
-        during a handoff-in-flight. If the connection dies mid-handoff, we must
-        stop it cleanly to avoid leaving a zombie thread.
+        Also covers TRANSITIONING: the capture thread is still alive during a
+        cursor-cross-in-flight. If the connection dies mid-cross, we must stop
+        it cleanly to avoid leaving a zombie thread.
+
+        Master is the only side that runs MouseCapture, so this is effectively
+        a master-side cleanup. The role-state guard happens to match because
+        the master is in CAPTURING (or briefly TRANSITIONING) for the session.
         """
         state = self._state_ctrl.state
         if state in (SwitchState.CAPTURING, SwitchState.TRANSITIONING):
@@ -3130,6 +3168,14 @@ class MainWindow(QMainWindow):
             self._capture.set_paused(False)  # unpause before stop so the thread exits cleanly
             self._capture_paused = False
             self._capture.stop()
+
+    def _reset_session_role_flags(self) -> None:
+        """
+        Clear the master/cursor-side flags. Call this on any path that ends
+        the mirroring session (disconnect, force-release, stop mirroring).
+        """
+        self._is_master = None
+        self._cursor_on_local = True
 
     # ------------------------------------------------------------------
     # Transport event handlers (called on Qt main thread via signals)
@@ -3215,6 +3261,7 @@ class MainWindow(QMainWindow):
             self._reconnect_timer.start()
         else:
             self._state_ctrl.connection_lost(reason)
+            self._reset_session_role_flags()
             self._peer_info = None
             self._peer_monitors = None
             self._peer_identity = ""
@@ -3388,12 +3435,18 @@ class MainWindow(QMainWindow):
                 edge = self._mirror_panel.selected_edge()
                 self._edge_detector.set_peer_edge(edge)
                 self._state_ctrl.start_mirroring()
+                self._is_master = True
+                self._cursor_on_local = True
                 self._capture.start(self._transport.enqueue_message)
-                self._capture.set_exclusive(True)
+                # Restore as cursor-on-master: visible, no forwarding. The user
+                # crosses the edge again to re-engage exclusive mode.
+                self._capture.set_paused(True)
+                self._capture.set_exclusive(False)
+                self._capture_paused = False
                 self._event_capture.set_active(True)
                 self._conn_panel.on_state_changed(SwitchState.CAPTURING, peer_info=self._peer_info)
                 self._mirror_panel.on_state_changed(SwitchState.CAPTURING)
-                self._append_log("Role restored: this machine is now the Sender again")
+                self._append_log("Controller role restored after reconnect")
             else:
                 self._append_log(
                     "Role was RECEIVING -- waiting for peer to re-send mirror_start"
@@ -3403,10 +3456,17 @@ class MainWindow(QMainWindow):
 
     def _handle_mirror_start(self) -> None:
         """
-        Peer is starting to send deltas. Enter RECEIVING state.
-        Reset receiver delta counters and the canvas green square.
+        Peer has become the session master. This machine is the slave for the
+        full session: it never sources input and never enters CAPTURING. The
+        slave's edge detector stays gated off until the cursor logically arrives
+        on this machine via a handoff_request.
         """
         self._state_ctrl.mirror_start_received()
+        self._is_master = False
+        self._cursor_on_local = False
+        # Edge detector gated off until cursor crosses to us. _poll_cursor reads
+        # this flag to suppress dwell advancement.
+        self._capture_paused = True
         self._deltas_received = 0
         self._delta_timestamps.clear()
         self._last_sample_log_time = time.monotonic()
@@ -3418,12 +3478,13 @@ class MainWindow(QMainWindow):
             arrangement_committed=self._arr_panel.arrangement_committed(),
         )
         self._idle_timer.start()
-        self._append_log("Peer started mirroring -- this machine is now the Receiver")
+        self._append_log("Peer is mirroring -- this machine is the controlled side")
 
     def _handle_mirror_stop(self) -> None:
         """Peer stopped sending deltas. Return to CONNECTED state."""
         self._idle_timer.stop()
         self._state_ctrl.mirror_stop_received()
+        self._reset_session_role_flags()
         self._canvas.hide_remote()
         self._conn_panel.on_state_changed(SwitchState.CONNECTED, peer_info=self._peer_info)
         self._mirror_panel.on_state_changed(SwitchState.CONNECTED)
@@ -3506,7 +3567,11 @@ class MainWindow(QMainWindow):
 
         self._canvas.apply_remote_delta(ndx, ndy)
 
-        if self._state_ctrl.state == SwitchState.RECEIVING and self._injection_enabled:
+        if (
+            self._is_master is False
+            and self._cursor_on_local
+            and self._injection_enabled
+        ):
             peer_vd_w, peer_vd_h = self._peer_vd_dims()
             self._injector.move_relative(
                 ndx, ndy,
@@ -3545,23 +3610,44 @@ class MainWindow(QMainWindow):
 
     def _on_edge_dwell_fired(self, sender_edge: str, perp: float) -> None:
         """
-        Main thread: edge dwell threshold met on this machine (the current sender).
+        Main thread: edge dwell threshold met on this machine. Initiates a
+        cursor-side cross, not a role swap.
 
-        Guard: only fire if we are still in CAPTURING state.
+        Two valid callers:
+          - Master while the cursor is on the master's screen (CAPTURING +
+            _cursor_on_local). Cursor crossing TO the slave.
+          - Slave while the cursor is on the slave's screen (RECEIVING +
+            _cursor_on_local). Cursor crossing BACK to the master.
+
+        Either way the protocol is identical: send a handoff_request, transition
+        TRANSITIONING, wait for ack. The handoff_ack_received handler flips
+        _cursor_on_local and adjusts capture flags.
         """
-        if self._state_ctrl.state != SwitchState.CAPTURING:
+        if not self._cursor_on_local:
+            logger.debug("Edge dwell fired while cursor is on peer -- discarded")
+            return
+
+        state = self._state_ctrl.state
+        if state == SwitchState.CAPTURING and self._is_master:
+            self._state_ctrl.master_begin_handoff()
+        elif state == SwitchState.RECEIVING and self._is_master is False:
+            self._state_ctrl.slave_begin_handoff()
+        else:
             logger.debug(
-                "Edge dwell callback arrived in state %s -- discarded",
-                self._state_ctrl.state.value,
+                "Edge dwell fired in unexpected state=%s is_master=%s -- discarded",
+                state.value, self._is_master,
             )
             return
 
-        logger.info("Handoff fire: edge=%s perp=%.3f", sender_edge, perp)
-        self._append_log(f"Handoff triggered: cursor at {sender_edge} edge, perp={perp:.3f}")
+        logger.info("Cursor cross initiated: edge=%s perp=%.3f", sender_edge, perp)
+        self._append_log(
+            f"Cursor crossing peer edge ({sender_edge}, perp={perp:.3f})"
+        )
 
-        self._event_capture.set_active(False)
-        self._state_ctrl.begin_handoff()
-        self._capture.set_paused(True)
+        # Silence the master's tap during ack-pending so no stray deltas leak.
+        # Slave has no MouseCapture running so this is a no-op on the slave.
+        if self._is_master:
+            self._capture.set_paused(True)
         self._capture_paused = True
 
         self._transport.send({
@@ -3577,42 +3663,57 @@ class MainWindow(QMainWindow):
 
     def _on_handoff_ack_timeout(self) -> None:
         """
-        Handoff ACK did not arrive within HANDOFF_ACK_TIMEOUT_S.
-
-        Roll back TRANSITIONING -> CAPTURING. Log the event and resume delta delivery.
+        Handoff ACK did not arrive within HANDOFF_ACK_TIMEOUT_S. Roll back the
+        state machine (TRANSITIONING -> CAPTURING or RECEIVING per pre-transition
+        state) without flipping _cursor_on_local -- the cursor stayed put.
         """
         if self._state_ctrl.state != SwitchState.TRANSITIONING:
             return
         logger.warning(
-            "Handoff ACK timeout (%.1fs) -- rolling back to CAPTURING",
+            "Handoff ACK timeout (%.1fs) -- rolling back",
             config.HANDOFF_ACK_TIMEOUT_S,
         )
         self._append_log(
-            f"Handoff ACK timeout after {config.HANDOFF_ACK_TIMEOUT_S:.1f}s -- resuming capture"
+            f"Handoff ACK timeout after {config.HANDOFF_ACK_TIMEOUT_S:.1f}s -- cursor stays here"
         )
         self._state_ctrl.handoff_ack_timeout()
-        self._capture.set_paused(False)
-        self._capture_paused = False
-        self._event_capture.set_active(True)
-        self._conn_panel.on_state_changed(SwitchState.CAPTURING, peer_info=self._peer_info)
-        self._mirror_panel.on_state_changed(SwitchState.CAPTURING)
+        rolled_back_to = self._state_ctrl.state
+
+        # Master: unpause so the user can continue driving the local cursor.
+        # Slave: no MouseCapture to unpause; just reset the edge-detector gate.
+        if self._is_master:
+            self._capture.set_paused(False)
+        self._capture_paused = False  # edge detector active again (cursor still here)
+
+        self._conn_panel.on_state_changed(rolled_back_to, peer_info=self._peer_info)
+        self._mirror_panel.on_state_changed(rolled_back_to)
 
     def _handle_handoff_request(self, payload: dict) -> None:
         """
-        Peer (the current sender) wants to hand off control to us.
+        Peer says: "I'm sending the cursor to you." Flip _cursor_on_local to
+        True. Roles do NOT swap. Two paths:
 
-        We are in RECEIVING state. Steps:
-        1. Compute entry edge (opposite of sender_edge).
-        2. Warp OS cursor (if injection enabled) or only move canvas.
-        3. Send handoff_ack.
-        4. Transition RECEIVING -> CAPTURING (we are now the sender).
-        5. Set cooldown on EdgeDetector to suppress immediate re-trigger.
-        6. Start capture loop.
+        - Master receives this (cursor returning from slave): unhide local
+          cursor, stop forwarding deltas, warp local cursor to entry edge.
+        - Slave receives this (cursor arriving from master): warp local cursor
+          to entry edge, activate slave's edge detector for the eventual return.
+
+        Either way: warp, ack, log. Then the local edge detector is freshly
+        gated on so the user can immediately walk the cursor back to the peer
+        edge if they want.
         """
-        if self._state_ctrl.state != SwitchState.RECEIVING:
+        state = self._state_ctrl.state
+        if state not in (SwitchState.CAPTURING, SwitchState.RECEIVING):
             logger.debug(
-                "handoff_request arrived in state %s -- ignored",
-                self._state_ctrl.state.value,
+                "handoff_request arrived in state %s -- ignored", state.value
+            )
+            return
+        if self._is_master is None:
+            logger.debug("handoff_request arrived before mirror_start -- ignored")
+            return
+        if self._cursor_on_local:
+            logger.debug(
+                "handoff_request arrived but cursor already on local side -- ignored"
             )
             return
 
@@ -3643,12 +3744,24 @@ class MainWindow(QMainWindow):
             ny = (self._screen_h - 1) / self._screen_h
 
         logger.info(
-            "Handoff received from peer at edge=%s perp=%.3f -- entry edge=%s nx=%.3f ny=%.3f",
-            sender_edge, perp, entry_edge, nx, ny,
+            "Cursor arriving from peer: sender_edge=%s perp=%.3f entry=%s n=(%.3f,%.3f) is_master=%s",
+            sender_edge, perp, entry_edge, nx, ny, self._is_master,
         )
-        self._append_log(
-            f"Handoff received from peer at edge={sender_edge} perp={perp:.3f}"
-        )
+
+        # Master path: pause first (stops emit), then drop exclusive (unhides
+        # cursor + stops dropping local motion). Reversing the order would
+        # briefly emit deltas with the cursor visible -- the slave would see
+        # a stray pixel before we settle.
+        if self._is_master:
+            self._capture.set_paused(True)
+            self._capture.set_exclusive(False)
+            self._append_log(
+                f"Cursor returned from peer at edge={sender_edge} perp={perp:.3f}"
+            )
+        else:
+            self._append_log(
+                f"Cursor arrived from controller at edge={sender_edge} perp={perp:.3f}"
+            )
 
         if self._injection_enabled:
             self._injector.move_absolute(
@@ -3661,31 +3774,32 @@ class MainWindow(QMainWindow):
 
         self._transport.send({"type": "handoff_ack"})
 
-        self._state_ctrl.handoff_request_received()
+        # Flip cursor side AFTER sending the ack so any racing message sees the
+        # transition reflected. State machine value does not change here -- the
+        # role state (CAPTURING for master, RECEIVING for slave) is correct
+        # because we never enter TRANSITIONING on the receiving side of a cross.
+        self._cursor_on_local = True
 
-        # Set cooldown on EdgeDetector (not on MouseCapture) before starting
-        # the capture loop. This suppresses immediate re-trigger when the newly
-        # warped cursor lands at the entry edge.
+        # Re-seed the edge detector so the freshly-warped cursor does not
+        # immediately re-trigger at the entry edge.
         self._edge_detector.set_cooldown()
         edge = self._mirror_panel.selected_edge()
         self._edge_detector.set_peer_edge(edge)
-        self._capture.set_paused(False)
-        self._capture_paused = False
-        self._capture.start(self._transport.enqueue_message)
-        self._capture.set_exclusive(True)
-        self._event_capture.set_active(True)
+        self._capture_paused = False  # edge detector active for return detection
 
         self._canvas.hide_remote()
 
-        self._conn_panel.on_state_changed(SwitchState.CAPTURING, peer_info=self._peer_info)
-        self._mirror_panel.on_state_changed(SwitchState.CAPTURING)
-        self._append_log("Role switched: this machine is now the Sender")
-
     def _handle_handoff_ack(self) -> None:
         """
-        Peer confirmed it received our handoff_request and is now the sender.
+        Peer accepted our handoff_request. The cursor has now logically crossed
+        to the peer. Flip _cursor_on_local to False and roll the state machine
+        back to its pre-transition role (CAPTURING for master, RECEIVING for
+        slave) -- roles do not swap.
 
-        This machine transitions TRANSITIONING -> RECEIVING.
+        Master path: engage exclusive (hide local cursor, drop local motion,
+        start emitting deltas to the slave).
+        Slave path: gate the edge detector off (slave's cursor is parked) and
+        reset delta counters for the upcoming controller-driven session.
         """
         if self._state_ctrl.state != SwitchState.TRANSITIONING:
             logger.debug(
@@ -3695,27 +3809,40 @@ class MainWindow(QMainWindow):
             return
 
         self._handoff_ack_timer.stop()
-
-        self._capture.set_paused(False)
-        self._capture_paused = False
-        self._capture.stop()
-
         self._state_ctrl.handoff_ack_received()
+        rolled_back_to = self._state_ctrl.state
 
-        self._deltas_received = 0
-        self._delta_timestamps.clear()
-        self._last_sample_log_time = time.monotonic()
-        self._last_delta_received_time = time.monotonic()
-        self._canvas.reset_remote_position()
+        self._cursor_on_local = False
 
-        self._conn_panel.on_state_changed(SwitchState.RECEIVING, peer_info=self._peer_info)
-        self._mirror_panel.on_state_changed(
-            SwitchState.RECEIVING,
-            arrangement_committed=self._arr_panel.arrangement_committed(),
-        )
-        self._idle_timer.start()
-        self._append_log("Handoff complete -- this machine is now the Receiver")
-        logger.info("Handoff complete -- transitioned to RECEIVING")
+        if self._is_master:
+            # Master takes over the peer's screen: emit deltas, hide local cursor.
+            self._capture.set_exclusive(True)
+            self._capture.set_paused(False)
+            self._append_log("Cursor crossed to peer -- controller driving peer screen")
+            logger.info("Cursor crossed to peer (master)")
+        else:
+            # Slave: cursor went home. Reset receive-side counters and park the
+            # edge detector until the cursor returns.
+            self._deltas_received = 0
+            self._delta_timestamps.clear()
+            self._last_sample_log_time = time.monotonic()
+            self._last_delta_received_time = time.monotonic()
+            self._canvas.reset_remote_position()
+            self._append_log("Cursor returned to controller")
+            logger.info("Cursor crossed to peer (slave-initiated return)")
+
+        # Edge detector gated off: the cursor is no longer on this machine.
+        self._capture_paused = True
+
+        self._conn_panel.on_state_changed(rolled_back_to, peer_info=self._peer_info)
+        if rolled_back_to == SwitchState.RECEIVING:
+            self._mirror_panel.on_state_changed(
+                rolled_back_to,
+                arrangement_committed=self._arr_panel.arrangement_committed(),
+            )
+            self._idle_timer.start()
+        else:
+            self._mirror_panel.on_state_changed(rolled_back_to)
 
     # ------------------------------------------------------------------
     # EventCapture pynput thread callbacks (cross-thread signal emitters)
@@ -3743,20 +3870,22 @@ class MainWindow(QMainWindow):
 
     def _on_click_fired(self, button: str, pressed: bool) -> None:
         """
-        Main thread: a mouse button event was captured on this machine (sender).
-        Only forward if still in CAPTURING state.
+        Main thread: a mouse button event was captured on this machine.
+        Only forward if we are the session master AND the cursor is currently
+        on the peer's side. Clicks that land while the cursor is on the master
+        are handled by the local OS and should never reach the slave.
         """
-        if self._state_ctrl.state != SwitchState.CAPTURING:
+        if not self._is_master or self._cursor_on_local:
             return
         logger.debug("Sending click: button=%s pressed=%s", button, pressed)
         self._transport.enqueue_message({"type": "click", "button": button, "pressed": pressed})
 
     def _on_scroll_fired(self, dx: int, dy: int) -> None:
         """
-        Main thread: a scroll wheel event was captured on this machine (sender).
-        Only forward if still in CAPTURING state.
+        Main thread: a scroll wheel event was captured on this machine.
+        Forward only if this machine is the master and the cursor is on the peer.
         """
-        if self._state_ctrl.state != SwitchState.CAPTURING:
+        if not self._is_master or self._cursor_on_local:
             return
         logger.debug("Sending scroll: dx=%d dy=%d", dx, dy)
         self._transport.enqueue_message({"type": "scroll", "dx": dx, "dy": dy})
@@ -3767,10 +3896,11 @@ class MainWindow(QMainWindow):
 
     def _handle_click_message(self, message: dict) -> None:
         """
-        Inject a click event received from the sender.
-        Only acts if RECEIVING and injection is enabled.
+        Inject a click event received from the master. Only acts on the slave
+        side while the cursor is logically on this machine and injection is
+        enabled.
         """
-        if self._state_ctrl.state != SwitchState.RECEIVING or not self._injection_enabled:
+        if self._is_master or not self._cursor_on_local or not self._injection_enabled:
             return
         self._last_delta_received_time = time.monotonic()
         button: str = message.get("button", "left")
@@ -3780,10 +3910,10 @@ class MainWindow(QMainWindow):
 
     def _handle_scroll_message(self, message: dict) -> None:
         """
-        Inject a scroll event received from the sender.
-        Only acts if RECEIVING and injection is enabled.
+        Inject a scroll event received from the master. Slave-side, cursor-here,
+        injection-enabled.
         """
-        if self._state_ctrl.state != SwitchState.RECEIVING or not self._injection_enabled:
+        if self._is_master or not self._cursor_on_local or not self._injection_enabled:
             return
         self._last_delta_received_time = time.monotonic()
         dx: int = int(message.get("dx", 0))
@@ -3793,10 +3923,10 @@ class MainWindow(QMainWindow):
 
     def _handle_key_message(self, message: dict) -> None:
         """
-        Inject a keyboard event received from the sender.
-        Only acts if RECEIVING and injection is enabled.
+        Inject a keyboard event received from the master. Slave-side,
+        cursor-here, injection-enabled.
         """
-        if self._state_ctrl.state != SwitchState.RECEIVING or not self._injection_enabled:
+        if self._is_master or not self._cursor_on_local or not self._injection_enabled:
             return
         key_name: str = message.get("key", "")
         pressed: bool = bool(message.get("pressed", True))
@@ -3856,9 +3986,10 @@ class MainWindow(QMainWindow):
     def _on_key_event_fired(self, key_name: str, pressed: bool) -> None:
         """
         Qt main thread: a keyboard event was captured and forwarding is active.
-        Only forward if still in CAPTURING state.
+        Master-only path. Forwards only while the cursor is on the peer; keys
+        the master types while the cursor is on the master must stay local.
         """
-        if self._state_ctrl.state != SwitchState.CAPTURING:
+        if not self._is_master or self._cursor_on_local:
             return
         logger.debug("Sending key: key=%r pressed=%s", key_name, pressed)
         self._transport.enqueue_message({"type": "key", "key": key_name, "pressed": pressed})
@@ -4428,6 +4559,7 @@ class MainWindow(QMainWindow):
         else:
             self._state_ctrl.force_release()
 
+        self._reset_session_role_flags()
         self._peer_info = None
         self._peer_monitors = None
         self._peer_identity = ""
@@ -4436,8 +4568,13 @@ class MainWindow(QMainWindow):
 
     def _handle_peer_force_release(self) -> None:
         """
-        Peer sent a force_release notification. If this machine is CAPTURING,
-        return to CONNECTED cleanly (peer is no longer receiving).
+        Peer sent a force_release notification. Tear down mirroring on our side
+        regardless of role and return to CONNECTED.
+
+        Requirement #1 from the spec: if the slave force-closes, the master's
+        cursor must auto-unlock immediately. The _stop_capture_if_running path
+        below releases exclusive mode and stops the capture thread, which is
+        what restores the master's local cursor.
         """
         self._user_initiated_disconnect = True
         state = self._state_ctrl.state
@@ -4445,6 +4582,7 @@ class MainWindow(QMainWindow):
             self._event_capture.set_active(False)
             self._stop_capture_if_running()
             self._state_ctrl.stop_mirroring()
+            self._reset_session_role_flags()
             self._conn_panel.on_state_changed(SwitchState.CONNECTED, peer_info=self._peer_info)
             self._mirror_panel.on_state_changed(SwitchState.CONNECTED)
             self._append_log("Peer force-released -- returned to CONNECTED")
@@ -4452,6 +4590,7 @@ class MainWindow(QMainWindow):
             self._idle_timer.stop()
             self._canvas.hide_remote()
             self._state_ctrl.mirror_stop_received()
+            self._reset_session_role_flags()
             self._conn_panel.on_state_changed(SwitchState.CONNECTED, peer_info=self._peer_info)
             self._mirror_panel.on_state_changed(SwitchState.CONNECTED)
             self._append_log("Peer force-released -- returned to CONNECTED")

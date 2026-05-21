@@ -181,16 +181,17 @@ class MacMouseCapture(MouseCapture):
 
     def set_paused(self, paused: bool) -> None:
         """
-        Pause or resume capture. Used during the brief TRANSITIONING state
-        around an edge-dwell handoff -- not the primary exclusive-mode gate.
+        Pause or resume forwarding. Two use cases:
+          - Brief silence during a TRANSITIONING ack window so handoff
+            handshakes do not dribble stale deltas.
+          - Persistent "do not forward" while the master holds the cursor on
+            its own screen.
 
-        Effect on tap callback: while paused, motion deltas are NOT emitted
-        to the peer, and motion events are dropped locally. Click and scroll
-        events are likewise dropped while paused. This is the brief silence
-        during the handoff handshake.
-
-        For "controlling the peer while the sender's cursor stays hidden,"
-        see set_exclusive() -- that's the actual exclusive-mode flag.
+        Effect on tap callback: while paused, motion / click / scroll
+        deltas are NOT emitted to the peer. Local delivery is independent
+        and governed by _exclusive -- so paused alone keeps events landing
+        on the master's OS (cursor moves and clicks fire locally). Combine
+        with _exclusive=True to also drop locally (legacy handoff silence).
         """
         with self._paused_lock:
             self._paused = paused
@@ -219,14 +220,15 @@ class MacMouseCapture(MouseCapture):
 
     def _update_cursor_visibility(self) -> None:
         """
-        Hide the cursor when either _paused or _exclusive is true; show it
-        otherwise. Called by both set_paused and set_exclusive so changes
-        to either flag stay consistent with what the user sees.
+        Hide the cursor only while _exclusive is true. _paused means "do not
+        emit deltas to the peer" -- it does not imply the cursor should hide.
+        The master uses paused-without-exclusive to keep the local cursor
+        visible while the cursor lives on the master's screen.
 
         CGDisplayHideCursor/ShowCursor are ref-counted by the OS; the
         _cursor_hidden flag guards against over-decrementing the count.
         """
-        should_hide = self._paused or self._exclusive
+        should_hide = self._exclusive
         if should_hide and not self._cursor_hidden:
             Quartz.CGDisplayHideCursor(0)
             self._cursor_hidden = True
@@ -405,15 +407,18 @@ class MacMouseCapture(MouseCapture):
                 currently_paused = capture._paused
                 currently_exclusive = capture._exclusive
 
-            # Two independent gates:
+            # Two orthogonal gates:
             # - emit_to_peer: forward via delta_callback. Gated by NOT paused.
             #   Exclusive mode keeps forwarding enabled (that's the point --
             #   the peer still needs the events). Paused suppresses emit so
-            #   handoff transitions don't dribble stale deltas.
+            #   handoff transitions don't dribble stale deltas, and so the
+            #   master can hold the cursor on its own screen without forwarding.
             # - drop_locally: return None to drop the event before any local
-            #   app sees it. Either flag triggers the drop.
+            #   app sees it. Only exclusive triggers the drop; paused alone
+            #   keeps motion landing on the local OS so the master cursor
+            #   moves normally while paused-but-visible.
             emit_to_peer = not currently_paused
-            drop_locally = currently_paused or currently_exclusive
+            drop_locally = currently_exclusive
 
             # MOTION events. Quartz delivers hardware-reported pixel deltas
             # via kCGMouseEventDeltaX / kCGMouseEventDeltaY -- raw device

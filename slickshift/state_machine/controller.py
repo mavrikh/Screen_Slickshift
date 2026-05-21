@@ -1,23 +1,29 @@
 """
 Slickshift mainline -- switch state machine.
 
-Exactly one machine owns input at any time. The state machine enforces this
-invariant using acknowledge-based transitions: the host does not enter RECEIVING
-state until the peer ACKs that it has entered CAPTURING state. On timeout, the
-host rolls back to IDLE. This prevents double-cursor chaos and cursor-trap failure
-modes.
+Single-user KVM model: the machine that clicks Start Mirroring is the session
+master and remains the input source for the entire session. The peer is the
+slave and never sources input. Edge crossings flip a "cursor side" flag in
+MainWindow without swapping master/slave roles.
+
+State semantics:
+    CAPTURING -- this machine is the master. Mouse/keyboard motion sourced here.
+    RECEIVING -- this machine is the slave. Injects events from the master.
+
+Edge crossings briefly use TRANSITIONING as an ack-pending window. The state
+returns to its pre-transition value on ack or on timeout (no role swap).
 
 State diagram:
 
     IDLE ──listen()──> LISTENING ──inbound connection──> HANDSHAKING
     IDLE ──connect()──> CONNECTING ──TCP connected──> HANDSHAKING
     HANDSHAKING ──hello received──> CONNECTED
-    CONNECTED ──start_mirroring()──> CAPTURING
-    CONNECTED ──mirror_start_received()──> RECEIVING
-    CAPTURING ──edge dwell fires──> TRANSITIONING
-    TRANSITIONING ──handoff_ack received──> RECEIVING
-    TRANSITIONING ──ack timeout / disconnect──> CAPTURING (rollback) / IDLE
-    RECEIVING ──handoff_request received──> CAPTURING (new sender, via handoff)
+    CONNECTED ──start_mirroring()──> CAPTURING    (this machine is master)
+    CONNECTED ──mirror_start_received()──> RECEIVING    (this machine is slave)
+    CAPTURING ──master_begin_handoff()──> TRANSITIONING
+    RECEIVING ──slave_begin_handoff()──> TRANSITIONING
+    TRANSITIONING ──handoff_ack_received()──> CAPTURING or RECEIVING (whichever entered TRANSITIONING)
+    TRANSITIONING ──handoff_ack_timeout()──> CAPTURING or RECEIVING (rollback to pre-transition state)
     CAPTURING ──stop_mirroring()──> CONNECTED
     RECEIVING ──mirror_stop_received()──> CONNECTED
     CAPTURING/RECEIVING ──remote drop──> RECONNECTING
@@ -54,15 +60,18 @@ class SwitchState(enum.Enum):
     # Ready for capture/injection to be wired in.
     CONNECTED = "connected"
 
-    # This machine is the active sender. Local cursor is visible and tracked.
-    # Mouse deltas are being captured and forwarded to the peer via the send queue.
+    # This machine is the session master. Sources all mouse/keyboard input.
+    # MouseCapture runs continuously here; exclusive mode toggles based on which
+    # side of the edge the logical cursor is currently on.
     CAPTURING = "capturing"
 
-    # This machine is the secondary receiver. Incoming deltas are used to mirror
-    # the sender's cursor motion.
+    # This machine is the session slave. Injects deltas/clicks/keys from the
+    # master. Never sources input. Never becomes master mid-session.
     RECEIVING = "receiving"
 
-    # Briefly indeterminate during handoff negotiation. ACK not yet received.
+    # Briefly indeterminate during edge-crossing negotiation. ACK not yet
+    # received. On ack or timeout, returns to whichever role state (CAPTURING
+    # or RECEIVING) entered TRANSITIONING.
     TRANSITIONING = "transitioning"
 
     # Attempting automatic reconnect after a remote-initiated drop.
@@ -76,6 +85,10 @@ class StateController:
     def __init__(self) -> None:
         self._state: SwitchState = SwitchState.IDLE
         self._on_state_change: Callable[[SwitchState], None] | None = None
+        # Tracks which role state entered TRANSITIONING so we can return to it
+        # on ack or timeout. CAPTURING for master-initiated cursor cross,
+        # RECEIVING for slave-initiated return.
+        self._pre_transition_state: SwitchState | None = None
 
     @property
     def state(self) -> SwitchState:
@@ -140,6 +153,7 @@ class StateController:
         reason is logged at INFO level for the log panel.
         """
         logger.info("Connection lost: %s", reason)
+        self._pre_transition_state = None
         self._transition(SwitchState.IDLE)
 
     def force_release(self) -> None:
@@ -150,6 +164,7 @@ class StateController:
         block on network I/O. The transport layer closes the socket separately.
         """
         logger.info("Force release triggered -- returning to IDLE")
+        self._pre_transition_state = None
         self._transition(SwitchState.IDLE)
 
     # ------------------------------------------------------------------
@@ -216,80 +231,70 @@ class StateController:
     # Edge-based handoff transitions
     # ------------------------------------------------------------------
 
-    def begin_handoff(self) -> None:
+    def master_begin_handoff(self) -> None:
         """
-        Edge dwell fired: this machine (currently CAPTURING) wants to hand off
-        control to the peer.
+        Master's edge dwell fired: cursor crossing from this machine to the slave.
 
-        Transitions CAPTURING -> TRANSITIONING. The caller is responsible for:
-          1. Sending {"type": "handoff_request", "perp": ..., "sender_edge": ...}
-          2. Starting the HANDOFF_ACK_TIMEOUT_S timer.
-          3. Pausing the capture loop (no more deltas while TRANSITIONING).
-
-        Only valid from CAPTURING state.
+        Transitions CAPTURING -> TRANSITIONING. Caller stamps the pre-transition
+        state so handoff_ack_received() / handoff_ack_timeout() can roll back.
+        Only valid from CAPTURING.
         """
         if self._state != SwitchState.CAPTURING:
             logger.warning(
-                "begin_handoff() called in state %s -- ignored", self._state.value
+                "master_begin_handoff() called in state %s -- ignored", self._state.value
             )
             return
+        self._pre_transition_state = SwitchState.CAPTURING
+        self._transition(SwitchState.TRANSITIONING)
+
+    def slave_begin_handoff(self) -> None:
+        """
+        Slave's edge dwell fired: cursor returning from this machine to the master.
+
+        Transitions RECEIVING -> TRANSITIONING. Caller stamps the pre-transition
+        state for rollback. Only valid from RECEIVING.
+        """
+        if self._state != SwitchState.RECEIVING:
+            logger.warning(
+                "slave_begin_handoff() called in state %s -- ignored", self._state.value
+            )
+            return
+        self._pre_transition_state = SwitchState.RECEIVING
         self._transition(SwitchState.TRANSITIONING)
 
     def handoff_ack_received(self) -> None:
         """
-        Peer sent handoff_ack confirming it has entered CAPTURING (new sender).
+        Peer acked the cursor crossing. Return to the pre-transition role state.
 
-        Transitions this machine TRANSITIONING -> RECEIVING. The original sender
-        now becomes the receiver. The caller cancels the ack-timeout timer.
-
-        Only valid from TRANSITIONING state.
+        Master rolls back to CAPTURING (and stays the master with cursor now on
+        slave's side). Slave rolls back to RECEIVING (cursor now on master's
+        side). Roles do not swap.
         """
         if self._state != SwitchState.TRANSITIONING:
             logger.warning(
                 "handoff_ack_received() called in state %s -- ignored", self._state.value
             )
             return
-        self._transition(SwitchState.RECEIVING)
+        target = self._pre_transition_state or SwitchState.CAPTURING
+        self._pre_transition_state = None
+        self._transition(target)
 
     def handoff_ack_timeout(self) -> None:
         """
         No handoff_ack arrived within HANDOFF_ACK_TIMEOUT_S.
 
-        Rolls back TRANSITIONING -> CAPTURING so the user can continue moving
-        the cursor locally. Logs at WARNING; this indicates a network hiccup or
-        a slow peer.
-
-        Only valid from TRANSITIONING state.
+        Same target as handoff_ack_received() -- we roll back to the role state
+        we came from. Cursor side is not flipped by the caller on timeout.
         """
         if self._state != SwitchState.TRANSITIONING:
             logger.warning(
                 "handoff_ack_timeout() called in state %s -- ignored", self._state.value
             )
             return
-        logger.warning("Handoff ACK timeout -- rolling back to CAPTURING")
-        self._transition(SwitchState.CAPTURING)
-
-    def handoff_request_received(self) -> None:
-        """
-        Peer (currently CAPTURING) sent a handoff_request to give control to us.
-
-        Transitions this machine RECEIVING -> CAPTURING (we become the new sender).
-        The caller is responsible for:
-          1. Warping the OS cursor to the entry-edge position derived from the
-             handoff_request payload.
-          2. Sending {"type": "handoff_ack"} back to the peer.
-          3. Starting the capture loop so deltas flow from this machine.
-          4. Setting the handoff cooldown so edge detection is suppressed.
-
-        Only valid from RECEIVING state.
-        """
-        if self._state != SwitchState.RECEIVING:
-            logger.warning(
-                "handoff_request_received() called in state %s -- ignored",
-                self._state.value,
-            )
-            return
-        self._transition(SwitchState.CAPTURING)
+        target = self._pre_transition_state or SwitchState.CAPTURING
+        self._pre_transition_state = None
+        logger.warning("Handoff ACK timeout -- rolling back to %s", target.value.upper())
+        self._transition(target)
 
     def heartbeat_timeout(self) -> None:
         """
