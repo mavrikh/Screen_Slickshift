@@ -583,7 +583,14 @@ class TcpTransport:
                 break
 
     def _handle_disconnect(self, reason: str) -> None:
-        """Common path for unexpected disconnects. Called from background threads."""
+        """Common path for unexpected disconnects. Called from background threads.
+
+        Closes both the peer socket and the listen socket. The listener cleanup
+        matters when this side is the inbound role: without it, the next Listen
+        click would hit EADDRINUSE because the old server socket is still bound
+        to the port in this process (SO_REUSEADDR only covers TIME_WAIT, not a
+        socket that is still alive).
+        """
         if not self._connected:
             return  # already handled
         self._connected = False
@@ -594,6 +601,12 @@ class TcpTransport:
             except OSError:
                 pass
             self._sock = None
+        if self._server_sock is not None:
+            try:
+                self._server_sock.close()
+            except OSError:
+                pass
+            self._server_sock = None
         self._signals.disconnected.emit(reason)
 
     # ------------------------------------------------------------------
