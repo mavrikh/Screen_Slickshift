@@ -2966,6 +2966,10 @@ class MainWindow(QMainWindow):
         # before Start Mirroring (including a value restored from QSettings)
         # would otherwise show checked without forwarding actually being on.
         self._keyboard_forwarding_active = self._mirror_panel.kbd_fwd_chk.isChecked()
+        self._append_log(
+            f"[KBD diag] Start Mirroring: forwarding_active={self._keyboard_forwarding_active} "
+            f"(checkbox isChecked={self._mirror_panel.kbd_fwd_chk.isChecked()})"
+        )
         if self._keyboard_forwarding_active:
             logger.info("Keyboard forwarding re-armed from checkbox on Start Mirroring")
         self._conn_panel.on_state_changed(SwitchState.CAPTURING, peer_info=self._peer_info)
@@ -3997,7 +4001,14 @@ class MainWindow(QMainWindow):
         the master types while the cursor is on the master must stay local.
         """
         if not self._is_master or self._cursor_on_local:
+            if pressed:
+                self._append_log(
+                    f"[KBD diag] key={key_name!r} blocked "
+                    f"(is_master={self._is_master}, cursor_on_local={self._cursor_on_local})"
+                )
             return
+        if pressed:
+            self._append_log(f"[KBD diag] key={key_name!r} forwarded to peer")
         logger.debug("Sending key: key=%r pressed=%s", key_name, pressed)
         self._transport.enqueue_message({"type": "key", "key": key_name, "pressed": pressed})
 
