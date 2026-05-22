@@ -40,7 +40,6 @@ from slickshift import config
 from slickshift.transport.topology import MonitorInfo
 
 _IS_MACOS: bool = platform.system() == "Darwin"
-_IS_WINDOWS: bool = platform.system() == "Windows"
 
 # Architecture invariant: pyautogui.FAILSAFE must always be False in Slickshift.
 # The cursor legitimately reaches corners in a KVM. The dead-man switch (heartbeat)
@@ -291,23 +290,15 @@ def make_mouse_capture(monitors: list[MonitorInfo]) -> MouseCapture:
     """
     Build the platform-appropriate MouseCapture for this OS.
 
-    Returns:
-      - MacMouseCapture on macOS (CGEventTap at kCGHIDEventTap scope; raw
-        HID deltas, true exclusive suppression, cursor hide).
-      - WinMouseHook on Windows (WH_MOUSE_LL low-level hook; re-warp trick
-        for continuous deltas past the edge clamp, suppression by returning
-        non-zero from the callback, cursor hide via ShowCursor).
-      - The polling MouseCapture on every other platform (Linux today).
+    Returns MacMouseCapture (CGEventTap-based, supports cursor suppression)
+    on macOS. Returns the polling MouseCapture on every other platform.
 
     Callers should always go through this factory rather than instantiating
     MouseCapture directly. That keeps the OS choice in one place; future
-    Linux (libinput, evdev) implementations slot in here without touching
-    any caller.
+    Windows (RawInput) and Linux (libinput) implementations slot in here
+    without touching any caller.
     """
     if _IS_MACOS:
         from slickshift.capture.mac_event_tap import MacMouseCapture
         return MacMouseCapture(monitors)
-    if _IS_WINDOWS:
-        from slickshift.capture.win_mouse_hook import WinMouseHook
-        return WinMouseHook(monitors)
     return MouseCapture(monitors)
