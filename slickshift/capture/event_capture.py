@@ -31,13 +31,16 @@ from pynput import mouse as _pynput_mouse
 
 logger = logging.getLogger(__name__)
 
-# On macOS, click and scroll capture has moved into MacMouseCapture's
-# CGEventTap (so it can also suppress events locally during exclusive mode).
-# pynput's mouse Listener becomes redundant -- EventCapture.start() returns
-# early on Darwin to avoid installing a second tap. The class still exists
-# for the cross-platform import surface and for Windows / Linux where pynput
-# remains the only sender-side click capture path.
+# On macOS and Windows, click and scroll capture has moved into the
+# platform-specific MouseCapture (MacMouseCapture's CGEventTap on Darwin,
+# WinMouseHook's WH_MOUSE_LL on Windows) so the events can also be
+# suppressed locally during exclusive mode. pynput's mouse Listener becomes
+# redundant on those platforms -- EventCapture.start() returns early to
+# avoid double-delivering clicks. The class still exists for the
+# cross-platform import surface and for Linux, where pynput remains the
+# only sender-side click capture path.
 _IS_MACOS = platform.system() == "Darwin"
+_IS_WINDOWS = platform.system() == "Windows"
 
 # Type aliases for the callbacks.
 # ClickCallback(button_name: str, pressed: bool) -- called on button down/up.
@@ -98,15 +101,22 @@ class EventCapture:
         check the _active gate before calling the user callbacks. The listener
         starts gated off (inactive) -- call set_active(True) to open the gate.
 
-        On macOS this is a no-op: click and scroll capture are owned by
-        MacMouseCapture's CGEventTap so the events can be suppressed locally
-        during exclusive mode. Installing a second pynput tap here would
+        On macOS and Windows this is a no-op: click and scroll capture are
+        owned by MacMouseCapture's CGEventTap and WinMouseHook's WH_MOUSE_LL
+        respectively, so the events can be suppressed locally during
+        exclusive mode. Installing a second pynput listener here would
         double-deliver clicks to the peer.
         """
         if _IS_MACOS:
             logger.info(
                 "EventCapture.start() no-op on macOS -- click/scroll handled "
                 "by MacMouseCapture's CGEventTap"
+            )
+            return
+        if _IS_WINDOWS:
+            logger.info(
+                "EventCapture.start() no-op on Windows -- click/scroll handled "
+                "by WinMouseHook's WH_MOUSE_LL"
             )
             return
 
