@@ -2961,6 +2961,13 @@ class MainWindow(QMainWindow):
         self._capture.set_exclusive(False)
         self._capture_paused = False  # edge detector active on master's cursor
         self._event_capture.set_active(True)
+        # Re-arm keyboard forwarding from the checkbox. _on_kbd_fwd_toggled
+        # only flips the active flag while in CAPTURING, so a box checked
+        # before Start Mirroring (including a value restored from QSettings)
+        # would otherwise show checked without forwarding actually being on.
+        self._keyboard_forwarding_active = self._mirror_panel.kbd_fwd_chk.isChecked()
+        if self._keyboard_forwarding_active:
+            logger.info("Keyboard forwarding re-armed from checkbox on Start Mirroring")
         self._conn_panel.on_state_changed(SwitchState.CAPTURING, peer_info=self._peer_info)
         self._mirror_panel.on_state_changed(SwitchState.CAPTURING)
         self._append_log(
