@@ -147,6 +147,11 @@ class _MainSignals(QObject):
     # hotkey (Ctrl+Alt+Shift+V) is detected.
     clipboard_push_pressed = pyqtSignal()
 
+    # Temporary diagnostic signal: emitted from the pynput listener thread so the
+    # main thread can append a line to the in-app log describing which branch a
+    # keypress took inside _kb_on_press. Remove once the gate is identified.
+    kbd_diag = pyqtSignal(str)
+
 
 class _Canvas(QFrame):
     """
@@ -2648,6 +2653,7 @@ class MainWindow(QMainWindow):
 
         # Wire clipboard-push hotkey signal (B3).
         self._main_signals.clipboard_push_pressed.connect(self._on_clipboard_push)
+        self._main_signals.kbd_diag.connect(self._append_log)
 
         # Start the pynput mouse listener. Runs for the full window lifetime.
         self._event_capture.start()
@@ -4491,6 +4497,9 @@ class MainWindow(QMainWindow):
         logger.debug("KB listener: press %r", key)
         if self._kb_combo_active():
             logger.info("Force-release combo detected on keyboard listener thread")
+            self._main_signals.kbd_diag.emit(
+                f"[KBD diag-thread] key={key!r} blocked: force-release combo active"
+            )
             self._main_signals.force_release_pressed.emit()
             return
         # Browser hotkeys (B1/B3): Ctrl+Alt+Shift+{L, ], [, V}. Checked after
@@ -4499,6 +4508,9 @@ class MainWindow(QMainWindow):
         browser_action = self._kb_browser_hotkey_action(key)
         if browser_action is not None:
             logger.info("Browser hotkey detected: %s", browser_action)
+            self._main_signals.kbd_diag.emit(
+                f"[KBD diag-thread] key={key!r} consumed by browser hotkey: {browser_action}"
+            )
             # B3 clipboard-push gets its own signal so its handler can be kept
             # separate from the B1 tab-management handler.
             if browser_action == "clipboard_push":
@@ -4506,10 +4518,21 @@ class MainWindow(QMainWindow):
             else:
                 self._main_signals.browser_hotkey_pressed.emit(browser_action)
             return
-        if self._keyboard_forwarding_active:
-            key_name = self._translate_pynput_key(key)
-            if key_name is not None:
-                self._main_signals.key_event_fired.emit(key_name, True)
+        if not self._keyboard_forwarding_active:
+            self._main_signals.kbd_diag.emit(
+                f"[KBD diag-thread] key={key!r} dropped: forwarding_active=False"
+            )
+            return
+        key_name = self._translate_pynput_key(key)
+        if key_name is None:
+            self._main_signals.kbd_diag.emit(
+                f"[KBD diag-thread] key={key!r} dropped: translate returned None"
+            )
+            return
+        self._main_signals.kbd_diag.emit(
+            f"[KBD diag-thread] key={key!r} -> {key_name!r} emitting key_event_fired"
+        )
+        self._main_signals.key_event_fired.emit(key_name, True)
 
     def _kb_on_release(
         self,
