@@ -4301,9 +4301,17 @@ class MainWindow(QMainWindow):
         transitioning = (state == SwitchState.TRANSITIONING)
         reconnecting = (state == SwitchState.RECONNECTING)
 
-        if state != SwitchState.CAPTURING and self._keyboard_forwarding_active:
+        # Keyboard forwarding belongs to the master role state, which spans
+        # CAPTURING and the brief TRANSITIONING window during an edge cross.
+        # Only clear forwarding when the state actually leaves the master role
+        # (Stop Mirroring, disconnect, force-release, reconnect failure, etc.).
+        # Without the TRANSITIONING exemption every edge cross silently killed
+        # keyboard forwarding because CAPTURING -> TRANSITIONING tripped this
+        # guard and nothing re-armed the flag on the way back to CAPTURING.
+        _master_active = (SwitchState.CAPTURING, SwitchState.TRANSITIONING)
+        if state not in _master_active and self._keyboard_forwarding_active:
             self._keyboard_forwarding_active = False
-            logger.info("Keyboard forwarding deactivated (state left CAPTURING)")
+            logger.info("Keyboard forwarding deactivated (state left master role)")
 
         self._status_bar.update_status(
             mode, x, y, role=role,
